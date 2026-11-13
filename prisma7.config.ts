@@ -10,5 +10,11 @@ export default defineConfig({
   },
   datasource: {
     url: process.env["DATABASE_URL"],
+    // `prisma migrate dev` replays migrations into a shadow database to compute
+    // each migration. It must never fall back to the real database, so it is
+    // only set when SHADOW_DATABASE_URL is provided (see ENVIRONMENT.md).
+    // Locally, `pnpm db:local` (Prisma Postgres dev) prints both URLs.
+    // With docker compose, `aimis_shadow` is created by deploy/initdb.
+    ...(process.env["SHADOW_DATABASE_URL"] ? { shadowDatabaseUrl: process.env["SHADOW_DATABASE_URL"] } : {}),
   },
 });

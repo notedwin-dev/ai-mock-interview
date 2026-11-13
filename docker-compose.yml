@@ -8,6 +8,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-aimis}
     volumes:
       - db-data:/var/lib/postgresql/data
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
     ports:
       # Publishes the container's Postgres to the host so `pnpm dev` outside
       # Docker can reach it via the DATABASE_URL in .env. Drop in production.
