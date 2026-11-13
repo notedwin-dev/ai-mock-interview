@@ -73,6 +73,18 @@ pnpm verify               # lint + typecheck + test (minimum gate)
 Integration DB policy: use a **dedicated** database (`aimis_test`), never the dev or
 deployed database; integration tests must clean up what they create.
 
+### Integration database options
+
+| Option | Isolation | Notes |
+| --- | --- | --- |
+| Docker compose (`docker compose up -d db`) | full | Preferred: create/use the `aimis_test` database on the compose Postgres |
+| `pnpm prisma dev --name aimis-test` (Prisma Postgres dev) | per-server | Second named dev server has its own storage; run `pnpm prisma migrate deploy` against it once. Note: within ONE dev server, `CREATE DATABASE` does not isolate (PGlite shares storage), hence a separate server for tests |
+| The `default` dev server | none | Dev only — do not use for `TEST_DATABASE_URL` |
+
+Known limitation: the PGlite-backed `prisma dev` server is single-connection, so
+tests that require real concurrency (evaluation worker `FOR UPDATE SKIP LOCKED`
+claiming, M3) must run against the Docker Postgres.
+
 ## Evidence discipline
 
 - Report tests executed **and not executed** in every completion report (AGENTS.md §8).

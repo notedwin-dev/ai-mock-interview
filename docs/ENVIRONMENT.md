@@ -14,6 +14,8 @@ missing.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | ✅ server | PostgreSQL connection string consumed by `prisma7.config.ts` and the pg driver adapter (`postgresql://…`) |
+| `SHADOW_DATABASE_URL` | `prisma migrate dev` only | Disposable shadow database replayed by migrations (Prisma 7 requires it in `prisma7.config.ts`); **never point it at the real database**. Compose creates `aimis_shadow` via `deploy/initdb`; `pnpm db:local` prints its own |
+| `TEST_DATABASE_URL` | integration tests only | Dedicated database for `*.db.test.ts` suites (see TESTING.md); unset ⇒ those tests skip and `pnpm test` stays hermetic |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | compose only | Docker Compose defaults (`aimis`/`aimis`/`aimis`) |
 | `BUILD_STANDALONE` | build only | Set to `1` in the Dockerfile builder stage; enables `output: "standalone"` (breaks local `next start`, so it is opt-in) |
 
