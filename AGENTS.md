@@ -94,7 +94,28 @@ Do not rebuild existing functionality without first inspecting it.
 
 Refer to Notion for complete implementation requirements.
 
-## 7. Working Rules
+## 7. Documentation Map
+
+Local engineering docs (Notion stays authoritative for requirements/decisions):
+
+- `docs/README.md` — documentation index with authoritative Notion page IDs.
+- `docs/ARCHITECTURE.md` — component→module mapping, boundaries, AI integration.
+- `docs/CONVENTIONS.md` — naming, git/commit format, Notion sync rules.
+- `docs/DEVELOPMENT.md` — scripts, task lifecycle, definition of done, review gates.
+- `docs/TESTING.md` — what must be tested and how verification evidence is reported.
+- `docs/ENVIRONMENT.md` — environment variables and secret-handling rules.
+- `docs/REQUIREMENTS-TRACEABILITY.md` — FR/NFR → module → task dependency map + open decisions.
+- `docs/BACKLOG.md` — milestone plan mapped to the Notion Task Tracker.
+- `docs/RISKS.md` — risk and unresolved-decision register (incl. proposed policy values).
+- `docs/REVIEW.md` — review checklists; `docs/AGENT-ROLES.md` — specialised roles.
+- `docs/adr/` — repo ADRs (`TEMPLATE.md` + 0001–0007); `docs/templates/` — task template.
+- `.opencode/agent/aimis-*.md` — architect/implementer/reviewer/tester agent definitions.
+
+Minimum verification gate for any change: `pnpm verify` (lint + typecheck + test).
+
+Refer to Notion for complete implementation requirements.
+
+## 8. Working Rules
 
 - Do not modify approved requirements without explicit authorization.
 - Do not create duplicate Notion pages or duplicate architecture diagrams.
@@ -104,7 +125,7 @@ Refer to Notion for complete implementation requirements.
 - Report tests that were not run.
 - Keep implementation progress and outstanding issues documented.
 
-## 8. Completion Report
+## 9. Completion Report
 
 At the end of each task, report:
 

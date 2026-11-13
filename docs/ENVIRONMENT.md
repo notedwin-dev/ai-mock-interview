@@ -1,0 +1,52 @@
+# AIMIS Environment Variables
+
+Rules (NFR-DEP-003/004): all configuration enters via environment; `.env` is local-only
+and never committed; `.env.example` is the documented template; dev and production
+configs are separated; **secrets never appear in client bundles, logs or error
+responses**.
+
+Required variables must be added to the zod schema in `src/lib/env.ts` and to
+`.env.example` in the same change — the app fails fast at boot when something is
+missing.
+
+## Current (scaffold)
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | ✅ server | PostgreSQL connection string consumed by `prisma7.config.ts` and the pg driver adapter (`postgresql://…`) |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | compose only | Docker Compose defaults (`aimis`/`aimis`/`aimis`) |
+| `BUILD_STANDALONE` | build only | Set to `1` in the Dockerfile builder stage; enables `output: "standalone"` (breaks local `next start`, so it is opt-in) |
+
+## Planned (add with their milestone — do not enable early)
+
+| Variable | Planned | Purpose |
+| --- | --- | --- |
+| `AUTH_SECRET` | M1 auth | Auth.js v5 signing/encryption secret (`npx auth secret` or `openssl rand -base64 32`) |
+| `AUTH_TRUST_HOST` | M1 auth | Set when Auth.js runs behind the NGINX/container proxy |
+| `PROVIDER_ENCRYPTION_MASTER_KEY` | M1 provider config | Master key (32 bytes, base64) for AES-256-GCM encryption of user provider API keys at rest — **stored outside the database**, rotated via key versioning (ADR-0005) |
+| `PROVIDER_ENCRYPTION_KEY_VERSION` | M1 provider config | Active key version written to `encryption_key_version` |
+| `EVALUATION_WORKER_ENABLED` | M3 eval worker | `1` enables the in-process worker; set `0` on replicas that must not run the worker |
+| `EVALUATION_WORKER_POLL_MS` | M3 eval worker | Poll interval for due jobs |
+| `EVALUATION_MAX_ATTEMPTS` | M3 eval worker | Bounded retry cap before a job is marked failed |
+| `LOG_LEVEL` | M1 logging | Minimal, content-free operational logging |
+| `APP_URL` | M2 interview | Absolute app origin for absolute URLs (downloads, OAuth-free callbacks) |
+
+## Secret handling
+
+- Provider API keys are **user-supplied** (BYOK). They are encrypted at rest with the
+  master key, write-only from the UI (never returned after save), never logged, never
+  sent to the browser, and only decrypted in server memory for an outgoing call.
+- The master key must never be committed, echoed into logs, or placed in
+  client-accessible config (no `NEXT_PUBLIC_` secret, ever).
+- Rotating the master key: introduce the new key with a new `PROVIDER_ENCRYPTION_KEY_VERSION`,
+  re-encrypt rows lazily or by a migration job, retire the old version only when no row
+  references it.
+- `.env` files on a developer machine are local secrets; report accidental commits
+  immediately and treat the values as compromised.
+
+## Windows / container notes
+
+- `DATABASE_URL` differs by environment: host dev uses `localhost:5432` (compose db or
+  `pnpm db:local`), the app container uses the `db` service hostname.
+- Standalone output is produced **inside Docker/Linux**, not from a Windows `.next`
+  (junction-point issue documented in the README).
