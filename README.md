@@ -72,11 +72,20 @@ pnpm dev
 | --- | --- |
 | `pnpm dev` / `build` / `start` | Next.js |
 | `pnpm lint` / `typecheck` | ESLint / `tsc --noEmit` |
+| `pnpm test` / `test:watch` | Vitest (hermetic unit tests; see `docs/TESTING.md`) |
+| `pnpm verify` | lint + typecheck + test — minimum gate for every change |
 | `pnpm db:generate` | Regenerate the Prisma client (re-run after every schema change) |
 | `pnpm db:migrate` | Create + apply a migration (dev) |
 | `pnpm db:deploy` | Apply existing migrations (production/CI) |
 | `pnpm db:studio` | Prisma Studio |
 | `pnpm db:local` | Local Postgres without Docker |
+
+## Documentation
+
+Engineering docs live in [`docs/`](docs/README.md) — architecture, conventions,
+development workflow, testing strategy, environment variables, requirements
+traceability, backlog, risks, review checklists, agent roles and ADRs. Notion remains
+the source of truth for requirements and decisions; the docs map them onto the code.
 
 ## Layout
 
