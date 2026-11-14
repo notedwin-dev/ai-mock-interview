@@ -16,15 +16,16 @@ missing.
 | `DATABASE_URL` | ✅ server | PostgreSQL connection string consumed by `prisma7.config.ts` and the pg driver adapter (`postgresql://…`) |
 | `SHADOW_DATABASE_URL` | `prisma migrate dev` only | Disposable shadow database replayed by migrations (Prisma 7 requires it in `prisma7.config.ts`); **never point it at the real database**. Compose creates `aimis_shadow` via `deploy/initdb`; `pnpm db:local` prints its own |
 | `TEST_DATABASE_URL` | integration tests only | Dedicated database for `*.db.test.ts` suites (see TESTING.md); unset ⇒ those tests skip and `pnpm test` stays hermetic |
+| `AUTH_SECRET` | ✅ server (auth) | Auth.js v5 JWT signing key. Generate: `openssl rand -base64 32` (or `npx auth secret`). Validated lazily by `src/lib/auth/env.ts` (min 16 chars) on the first auth use — never at build time |
+| `AUTH_TRUST_HOST` | production (auth) | Set to `"true"` when self-hosting behind the reverse proxy (compose nginx) so Auth.js may build callback URLs from the Host header; `next dev` trusts localhost by default |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | compose only | Docker Compose defaults (`aimis`/`aimis`/`aimis`) |
 | `BUILD_STANDALONE` | build only | Set to `1` in the Dockerfile builder stage; enables `output: "standalone"` (breaks local `next start`, so it is opt-in) |
+| `BUILD_DATABASE_URL` | Docker build only | Placeholder `DATABASE_URL` for the builder stage (route modules are evaluated at build; nothing connects). Default in the Dockerfile; override only if `next build` needs a different one |
 
 ## Planned (add with their milestone — do not enable early)
 
 | Variable | Planned | Purpose |
 | --- | --- | --- |
-| `AUTH_SECRET` | M1 auth | Auth.js v5 signing/encryption secret (`npx auth secret` or `openssl rand -base64 32`) |
-| `AUTH_TRUST_HOST` | M1 auth | Set when Auth.js runs behind the NGINX/container proxy |
 | `PROVIDER_ENCRYPTION_MASTER_KEY` | M1 provider config | Master key (32 bytes, base64) for AES-256-GCM encryption of user provider API keys at rest — **stored outside the database**, rotated via key versioning (ADR-0005) |
 | `PROVIDER_ENCRYPTION_KEY_VERSION` | M1 provider config | Active key version written to `encryption_key_version` |
 | `EVALUATION_WORKER_ENABLED` | M3 eval worker | `1` enables the in-process worker; set `0` on replicas that must not run the worker |

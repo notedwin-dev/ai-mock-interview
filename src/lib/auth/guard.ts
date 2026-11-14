@@ -1,0 +1,38 @@
+import { redirect } from "next/navigation";
+import type { Session } from "next-auth";
+import type { UserAccount } from "@/generated/prisma/client";
+import { db } from "@/lib/db";
+import { auth } from "./index";
+
+export interface GuardedAccount {
+  session: Session;
+  account: UserAccount;
+}
+
+/**
+ * Resolves the caller's account, re-validating it against the database on
+ * every use: the JWT proves identity, but account_status and account_role are
+ * authoritative in the database (FR-AUTH-004/005). A stale or forged token, a
+ * pending_deletion/deactivated account, or a role change must not grant
+ * access.
+ *
+ * - No session / locked-out account → redirect to /signin.
+ * - Role mismatch (when `options.role` is given) → redirect to /.
+ */
+export async function requireAccount(
+  options: { role?: string } = {},
+): Promise<GuardedAccount> {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/signin");
+
+  const account = await db.userAccount.findUnique({
+    where: { userId: session.user.id },
+  });
+  if (!account || account.accountStatus !== "active") redirect("/signin");
+
+  if (options.role !== undefined && account.accountRole !== options.role) {
+    redirect("/");
+  }
+
+  return { session, account };
+}

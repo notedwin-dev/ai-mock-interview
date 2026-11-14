@@ -11,6 +11,13 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 FROM base AS builder
 WORKDIR /app
 ENV BUILD_STANDALONE=1
+# `next build` evaluates route modules, and the database client module parses
+# DATABASE_URL at import time. No connection is made during the build, so a
+# syntactically valid placeholder is enough — never a real credential. The
+# runner stage receives the real DATABASE_URL from the environment
+# (docker-compose app service).
+ARG BUILD_DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
+ENV DATABASE_URL=$BUILD_DATABASE_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm prisma generate && pnpm exec next build
