@@ -14,7 +14,7 @@ missing.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | ✅ server | PostgreSQL connection string consumed by `prisma7.config.ts` and the pg driver adapter (`postgresql://…`) |
-| `SHADOW_DATABASE_URL` | `prisma migrate dev` only | Disposable shadow database replayed by migrations (Prisma 7 requires it in `prisma7.config.ts`); **never point it at the real database**. Compose creates `aimis_shadow` via `deploy/initdb`; `pnpm db:local` prints its own |
+| `SHADOW_DATABASE_URL` | `prisma migrate dev` only | Disposable shadow database replayed by migrations (Prisma 7 requires it in `prisma7.config.ts`); **never point it at the real database**. Compose creates `aimis_shadow` via `deploy/initdb`; `pnpm db:local` prints its own. Native Postgres (owner-managed dev DB): create it yourself — **Prisma never creates a configured shadow database**, it only requires it to exist |
 | `TEST_DATABASE_URL` | integration tests only | Dedicated database for `*.db.test.ts` suites (see TESTING.md); unset ⇒ those tests skip and `pnpm test` stays hermetic |
 | `AUTH_SECRET` | ✅ server (auth) | Auth.js v5 JWT signing key. Generate: `openssl rand -base64 32` (or `npx auth secret`). Validated lazily by `src/lib/auth/env.ts` (min 16 chars) on the first auth use — never at build time |
 | `AUTH_TRUST_HOST` | production (auth) | Set to `"true"` when self-hosting behind the reverse proxy (compose nginx) so Auth.js may build callback URLs from the Host header; `next dev` trusts localhost by default |
