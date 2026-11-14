@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import type { Session } from "next-auth";
 import type { UserAccount } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
@@ -18,10 +19,19 @@ export interface GuardedAccount {
  *
  * - No session / locked-out account → redirect to /signin.
  * - Role mismatch (when `options.role` is given) → redirect to /.
+ *
+ * The `connection()` call makes the whole subtree per-request dynamic
+ * (docs: Cache Components → random values and request-time data): the
+ * speculative prerender pass stops here, so Auth.js's session machinery
+ * (which calls crypto.getRandomValues()) is never evaluated while
+ * prerendering the static shell. Callers must still place
+ * requireAccount() inside a <Suspense> boundary.
  */
 export async function requireAccount(
   options: { role?: string } = {},
 ): Promise<GuardedAccount> {
+  await connection();
+
   const session = await auth();
   if (!session?.user?.id) redirect("/signin");
 
