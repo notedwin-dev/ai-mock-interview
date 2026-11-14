@@ -21,12 +21,14 @@ missing.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | compose only | Docker Compose defaults (`aimis`/`aimis`/`aimis`) |
 | `BUILD_STANDALONE` | build only | Set to `1` in the Dockerfile builder stage; enables `output: "standalone"` (breaks local `next start`, so it is opt-in) |
 | `BUILD_DATABASE_URL` | Docker build only | Placeholder `DATABASE_URL` for the builder stage (route modules are evaluated at build; nothing connects). Default in the Dockerfile; override only if `next build` needs a different one |
+| `PROVIDER_ENCRYPTION_MASTER_KEY` | ✅ server (provider config) | Master key (32 bytes, base64) for AES-256-GCM encryption of user provider API keys at rest — **stored outside the database**. Validated lazily by `src/lib/providers/env.ts` on first provider-crypto use — never at build time. Generate: `openssl rand -base64 32` |
+| `PROVIDER_ENCRYPTION_KEY_VERSION` | ✅ server (provider config) | Active key version written to `user_provider_configuration.encryption_key_version` on save and prefixed into the envelope (`v<version>:…`, ADR-0005) |
+| `PROVIDER_ENCRYPTION_LEGACY_KEYS` | server (provider config, rotation only) | Comma-separated retired keys as `<version>=<base64 32-byte key>` pairs, kept decryptable during rotation until no stored row references their version. Omitting a version that rows still reference **fails decryption closed** (repo extension of ADR-0005, flagged for owner review) |
 
 ## Planned (add with their milestone — do not enable early)
 
 | Variable | Planned | Purpose |
 | --- | --- | --- |
-| `PROVIDER_ENCRYPTION_MASTER_KEY` | M1 provider config | Master key (32 bytes, base64) for AES-256-GCM encryption of user provider API keys at rest — **stored outside the database**, rotated via key versioning (ADR-0005) |
 | `PROVIDER_ENCRYPTION_KEY_VERSION` | M1 provider config | Active key version written to `encryption_key_version` |
 | `EVALUATION_WORKER_ENABLED` | M3 eval worker | `1` enables the in-process worker; set `0` on replicas that must not run the worker |
 | `EVALUATION_WORKER_POLL_MS` | M3 eval worker | Poll interval for due jobs |

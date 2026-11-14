@@ -37,3 +37,21 @@ rotation supported via `encryption_key_version`.
 - Accepted: master-key custody is operational — losing it loses provider configs
   (recoverable by users re-entering keys; interview data is unaffected).
 - Follow-up: TT-10 implements with round-trip and tamper tests (auth-tag failure).
+
+## Implementation notes (TT-20)
+
+- Implemented in `src/lib/providers/{env,encryption}.ts`: envelope exactly as
+  specified; failure modes are typed (`ProviderCryptoError`: malformed_envelope /
+  unknown_key_version / decrypt_failed) and fail closed; error messages carry no
+  plaintext or key material. Master key parsed lazily on first provider-crypto
+  use so builds and unit tests never require the secret.
+- Repo extension beyond the ADR text (flagged for owner review): retired master
+  keys stay decryptable via `PROVIDER_ENCRYPTION_LEGACY_KEYS`
+  (`<version>=<base64 key>` pairs, comma-separated) so rotation does not require
+  re-encrypting every row before the old key can leave the environment. An
+  envelope whose key version is absent from the configured keys fails closed.
+- Base-URL validation for preset/custom connections ships alongside in
+  `src/lib/providers/ssrf.ts` — the pure synchronous layer (protocol allow-list,
+  blocked hostnames, loopback/private/link-local/CGNAT/metadata literals,
+  WHATWG-normalised IPv6/IPv4 shorthand forms). DNS rebinding and redirect
+  pinning are re-checked at outbound-call time by the adapter transport.
