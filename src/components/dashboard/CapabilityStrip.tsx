@@ -198,30 +198,34 @@ export function CapabilityStrip({
             <li key={node.capability}>
               <Link
                 href="/dashboard/configuration"
-                className="flex items-center gap-3 rounded-xl px-1.5 py-1.5 outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400"
+                className="flex flex-col gap-1.5 rounded-xl px-1.5 py-1.5 outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400 lg:flex-row lg:items-center lg:gap-3"
               >
-                <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
-                  <node.Icon className="h-4 w-4" aria-hidden />
-                  <span
-                    className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${state.dot}`}
-                  />
-                </span>
-                <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                  <span className="text-sm font-medium text-ink">
-                    {node.label}
+                <span className="flex min-w-0 flex-1 items-center gap-3">
+                  <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
+                    <node.Icon className="h-4 w-4" aria-hidden />
+                    <span
+                      className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${state.dot}`}
+                    />
                   </span>
-                  <span className="mt-0.5 truncate text-xs text-ink-muted">
-                    {node.hint}
+                  <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                    <span className="text-sm font-medium text-ink">
+                      {node.label}
+                    </span>
+                    <span className="mt-0.5 truncate text-xs text-ink-muted">
+                      {node.hint}
+                    </span>
                   </span>
                 </span>
                 <span
-                  className={`hidden shrink-0 items-center gap-1.5 text-xs font-medium sm:flex ${state.tone}`}
+                  className={`flex shrink-0 items-center gap-1.5 pl-12 text-xs font-medium lg:pl-0 ${state.tone}`}
                 >
                   <span
                     aria-hidden
                     className={`h-1.5 w-1.5 rounded-full ${state.dot}`}
                   />
-                  <span className="max-w-[9rem] truncate">{state.word}</span>
+                  <span className="min-w-0 max-w-full truncate lg:max-w-[9rem]">
+                    {state.word}
+                  </span>
                 </span>
               </Link>
             </li>
