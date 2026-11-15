@@ -261,3 +261,35 @@ is mandatory and the manual setup form is retired as the creation path.
 3. Agent creation flow, confirmation screen, waiting room, overlay room.
 4. Scheduling + invitation links (schema migration + server-side authorization).
 5. Evaluation job/worker/scorer (M3 slices 12–13) + report UI + history route.
+
+### 10.5 Configuration page restructure (2026-11-16 owner mockup, implemented)
+
+The owner supplied the definitive `/dashboard/configuration` design; the page
+now mirrors the approved runtime architecture (ADR-006) with two mutually
+exclusive interview runtime options. Which option runs an interview is chosen
+at interview creation, not on this page.
+
+- **Option 1 — Pre-configured Realtime Agents** (badge "Native integrations"):
+  provider cards Gemini Live (`google` preset) and OpenAI Realtime (`openai`
+  preset) with monogram tiles; explainer: users don't configure separate ASR,
+  LLM and TTS models in this mode. One row per provider: without a stored row
+  the card creates one (`realtime` capability only); with one, it PATCHes the
+  `realtime` capability onto the stored row (credential untouched). Configured
+  rows get the same row-card controls as Option 2. Realtime model IDs are
+  discovery/manual entry only — the owner-maintained catalogue lists no
+  realtime agent model IDs, so none are invented. Probes always report
+  `skipped` (status-neutral) until the realtime runtime slice lands.
+- **Option 2 — Custom Configuration** (badge "Composable pipeline"):
+  collapsible sections ASR/STT, LLM, TTS and the independent scorer with the
+  mockup subtitles ("Speech recognition provider and model", "Interview
+  conversation, question generation and follow-ups", "Interviewer speech
+  synthesis provider and model"); footer: users independently select providers
+  and models for each capability. The scorer stays a fourth section under
+  Option 2 per FR-PROVIDER-003 (the mockup crop does not show it; the approved
+  requirement does).
+- The capability readiness strip (ASR/LLM/TTS/Scorer, honest per-capability
+  states) stays at the top of the page above both option cards.
+- Registry: `CAPABILITIES` gained `realtime`; the `openai` and `google` presets
+  declare it (Gemini Live / OpenAI Realtime on their documented base URLs).
+  `probe.ts` guards realtime per capability so native realtime rows never hit
+  the OpenAI-compatible probe wires.

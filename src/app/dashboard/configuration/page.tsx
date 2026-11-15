@@ -8,15 +8,14 @@ import {
 import { ProviderConfigurator } from "@/components/dashboard/ProviderConfigurator";
 
 /**
- * AI configuration page (FR-PROVIDER-001..009; ADR-028/029/030; owner
- * directive 2026-11-16): the dedicated, capability-first configuration
- * experience. Four independent sections — ASR/STT, interviewer LLM, TTS and
- * the evaluation scorer — each with pre-configured provider chips and its
- * own Custom OpenAI-compatible option (own Base URL, key and exact
- * model_id). Nothing is inherited or substituted across capabilities, so
- * the scorer is configured separately from the interview LLM. The server
- * page only loads credential-free summaries (write-only keys, ADR-0005);
- * every mutation and probe goes through /api/v1/providers/configurations.
+ * AI configuration page (FR-PROVIDER-001..009; ADR-028/029/030; owner mockup
+ * + directive 2026-11-16): the dedicated configuration experience mirroring
+ * the approved runtime architecture (ADR-006) — Option 1, pre-configured
+ * realtime agents (native integrations) and Option 2, the composable custom
+ * pipeline (ASR/STT, LLM, TTS and the independent scorer). Keys are stored
+ * encrypted and never shown again (write-only, ADR-0005); the server page
+ * only loads credential-free summaries, and every mutation and probe goes
+ * through /api/v1/providers/configurations.
  *
  * The dynamic account + data access sits inside a Suspense boundary (this
  * Next.js version streams dynamic routes; same pattern as the dashboard).
@@ -55,11 +54,11 @@ export default function ConfigurationPage() {
         AI configuration
       </h1>
       <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted">
-        Four independent capabilities, each configured on its own: speech
-        recognition (ASR), the interviewer (LLM), voice output (TTS) and the
-        evaluation scorer. Each one gets its own provider, API key and exact
-        model — nothing is shared or substituted between capabilities, and keys
-        are stored encrypted, never shown again after saving.
+        Choose how your interviews run: a pre-configured realtime agent that
+        handles voice, understanding and speech natively — or a custom pipeline
+        where you pick the provider, API key and exact model for each
+        capability yourself. Keys are stored encrypted and never shown again
+        after saving.
       </p>
       <div className="mt-6">
         <Suspense fallback={<p className="text-sm text-ink-muted">Loading…</p>}>

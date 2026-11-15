@@ -53,4 +53,14 @@ describe("provider adapter registry", () => {
       expect(preset?.capabilities).toEqual(["llm", "scorer"]);
     }
   });
+
+  it("declares the realtime capability only on the native realtime agent presets (register Option A)", () => {
+    expect(CAPABILITIES).toContain("realtime");
+    expect(getPresetAdapter("openai")?.capabilities).toContain("realtime");
+    expect(getPresetAdapter("google")?.capabilities).toContain("realtime");
+    for (const preset of PRESET_ADAPTERS) {
+      if (preset.providerName === "openai" || preset.providerName === "google") continue;
+      expect(preset.capabilities, preset.providerName).not.toContain("realtime");
+    }
+  });
 });
