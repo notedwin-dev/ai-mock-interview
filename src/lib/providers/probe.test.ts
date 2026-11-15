@@ -302,6 +302,93 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.capabilities[0]).toMatchObject({ capability: "asr", status: "validated" });
     expect(result.credentialStatus).toBe("valid");
   });
+
+  it("probes the fish-audio preset against its native TTS endpoint with the exact configured model header", async () => {
+    const seen: Array<{ method: string; url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        method: init?.method ?? "GET",
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1\/tts$/.test(url)) {
+        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 }); // audio bytes
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "fish-audio",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
+      }),
+      captureFetch,
+    );
+
+    // Exactly one network call: the native TTS ping. No OpenAI-shaped
+    // model-list request (fish-audio has none — `GET /model` lists voices).
+    expect(seen).toHaveLength(1);
+    const ping = seen[0]!;
+    expect(ping.url).toBe("https://api.fish.audio/v1/tts");
+    expect(ping.method).toBe("POST");
+    expect(ping.headers.get("authorization")).toBe("Bearer sk-plaintext-secret");
+    // The exact configured model id must travel in the `model` header: Fish
+    // serves the PAID s2.1-pro when the header is omitted.
+    expect(ping.headers.get("model")).toBe("s2.1-pro-free");
+    expect(JSON.parse(ping.body!)).toEqual({ text: "ping", format: "mp3" });
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
+      // Without a model list the ping cannot independently certify the exact
+      // model beyond the header itself, so the claim stays null, not true.
+      modelsDiscovered: null,
+      selectedModelAccepted: null,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("classifies a payment-required rejection (402) in the quota family, not as an auth failure", async () => {
+    const result = await runProbe(configRow(), jsonFetch([
+      { match: /\/models$/, status: 200, body: { data: [{ id: "test-model" }] } },
+      { match: /\/chat\/completions$/, status: 402, body: { error: { message: "Insufficient credit" } } },
+    ]));
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "rate_limited",
+      endpointReachable: true,
+      // The key authenticated; the account merely lacks credit/quota.
+      credentialValid: true,
+    });
+    expect(result.capabilities[0]!.detail).toMatch(/credit|payment/i);
+    expect(result.credentialStatus).toBe("invalid");
+  });
+
+  it("classifies a fish-audio credit rejection the same way when its native TTS endpoint returns 402", async () => {
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "fish-audio",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
+      }),
+      jsonFetch([{ match: /\/v1\/tts$/, status: 402, body: { message: "No credit" } }]),
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "failed",
+      errorCode: "rate_limited",
+      endpointReachable: true,
+      credentialValid: true,
+    });
+    expect(result.capabilities[0]!.detail).toMatch(/credit|payment/i);
+    expect(result.credentialStatus).toBe("invalid");
+  });
 });
 
 describe("discoverProviderModels (FR-PROVIDER-009)", () => {

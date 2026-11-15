@@ -14,12 +14,14 @@ import { evaluateBaseUrl } from "./ssrf";
  * provider/server failures; a probe failure never falls back to another
  * model or provider.
  *
- * M1 skeleton scope: probes speak the OpenAI-compatible wire shape
- * (`GET /models`, `POST /chat/completions`, `POST /audio/speech`,
- * `POST /audio/transcriptions`) — the `openai` preset and every custom row.
- * Other presets need their M2 adapters and are reported as skipped, which
- * does not validate the configuration. DNS-rebinding/redirect pinning at
- * connect time lands with the M2 adapter transport (see ssrf.ts notes).
+ * Probe wire shapes: the `openai` preset and every custom row speak the
+ * OpenAI-compatible wire (`GET /models`, `POST /chat/completions`,
+ * `POST /audio/speech`, `POST /audio/transcriptions`); the `fish-audio`
+ * preset speaks its native TTS wire (`POST /v1/tts`, model selected by a
+ * request header). Other presets need their M2 adapters and are reported as
+ * skipped, which does not validate the configuration. DNS-rebinding/redirect
+ * pinning at connect time lands with the M2 adapter transport (see ssrf.ts
+ * notes).
  *
  * Network access and row loading are injectable so tests stay hermetic; the
  * default implementation is the database + global fetch.
@@ -110,6 +112,11 @@ function classifyHttpFailure(
   if (status === 401 || status === 403) {
     return { errorCode: "authentication_failed", detail: "The provider rejected the API key.", endpointReachable: true, credentialValid: false };
   }
+  if (status === 402) {
+    // Quota family (FR-PROVIDER-006): the key authenticated, but the account
+    // has no credit or payment for this model — never an auth rejection.
+    return { errorCode: "rate_limited", detail: "The provider accepted the key but the account has no credit or payment for this model.", endpointReachable: true, credentialValid: true };
+  }
   if (status === 404) {
     return { errorCode: "endpoint_not_found", detail: "The provider has no such endpoint.", endpointReachable: true, credentialValid: stage !== "models" };
   }
@@ -161,6 +168,14 @@ export class ProbeHttpError extends Error {
 }
 
 /**
+ * Presets the probe can verify natively today: `openai` speaks the
+ * OpenAI-compatible wire shape, and `fish-audio` speaks its own documented
+ * TTS wire (see the capability ping below). Every other preset still awaits
+ * its M2 adapter and is reported skipped — never silently "validated".
+ */
+const PROBEABLE_PRESETS = new Set<string>(["openai", "fish-audio"]);
+
+/**
  * Runs the probe for one configuration and returns per-capability results.
  * Nothing here logs or persists credentials; the stored credential status is
  * updated only through the caller-facing status write-back (slice continues).
@@ -182,18 +197,21 @@ export async function probeProviderConfiguration(
   const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
   const results: CapabilityProbeResult[] = [];
 
+  // The fish-audio preset speaks a native wire instead of OpenAI-compatible
+  // endpoints, and it has no OpenAI-shaped model list (`GET /model` lists
+  // community voices, not TTS models) — so no model list is ever consumed.
+  const isFishAudioPreset = row.providerType === "preset" && row.providerName === "fish-audio";
+
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
 
     // Base URL: custom rows carry their own; presets resolve via the registry.
     let baseUrl: string | null = row.baseUrl;
     if (row.providerType === "preset") {
-      // M1 skeleton: only OpenAI-compatible presets are probeable without M2
-      // adapters; others are reported skipped (never silently "validated").
       const { getPresetAdapter } = await import("./registry");
       const preset = getPresetAdapter(row.providerName);
       baseUrl = preset?.defaultBaseUrl ?? null;
-      if (row.providerName !== "openai") {
+      if (!PROBEABLE_PRESETS.has(row.providerName)) {
         results.push({
           capability,
           status: "skipped",
@@ -228,20 +246,23 @@ export async function probeProviderConfiguration(
 
       // Step 1: model-list discovery (when the provider supports it). Auth
       // and rate-limit rejections are real verification failures; a missing
-      // list endpoint (404/405) is not a capability failure.
+      // list endpoint (404/405) is not a capability failure. fish-audio has
+      // no such endpoint, so nothing is requested for it.
       let modelsDiscovered: string[] | null = null;
-      const modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, { headers });
-      if (modelsResponse.ok) {
-        const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
-        modelsDiscovered = Array.isArray(modelsBody.data)
-          ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
-          : null;
-      } else if (modelsResponse.status !== 404 && modelsResponse.status !== 405) {
-        throw new ProbeHttpError(
-          modelsResponse.status,
-          "models",
-          (await modelsResponse.text().catch(() => undefined))?.slice(0, 500),
-        );
+      if (!isFishAudioPreset) {
+        const modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, { headers });
+        if (modelsResponse.ok) {
+          const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
+          modelsDiscovered = Array.isArray(modelsBody.data)
+            ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
+            : null;
+        } else if (modelsResponse.status !== 404 && modelsResponse.status !== 405) {
+          throw new ProbeHttpError(
+            modelsResponse.status,
+            "models",
+            (await modelsResponse.text().catch(() => undefined))?.slice(0, 500),
+          );
+        }
       }
 
       // Step 2: capability-specific ping with no real interview content.
@@ -251,17 +272,29 @@ export async function probeProviderConfiguration(
       let pingUrl: string;
       let pingRequest: RequestInit;
       if (capability === "tts") {
-        pingUrl = `${root}/audio/speech`;
-        pingRequest = {
-          method: "POST",
-          headers: { ...headers, "content-type": "application/json" },
-          body: JSON.stringify({
-            model: settings.modelId,
-            input: "ping",
-            voice: "alloy",
-            response_format: "mp3",
-          }),
-        };
+        if (isFishAudioPreset) {
+          // Native Fish Audio TTS: model selection travels in the `model`
+          // request header — omitting it silently serves the PAID s2.1-pro —
+          // so the header always carries the exact configured model id.
+          pingUrl = `${root}/v1/tts`;
+          pingRequest = {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json", model: settings.modelId },
+            body: JSON.stringify({ text: "ping", format: "mp3" }),
+          };
+        } else {
+          pingUrl = `${root}/audio/speech`;
+          pingRequest = {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({
+              model: settings.modelId,
+              input: "ping",
+              voice: "alloy",
+              response_format: "mp3",
+            }),
+          };
+        }
       } else if (capability === "asr") {
         pingUrl = `${root}/audio/transcriptions`;
         const form = new FormData();
@@ -286,6 +319,9 @@ export async function probeProviderConfiguration(
         throw new ProbeHttpError(pingResponse.status, "capability", (await pingResponse.text().catch(() => undefined))?.slice(0, 500));
       }
 
+      // For fish-audio, modelsDiscovered stays null: with no model list the
+      // ping cannot independently certify the exact model beyond the header
+      // itself, so selectedModelAccepted stays null rather than overclaiming.
       results.push({
         capability,
         status: "validated",
