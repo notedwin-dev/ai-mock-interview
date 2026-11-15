@@ -190,7 +190,7 @@ export function CapabilityStrip({
       aria-label="AI capability status"
       className="rounded-2xl border border-line bg-surface p-4 sm:p-5"
     >
-      <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:gap-3">
+      <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4 xl:gap-3">
         {CAPABILITY_NODES.map((node) => {
           const row = servingRow(configurations, node.capability);
           const state = readinessFailed ? UNKNOWN_STATE : nodeState(row);
@@ -198,7 +198,7 @@ export function CapabilityStrip({
             <li key={node.capability}>
               <Link
                 href="/dashboard/configuration"
-                className="flex flex-col gap-1.5 rounded-xl px-1.5 py-1.5 outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400 lg:flex-row lg:items-center lg:gap-3"
+                className="flex flex-col gap-1.5 rounded-xl px-1.5 py-1.5 outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400"
               >
                 <span className="flex min-w-0 flex-1 items-center gap-3">
                   <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
@@ -217,13 +217,13 @@ export function CapabilityStrip({
                   </span>
                 </span>
                 <span
-                  className={`flex shrink-0 items-center gap-1.5 pl-12 text-xs font-medium lg:pl-0 ${state.tone}`}
+                  className={`flex shrink-0 items-center gap-1.5 pl-12 text-xs font-medium ${state.tone}`}
                 >
                   <span
                     aria-hidden
                     className={`h-1.5 w-1.5 rounded-full ${state.dot}`}
                   />
-                  <span className="min-w-0 max-w-full truncate lg:max-w-[9rem]">
+                  <span className="min-w-0 max-w-full truncate">
                     {state.word}
                   </span>
                 </span>
