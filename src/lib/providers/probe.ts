@@ -449,14 +449,21 @@ export async function discoverProviderModels(
     throw new ProviderConfigError("not_found", "Provider configuration not found.");
   }
 
-  const baseUrl = row.baseUrl ?? "";
-  const cacheKey = `${row.userProviderConfigurationId}|${baseUrl}`;
+  let baseUrl: string | null = row.baseUrl;
+  if (row.providerType === "preset") {
+    // Preset rows store no Base URL of their own; resolve the registry
+    // default exactly like the probe does, so preset rows are discoverable.
+    const { getPresetAdapter } = await import("./registry");
+    baseUrl = getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
+  }
+
+  const cacheKey = `${row.userProviderConfigurationId}|${baseUrl ?? ""}`;
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > now()) {
     return { ok: true, models: cached.models, source: "cache" };
   }
 
-  const urlDecision = evaluateBaseUrl(baseUrl);
+  const urlDecision = evaluateBaseUrl(baseUrl ?? "");
   if (!urlDecision.ok) {
     return {
       ok: false,

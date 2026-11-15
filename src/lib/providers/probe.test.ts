@@ -447,4 +447,38 @@ describe("discoverProviderModels (FR-PROVIDER-009)", () => {
     });
     expect(result).toMatchObject({ ok: false, errorCode: "network_unreachable" });
   });
+
+  it("resolves a preset row's registry Base URL so preset rows are discoverable", async () => {
+    const seenUrls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      seenUrls.push(typeof input === "string" ? input : input.toString());
+      return new Response(JSON.stringify({ data: [{ id: "gpt-4o" }] }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await discoverProviderModels(USER_ID, CONFIG_ID, {
+      load: async () => configRow({ providerType: "preset", providerName: "openai", baseUrl: null }),
+      fetchImpl,
+      cache: new Map(),
+    });
+
+    expect(seenUrls).toEqual(["https://api.openai.com/v1/models"]);
+    expect(result).toMatchObject({ ok: true, models: ["gpt-4o"], source: "provider" });
+  });
+
+  it("reports fish-audio's missing OpenAI-shaped model list as models:null via its registry Base URL", async () => {
+    const seenUrls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      seenUrls.push(typeof input === "string" ? input : input.toString());
+      return new Response(JSON.stringify({ error: { message: "Not found" } }), { status: 404 });
+    }) as typeof fetch;
+
+    const result = await discoverProviderModels(USER_ID, CONFIG_ID, {
+      load: async () => configRow({ providerType: "preset", providerName: "fish-audio", baseUrl: null }),
+      fetchImpl,
+      cache: new Map(),
+    });
+
+    expect(seenUrls).toEqual(["https://api.fish.audio/models"]);
+    expect(result).toMatchObject({ ok: true, models: null, source: "provider" });
+  });
 });
