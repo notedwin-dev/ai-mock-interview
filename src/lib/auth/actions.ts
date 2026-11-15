@@ -3,7 +3,7 @@
 import { AuthError } from "next-auth";
 import { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { signIn } from "./index";
+import { signIn, signOut } from "./index";
 import { hashPassword } from "./password";
 import { registrationSchema, type AuthFormState } from "./validation";
 
@@ -103,4 +103,12 @@ export async function authenticateAction(
     throw error;
   }
   return {};
+}
+
+/**
+ * Signs the current session out and returns to the public home (companion to
+ * FR-AUTH-002). The NEXT_REDIRECT thrown by signOut must propagate untouched.
+ */
+export async function signOutAction(): Promise<void> {
+  await signOut({ redirectTo: "/" });
 }
