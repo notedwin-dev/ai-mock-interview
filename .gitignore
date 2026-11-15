@@ -56,3 +56,6 @@ next-env.d.ts
 
 # OpenCode project-local agent config (machine/user-specific, not shared)
 /opencode.json
+
+# reference images
+docs/design/references/**/*.png
