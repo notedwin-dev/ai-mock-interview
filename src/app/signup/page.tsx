@@ -1,36 +1,33 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { BrandMark } from "@/components/BrandMark";
 import { SignUpForm } from "./SignUpForm";
 
 export const metadata: Metadata = { title: "Create account · AIMIS" };
 
+/**
+ * Auth surface, PrepWise-adapted: a centred card on the room grid, wordmark
+ * above, labelled pill inputs inside, one clear primary action.
+ */
 export default function SignUpPage() {
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
-      <Link
-        href="/"
-        className="flex items-baseline gap-2.5 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 dark:focus-visible:ring-emerald-400"
-      >
-        <span className="font-display text-lg font-bold tracking-tight text-ink">
-          AIMIS
-        </span>
-        <span className="text-xs text-ink-muted">practice studio</span>
-      </Link>
-      <div className="mt-6 w-full max-w-sm rounded-2xl border border-line bg-card p-8">
-        <h1 className="font-display text-xl font-semibold tracking-tight text-ink">
-          Create account
+      <BrandMark href="/" />
+      <div className="mt-8 w-full max-w-md rounded-3xl border border-line bg-surface p-8">
+        <h1 className="text-center font-display text-2xl font-semibold tracking-tight text-ink">
+          Practise job interviews with AI
         </h1>
-        <p className="mt-1 text-sm text-ink-soft">
+        <p className="mt-1.5 text-center text-sm text-ink-muted">
           One role per account: candidate or recruiter.
         </p>
-        <div className="mt-6">
+        <div className="mt-8">
           <SignUpForm />
         </div>
-        <p className="mt-6 text-sm text-ink-soft">
+        <p className="mt-8 text-center text-sm text-ink-muted">
           Already registered?{" "}
           <Link
             href="/signin"
-            className="font-medium text-emerald-700 underline decoration-emerald-600/40 underline-offset-2 outline-none transition-colors hover:text-emerald-800 dark:text-emerald-300 dark:decoration-emerald-400/40 dark:hover:text-emerald-200"
+            className="font-medium text-emerald-400 outline-none transition-colors hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"
           >
             Sign in
           </Link>

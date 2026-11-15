@@ -144,3 +144,47 @@ Dashboard + setup wizard can land with the existing typed-slice API immediately;
 the room renders live interviewer behaviour only when slices 9–10 (ASR/TTS
 adapters, orchestrator) land. Until then the room shows `waiting` with the text
 answer path — which is already end-to-end.
+
+## 9. PrepWise visual adaptation (round 4)
+
+Owner mandate: the PrepWise design assets (`docs/design/references/prepwise/`,
+from the JavaScript Mastery interview platform kit — the same video pattern
+referenced in the header) are the mandatory visual reference for layout and
+presentation; the green accent is kept over the kit's lavender (owner decision),
+so jade stays semantic: ready/live/primary action, amber needs attention, red
+failure/leave. Adapted layouts, not copies.
+
+### Tokens (`src/app/globals.css`)
+
+- One dark scheme (the kit is a dark product): `--app #0b0e0c` page,
+  `--surface #131815` cards, `--raised #1a201c` banners/inputs,
+  `--line #262e28` borders, ink/ink-soft/ink-muted text. A faint 88px room
+  grid + soft jade glow render on `body::before` beneath all content.
+- `@custom-variant dark` forced via a `dark` class on `<html>` so the
+  dark-tuned utility classes are scheme-independent.
+- Pill geometry for controls (rounded-full), rounded-2xl/3xl cards, Bricolage
+  Grotesque display + Geist body retained. Accent classes stay the fixed
+  Tailwind emerald scale.
+
+### Screen-by-screen mapping
+
+| Reference | AIMIS screen | Adaptation |
+| --- | --- | --- |
+| `Auth.png` | `/signin`, `/signup` | Centred card on the grid, wordmark, labelled pill inputs, one jade pill action. AIMIS keeps its approved fields (display name, role select; no photo/resume upload — profile slice scope). |
+| `Dashboard.png` | `/dashboard` | Hero banner (headline + status line + CTA + illustration) over a slim signal-chain strip (ASR/LLM/TTS readiness), then "Your past interviews" as a restrained card grid. No company-branded marketplace cards, no invented scores (evaluation is M3). |
+| `Interview Confirmation.png` | `/dashboard/interview/new` | Centred card, question-style labels, selects for category/evaluation, stacked cards retained for runtime mode (FR-SETUP-005 acceptance wording), jade pill submit. |
+| `Workflow Page.png` / `Interview Page.png` | `/dashboard/interview/[sessionId]` | Two-participant tiles (AI interviewer with concentric-ring avatar + You tile), full-width latest-question bar, red end action. AIMIS additions the reference lacks: chronological conversation sidebar with speaker attribution, AI thinking/listening states from real request state, explicit mic control (disabled until slices 9–10 resolve ASR), status chip + connection feedback. No "Repeat" button (no FR). |
+| `Feedback.png` | Feedback/report screen | **Not implemented — blocked on the M3 evaluation backend** (no consolidated evaluation record exists yet). Planned shape: centred report column — overall impression score + date, summary paragraph, numbered per-criterion breakdown with scores and evidence bullets, verdict chip, back/retake actions. To be implemented against AIMIS's approved rubrics, assessment units, criteria and evidence when the evaluation slice lands. |
+| — | `/dashboard/profile` | No reference exists; restyled onto the dark tokens with the ruled-list language. |
+
+### Differences register (reference product → AIMIS)
+
+- Marketplace cards with company logos/scores → real sessions only; category
+  chip + status dot+word instead.
+- "Repeat" question control → not covered by any FR; omitted.
+- Question keyword highlight → arbitrary transcript text; omitted.
+- Sign-up photo/resume upload → approved signup fields only; resume lives in
+  the profile slice (FR-PROFILE-005/006).
+- Feedback screen → M3 (see table).
+- Camera preview (FR-INTERVIEW-010, local-only) → arrives with the voice-loop
+  slices; not part of the typed-path room.

@@ -1,63 +1,76 @@
 @import "tailwindcss";
 
 /*
- * AIMIS "green room" tokens (frontend-design pass, round 3).
- * Green is semantic, not decorative: it marks the ready/live state and
- * the primary action. Stage surfaces are green-black, content sits on
- * cool paper. Status: amber = needs attention, red = failure only.
+ * AIMIS dark identity (round 4), adapted from the PrepWise reference kit
+ * (docs/design/references/prepwise): charcoal surfaces on a faint room grid,
+ * spacious layouts, pill controls, restrained borders. The accent stays jade
+ * (owner kept the green accent over the kit's lavender): jade = ready/live/
+ * primary action, amber = needs attention, red = failure or leave.
+ * One scheme only — the reference is a dark product.
  */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --paper: #f7f8f6;
-  --card: #ffffff;
-  --ink: #161b18;
-  --ink-soft: #47514b;
-  --ink-muted: #6b736e;
-  --line: #e4e7e4;
-  --stage: #101512;
-  --stage-raised: #1a211d;
-  --stage-border: #28302b;
-  --stage-text: #e8efea;
-  --stage-muted: #9cafa5;
+  --app: #0b0e0c;
+  --surface: #131815;
+  --raised: #1a201c;
+  --line: #262e28;
+  --ink: #edf2ee;
+  --ink-soft: #b4bdb6;
+  --ink-muted: #8c958e;
+  --grid: rgba(237, 242, 238, 0.045);
 }
 
 @theme inline {
-  --color-paper: var(--paper);
-  --color-card: var(--card);
+  --color-app: var(--app);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
   --color-ink: var(--ink);
   --color-ink-soft: var(--ink-soft);
   --color-ink-muted: var(--ink-muted);
-  --color-line: var(--line);
-  --color-stage: var(--stage);
-  --color-stage-raised: var(--stage-raised);
-  --color-stage-border: var(--stage-border);
-  --color-stage-text: var(--stage-text);
-  --color-stage-muted: var(--stage-muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-display);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #0d100e;
-    --card: #161c18;
-    --ink: #edf2ee;
-    --ink-soft: #b3bcb6;
-    --ink-muted: #8b948e;
-    --line: #242b26;
-    --stage: #131a16;
-    --stage-raised: #1b231e;
-    --stage-border: #2b342e;
-    --stage-text: #e8efea;
-    --stage-muted: #9cafa5;
-  }
+html {
+  background: var(--app);
 }
 
 body {
-  background: var(--paper);
   color: var(--ink);
-  /* Geist (not Arial): the font variables are attached to <html> in the
-   * root layout; body previously hardcoded Arial, so the loaded fonts
-   * never rendered. */
+  /* Geist variables are attached to <html> in the root layout. */
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/*
+ * The room grid behind everything, drawn beneath all content through a
+ * negative-z fixed layer on the transparent body (html carries the page
+ * colour). A soft jade glow sits top-left like the reference's corner glow.
+ */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(
+      42rem 30rem at 12% -4%,
+      rgba(52, 211, 153, 0.06),
+      transparent 60%
+    ),
+    radial-gradient(
+      36rem 26rem at 88% 0%,
+      rgba(148, 163, 184, 0.045),
+      transparent 60%
+    ),
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    88px 88px,
+    88px 88px;
 }
