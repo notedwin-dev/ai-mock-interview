@@ -1,7 +1,11 @@
 /**
- * Server-side provider adapter registry (approved component → module home,
+ * Provider adapter registry (approved component → module home,
  * docs/ARCHITECTURE.md §3). Preset rows reference entries here by stable
  * `providerName`; user-supplied names are never executable identity.
+ *
+ * This module is shared display/identity data (pure constants — no I/O, no
+ * credentials), so the configuration UI imports it on the client; all
+ * server-side handling of rows and keys lives in config.ts / probe.ts.
  *
  * The preset entries are the canonical public API endpoints of the eight
  * providers approved by ADR-030. Base URLs below were verified against each
@@ -52,12 +56,22 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "elevenlabs",
     displayName: "ElevenLabs",
     defaultBaseUrl: "https://api.elevenlabs.io",
-    capabilities: ["tts"],
+    // ADR-030's approved ASR preset list includes ElevenLabs (Scribe STT
+    // models, retained separately from TTS IDs in the catalogue). The probe
+    // still reports ElevenLabs capabilities skipped until the native-protocol
+    // adapter lands — skip is status-neutral, so this cannot mark a valid
+    // credential invalid.
+    capabilities: ["asr", "tts"],
   },
   {
     providerName: "fish-audio",
     displayName: "Fish Audio",
     defaultBaseUrl: "https://api.fish.audio",
+    // TTS only for now: the approved catalogue also lists Fish ASR models
+    // (transcribe family), but their native wire facts land with the slice-9
+    // ASR adapter — adding the capability without a verified wire would let
+    // the OpenAI-shaped probe hit the wrong endpoint and fail a valid
+    // credential.
     capabilities: ["tts"],
   },
   // ADR-030 additions (owner decision 2026-11-16). All three speak the
@@ -96,3 +110,102 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
 export function getPresetAdapter(providerName: string): ProviderPreset | undefined {
   return PRESET_ADAPTERS.find((preset) => preset.providerName === providerName);
 }
+
+/**
+ * Display-only model suggestions for the configuration UI, transcribed from
+ * the approved model catalogue in the Notion System Architecture & AI Runtime
+ * register (owner-maintained, FR-ADMIN-004). These are catalogue examples —
+ * where a provider offers a model-list endpoint, live discovery
+ * (FR-PROVIDER-009) is authoritative and the saved value must still be the
+ * exact provider model_id chosen by the user; IDs are never constructed from
+ * display names and never substituted.
+ *
+ * Scorer is an LLM-shaped structured-output call: the UI reuses each preset's
+ * `llm` suggestions for it, so scorer entries are not duplicated here.
+ */
+export interface ModelSuggestion {
+  /** Exact provider model_id (never a display name). */
+  modelId: string;
+  /** Catalogue note rendered next to the suggestion (preview/deprecation). */
+  note?: string;
+}
+
+export const PRESET_MODEL_SUGGESTIONS: Readonly<
+  Record<string, Partial<Record<Capability, readonly ModelSuggestion[]>>>
+> = {
+  openai: {
+    asr: [
+      { modelId: "gpt-transcribe" },
+      { modelId: "gpt-live-transcribe" },
+      { modelId: "whisper-1", note: "Deprecated" },
+    ],
+    llm: [
+      { modelId: "gpt-6-astra" },
+      { modelId: "gpt-6.1-sol" },
+      { modelId: "gpt-6.1-terra" },
+      { modelId: "gpt-6-luna" },
+    ],
+  },
+  anthropic: {
+    llm: [
+      { modelId: "claude-opus-5-5" },
+      { modelId: "claude-sonnet-5-5" },
+      { modelId: "claude-haiku-5-5" },
+      { modelId: "claude-fable-5-1" },
+    ],
+  },
+  google: {
+    asr: [
+      { modelId: "gemini-3.5-transcribe" },
+      { modelId: "gemini-3.5-transcribe-live" },
+    ],
+    llm: [
+      { modelId: "gemini-3.6-flash" },
+      { modelId: "gemini-3.5-flash" },
+      { modelId: "gemini-3.5-flash-lite" },
+      { modelId: "gemini-3.1-flash-lite" },
+      { modelId: "gemini-3.1-pro-preview", note: "Preview" },
+    ],
+  },
+  elevenlabs: {
+    asr: [{ modelId: "scribe_v2" }, { modelId: "scribe_v2_realtime" }],
+    tts: [
+      { modelId: "eleven_v4" },
+      { modelId: "eleven_v4_turbo" },
+      { modelId: "eleven_v3" },
+      { modelId: "eleven_v3_conversational" },
+      { modelId: "eleven_multilingual_v2" },
+      { modelId: "eleven_flash_v2_5" },
+      { modelId: "eleven_flash_v2" },
+    ],
+  },
+  "fish-audio": {
+    tts: [
+      { modelId: "s2.1-pro" },
+      { modelId: "s2.1-pro-free", note: "Free developer option" },
+      { modelId: "s2-pro" },
+      { modelId: "drama-3" },
+      { modelId: "s1", note: "Retires 31 Dec 2026" },
+    ],
+  },
+  deepseek: {
+    llm: [{ modelId: "deepseek-flash" }, { modelId: "deepseek-v4-pro" }],
+  },
+  "zai-glm": {
+    llm: [
+      { modelId: "glm-5.3" },
+      { modelId: "glm-5.3-flash" },
+      { modelId: "glm-5.2", note: "Where still exposed" },
+    ],
+  },
+  qwen: {
+    llm: [
+      { modelId: "qwen3.8-max" },
+      { modelId: "qwen3.7-plus" },
+      { modelId: "qwen3.8-flash" },
+      { modelId: "qwen3.7-max", note: "Earlier catalogue entry" },
+      { modelId: "qwen3.7-flash", note: "Earlier catalogue entry" },
+      { modelId: "qwen3.6-plus", note: "Earlier catalogue entry" },
+    ],
+  },
+};
