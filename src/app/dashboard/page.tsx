@@ -6,9 +6,9 @@ import {
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
 import {
-  ChainStrip,
+  CapabilityStrip,
   ConsoleBanner,
-} from "@/components/dashboard/SignalChain";
+} from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
 
 /**
@@ -72,7 +72,7 @@ async function DashboardContent() {
         configurations={configurations}
         readinessFailed={readinessFailed}
       />
-      <ChainStrip
+      <CapabilityStrip
         configurations={configurations}
         readinessFailed={readinessFailed}
       />
