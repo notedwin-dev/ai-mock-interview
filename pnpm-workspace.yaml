@@ -1,6 +1,7 @@
-onlyBuiltDependencies:
-  - '@prisma/engines'
-  - prisma
-ignoredBuiltDependencies:
-  - sharp
-  - unrs-resolver
+overrides:
+  "@types/react": "19.3.0"
+  "@types/react-dom": "19.3.0"
+allowBuilds:
+  '@prisma/engines': true
+  prisma: true
+  unrs-resolver: true
