@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertEnablementAllowed,
   capabilitiesJsonSchema,
   providerConfigInputSchema,
   ProviderConfigError,
@@ -211,5 +212,18 @@ describe("error taxonomy", () => {
     expect(cryptoError.name).toBe("ProviderCryptoError");
     expect(configError.code).toBe("not_found");
     expect(cryptoError.code).toBe("decrypt_failed");
+  });
+});
+
+describe("enablement gate (FR-PROVIDER-006: a failed test prevents enabling)", () => {
+  it("refuses to enable a configuration whose capability probe failed", () => {
+    expect(() => assertEnablementAllowed("invalid", true)).toThrowError(ProviderConfigError);
+    expect(() => assertEnablementAllowed("invalid", true)).toThrowError(/probe/i);
+  });
+
+  it("allows enabling valid and unvalidated configurations, and disabling any", () => {
+    expect(() => assertEnablementAllowed("valid", true)).not.toThrow();
+    expect(() => assertEnablementAllowed("unvalidated", true)).not.toThrow();
+    expect(() => assertEnablementAllowed("invalid", false)).not.toThrow();
   });
 });

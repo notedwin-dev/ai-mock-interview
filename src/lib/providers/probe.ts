@@ -1,0 +1,472 @@
+import type { UserProviderConfiguration } from "@/generated/prisma/client";
+import { db } from "@/lib/db";
+import { capabilitiesJsonSchema, ProviderConfigError } from "./config";
+import { ProviderCryptoError, decryptApiKey } from "./encryption";
+import type { Capability } from "./registry";
+import { evaluateBaseUrl } from "./ssrf";
+
+/**
+ * Capability probe service (FR-PROVIDER-006): independently verifies, per
+ * enabled capability, that the endpoint is reachable, the credential is
+ * accepted and the exact selected model can perform the capability — without
+ * ever sending real interview content. Results distinguish authentication,
+ * missing endpoint, unsupported model/capability, quota/rate-limit and
+ * provider/server failures; a probe failure never falls back to another
+ * model or provider.
+ *
+ * M1 skeleton scope: probes speak the OpenAI-compatible wire shape
+ * (`GET /models`, `POST /chat/completions`, `POST /audio/speech`,
+ * `POST /audio/transcriptions`) — the `openai` preset and every custom row.
+ * Other presets need their M2 adapters and are reported as skipped, which
+ * does not validate the configuration. DNS-rebinding/redirect pinning at
+ * connect time lands with the M2 adapter transport (see ssrf.ts notes).
+ *
+ * Network access and row loading are injectable so tests stay hermetic; the
+ * default implementation is the database + global fetch.
+ */
+
+export type ProbeErrorCode =
+  | "network_unreachable"
+  | "authentication_failed"
+  | "endpoint_not_found"
+  | "model_unsupported"
+  | "rate_limited"
+  | "provider_error";
+
+export type CapabilityProbeStatus = "validated" | "failed" | "skipped";
+
+export interface CapabilityProbeResult {
+  capability: Capability;
+  status: CapabilityProbeStatus;
+  endpointReachable: boolean;
+  credentialValid: boolean;
+  /** Model IDs from the provider's model-list endpoint, when it supports one. */
+  modelsDiscovered: string[] | null;
+  /** Whether the exact selected model was accepted for this capability. */
+  selectedModelAccepted: boolean | null;
+  errorCode?: ProbeErrorCode;
+  /** Human-readable failure detail; never includes credentials. */
+  detail?: string;
+}
+
+export interface ConfigurationProbeResult {
+  userProviderConfigurationId: string;
+  providerName: string;
+  /** Post-probe stored status: valid only when every capability validated. */
+  credentialStatus: "unvalidated" | "valid" | "invalid";
+  capabilities: CapabilityProbeResult[];
+}
+
+export interface ProbeDeps {
+  load?: (
+    userId: string,
+    configurationId: string,
+  ) => Promise<UserProviderConfiguration | null>;
+  fetchImpl?: typeof fetch;
+  /**
+   * Persists the post-probe credential status (default: the database).
+   * `disable` is true exactly when the probe failed — a failed test must
+   * prevent the capability being (or remaining) enabled (FR-PROVIDER-006).
+   */
+  save?: (
+    configurationId: string,
+    credentialStatus: "valid" | "invalid",
+    disable: boolean,
+  ) => Promise<void>;
+}
+
+function loadStoredRow(
+  userId: string,
+  configurationId: string,
+): Promise<UserProviderConfiguration | null> {
+  return db.userProviderConfiguration.findFirst({
+    where: { userProviderConfigurationId: configurationId, userId },
+  });
+}
+
+function saveStoredStatus(
+  configurationId: string,
+  credentialStatus: "valid" | "invalid",
+  disable: boolean,
+): Promise<void> {
+  return db.userProviderConfiguration
+    .update({
+      where: { userProviderConfigurationId: configurationId },
+      data: { credentialStatus, ...(disable ? { isEnabled: false } : {}) },
+    })
+    .then(() => undefined);
+}
+
+/**
+ * Shared HTTP-status → probe-error-code classification (FR-PROVIDER-006
+ * taxonomy). `stage` distinguishes the model-list step from the capability
+ * ping where credential provability differs.
+ */
+function classifyHttpFailure(
+  status: number,
+  stage: "models" | "capability",
+  bodyText?: string,
+): { errorCode: ProbeErrorCode; detail: string; endpointReachable: boolean; credentialValid: boolean } {
+  if (status === 401 || status === 403) {
+    return { errorCode: "authentication_failed", detail: "The provider rejected the API key.", endpointReachable: true, credentialValid: false };
+  }
+  if (status === 404) {
+    return { errorCode: "endpoint_not_found", detail: "The provider has no such endpoint.", endpointReachable: true, credentialValid: stage !== "models" };
+  }
+  if (status === 400 && stage === "capability" && /model/i.test(bodyText ?? "")) {
+    return { errorCode: "model_unsupported", detail: "The provider rejected the selected model for this capability.", endpointReachable: true, credentialValid: true };
+  }
+  if (status === 429) {
+    // Throttled, not rejected: the request reached the provider's processing
+    // under the supplied key. Quota/rate-limit stays distinct from auth.
+    return { errorCode: "rate_limited", detail: "The provider rate-limited the probe.", endpointReachable: true, credentialValid: true };
+  }
+  if (status >= 500) {
+    return { errorCode: "provider_error", detail: "The provider reported a server error.", endpointReachable: true, credentialValid: stage !== "models" };
+  }
+  return { errorCode: "provider_error", detail: `The provider rejected the probe (HTTP ${status}).`, endpointReachable: true, credentialValid: stage !== "models" };
+}
+
+async function classifyProbeFailure(
+  error: unknown,
+  fetchImpl: typeof fetch,
+): Promise<{ errorCode: ProbeErrorCode; detail: string; endpointReachable: boolean; credentialValid: boolean }> {
+  if (error instanceof ProviderCryptoError) {
+    // Fail closed (ADR-0005): a credential that cannot be decrypted means the
+    // stored key is unusable — the user must re-save it. Never fall back.
+    return { errorCode: "authentication_failed", detail: "The stored credential could not be decrypted; re-save the configuration.", endpointReachable: false, credentialValid: false };
+  }
+  if (error instanceof ProbeHttpError) {
+    return classifyHttpFailure(error.status, error.stage, error.bodyText);
+  }
+  if (error instanceof Error) {
+    return { errorCode: "network_unreachable", detail: `The endpoint could not be reached. (${error.message})`, endpointReachable: false, credentialValid: false };
+  }
+  return { errorCode: "provider_error", detail: "The probe failed.", endpointReachable: false, credentialValid: false };
+}
+
+export class ProbeHttpError extends Error {
+  readonly status: number;
+  readonly stage: "models" | "capability";
+  /** Sanitised provider error body text (never includes credentials). */
+  readonly bodyText?: string;
+
+  constructor(status: number, stage: "models" | "capability", bodyText?: string) {
+    super(`Provider probe HTTP ${status} at ${stage}`);
+    this.name = "ProbeHttpError";
+    this.status = status;
+    this.stage = stage;
+    this.bodyText = bodyText;
+  }
+}
+
+/**
+ * Runs the probe for one configuration and returns per-capability results.
+ * Nothing here logs or persists credentials; the stored credential status is
+ * updated only through the caller-facing status write-back (slice continues).
+ */
+export async function probeProviderConfiguration(
+  userId: string,
+  configurationId: string,
+  deps: ProbeDeps = {},
+): Promise<ConfigurationProbeResult> {
+  const load = deps.load ?? loadStoredRow;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const save = deps.save ?? saveStoredStatus;
+
+  const row = await load(userId, configurationId);
+  if (!row) {
+    throw new ProviderConfigError("not_found", "Provider configuration not found.");
+  }
+
+  const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+  const results: CapabilityProbeResult[] = [];
+
+  for (const capability of Object.keys(capabilities) as Capability[]) {
+    const settings = capabilities[capability]!;
+
+    // Base URL: custom rows carry their own; presets resolve via the registry.
+    let baseUrl: string | null = row.baseUrl;
+    if (row.providerType === "preset") {
+      // M1 skeleton: only OpenAI-compatible presets are probeable without M2
+      // adapters; others are reported skipped (never silently "validated").
+      const { getPresetAdapter } = await import("./registry");
+      const preset = getPresetAdapter(row.providerName);
+      baseUrl = preset?.defaultBaseUrl ?? null;
+      if (row.providerName !== "openai") {
+        results.push({
+          capability,
+          status: "skipped",
+          endpointReachable: false,
+          credentialValid: false,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          detail: "Capability probe requires the provider's M2 adapter.",
+        });
+        continue;
+      }
+    }
+
+    const urlDecision = evaluateBaseUrl(baseUrl ?? "");
+    if (!urlDecision.ok) {
+      results.push({
+        capability,
+        status: "failed",
+        endpointReachable: false,
+        credentialValid: false,
+        modelsDiscovered: null,
+        selectedModelAccepted: null,
+        errorCode: "network_unreachable",
+        detail: "The configured Base URL is not a usable endpoint.",
+      });
+      continue;
+    }
+
+    try {
+      const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
+      const headers = { authorization: `Bearer ${apiKey}` };
+
+      // Step 1: model-list discovery (when the provider supports it). Auth
+      // and rate-limit rejections are real verification failures; a missing
+      // list endpoint (404/405) is not a capability failure.
+      let modelsDiscovered: string[] | null = null;
+      const modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, { headers });
+      if (modelsResponse.ok) {
+        const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
+        modelsDiscovered = Array.isArray(modelsBody.data)
+          ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
+          : null;
+      } else if (modelsResponse.status !== 404 && modelsResponse.status !== 405) {
+        throw new ProbeHttpError(
+          modelsResponse.status,
+          "models",
+          (await modelsResponse.text().catch(() => undefined))?.slice(0, 500),
+        );
+      }
+
+      // Step 2: capability-specific ping with no real interview content.
+      // Each capability gets its own endpoint and wire shape; the LLM-shaped
+      // ping (chat/completions) serves llm and scorer.
+      const root = stripTrailingSlash(urlDecision.normalizedUrl);
+      let pingUrl: string;
+      let pingRequest: RequestInit;
+      if (capability === "tts") {
+        pingUrl = `${root}/audio/speech`;
+        pingRequest = {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({
+            model: settings.modelId,
+            input: "ping",
+            voice: "alloy",
+            response_format: "mp3",
+          }),
+        };
+      } else if (capability === "asr") {
+        pingUrl = `${root}/audio/transcriptions`;
+        const form = new FormData();
+        form.append("model", settings.modelId);
+        form.append("file", new Blob([synthesisedProbeWav()], { type: "audio/wav" }), "probe.wav");
+        pingRequest = { method: "POST", headers, body: form };
+      } else {
+        pingUrl = `${root}/chat/completions`;
+        pingRequest = {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({
+            model: settings.modelId,
+            messages: [{ role: "user", content: "ping" }],
+            max_tokens: 1,
+            stream: false,
+          }),
+        };
+      }
+      const pingResponse = await fetchImpl(pingUrl, pingRequest);
+      if (!pingResponse.ok) {
+        throw new ProbeHttpError(pingResponse.status, "capability", (await pingResponse.text().catch(() => undefined))?.slice(0, 500));
+      }
+
+      results.push({
+        capability,
+        status: "validated",
+        endpointReachable: true,
+        credentialValid: true,
+        modelsDiscovered,
+        selectedModelAccepted: modelsDiscovered?.includes(settings.modelId) ?? null,
+      });
+    } catch (error) {
+      const failure = await classifyProbeFailure(error, fetchImpl);
+      results.push({
+        capability,
+        status: "failed",
+        endpointReachable: failure.endpointReachable,
+        credentialValid: failure.credentialValid,
+        modelsDiscovered: null,
+        selectedModelAccepted: null,
+        errorCode: failure.errorCode,
+        detail: failure.detail,
+      });
+    }
+  }
+
+  const allValidated = results.length > 0 && results.every((result) => result.status === "validated");
+  const anyFailed = results.some((result) => result.status === "failed");
+  const nextStatus: "unvalidated" | "valid" | "invalid" = allValidated
+    ? "valid"
+    : anyFailed
+      ? "invalid"
+      : "unvalidated";
+  // A skipped-only probe verifies nothing: leave the stored status untouched.
+  if (nextStatus !== "unvalidated" || anyFailed) {
+    await save(row.userProviderConfigurationId, nextStatus === "valid" ? "valid" : "invalid", anyFailed);
+  }
+  return {
+    userProviderConfigurationId: row.userProviderConfigurationId,
+    providerName: row.providerName,
+    credentialStatus: nextStatus,
+    capabilities: results,
+  };
+}
+
+function stripTrailingSlash(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+/**
+ * A minimal valid PCM WAV (44-byte RIFF header + a few silent samples) used
+ * purely as an ASR connectivity ping. Never derived from real interview or
+ * microphone audio.
+ */
+function synthesisedProbeWav(): ArrayBuffer {
+  const sampleCount = 16; // mono, 8 kHz, 8-bit PCM
+  const dataLength = sampleCount;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  const writeText = (offset: number, text: string) => {
+    for (let index = 0; index < text.length; index++) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, 8000, true); // sample rate
+  view.setUint32(28, 8000, true); // byte rate
+  view.setUint16(32, 1, true); // block align
+  view.setUint16(34, 8, true); // bits per sample
+  writeText(36, "data");
+  view.setUint32(40, dataLength, true);
+  for (let index = 0; index < sampleCount; index++) {
+    view.setUint8(44 + index, 128); // silence
+  }
+  return buffer;
+}
+
+/**
+ * Model-list discovery (FR-PROVIDER-009): retrieves the provider's model IDs
+ * for a configuration "when supported" — a missing list endpoint (404/405) is
+ * reported as `models: null`, not a failure. Results are cached in memory per
+ * configuration identity; the cache is injectable only via the TTL and clock,
+ * keeping the shared map process-local.
+ */
+export interface DiscoveryDeps {
+  load?: (userId: string, configurationId: string) => Promise<UserProviderConfiguration | null>;
+  fetchImpl?: typeof fetch;
+  /** TTL seconds for in-memory model lists (default 60; flagged for review). */
+  cacheTtlSeconds?: number;
+  now?: () => number;
+  /** Cache map (default: a process-local map keyed per configuration). */
+  cache?: Map<string, ModelListCacheEntry>;
+}
+
+export interface ModelListCacheEntry {
+  models: string[] | null;
+  expiresAt: number;
+}
+
+const DEFAULT_MODEL_LIST_TTL_SECONDS = 60;
+
+export type DiscoveryResult =
+  | { ok: true; models: string[] | null; source: "provider" | "cache" }
+  | { ok: false; errorCode: ProbeErrorCode; detail: string };
+
+/** Process-lifetime cache; entries expire by TTL and stay keyed per config. */
+const MODEL_LIST_CACHE = new Map<string, ModelListCacheEntry>();
+
+export async function discoverProviderModels(
+  userId: string,
+  configurationId: string,
+  deps: DiscoveryDeps = {},
+): Promise<DiscoveryResult> {
+  const load = deps.load ?? loadStoredRow;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = deps.now ?? Date.now;
+  const ttlSeconds = deps.cacheTtlSeconds ?? DEFAULT_MODEL_LIST_TTL_SECONDS;
+  const cache = deps.cache ?? MODEL_LIST_CACHE;
+
+  const row = await load(userId, configurationId);
+  if (!row) {
+    throw new ProviderConfigError("not_found", "Provider configuration not found.");
+  }
+
+  const baseUrl = row.baseUrl ?? "";
+  const cacheKey = `${row.userProviderConfigurationId}|${baseUrl}`;
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > now()) {
+    return { ok: true, models: cached.models, source: "cache" };
+  }
+
+  const urlDecision = evaluateBaseUrl(baseUrl);
+  if (!urlDecision.ok) {
+    return {
+      ok: false,
+      errorCode: "network_unreachable",
+      detail: "The configured Base URL is not a usable endpoint.",
+    };
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
+  } catch (error) {
+    if (error instanceof ProviderCryptoError) {
+      return {
+        ok: false,
+        errorCode: "authentication_failed",
+        detail: "The stored credential could not be decrypted; re-save the configuration.",
+      };
+    }
+    throw error;
+  }
+
+  let modelsResponse: Response;
+  try {
+    modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+  } catch (error) {
+    // Provider connectivity problems surface in the probe error taxonomy, not
+    // as an unhandled exception (FR-PROVIDER-006).
+    const failure = await classifyProbeFailure(error, fetchImpl);
+    return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
+  }
+  if (modelsResponse.ok) {
+    const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
+    const models = Array.isArray(modelsBody.data)
+      ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
+      : null;
+    cache.set(cacheKey, { models, expiresAt: now() + ttlSeconds * 1000 });
+    return { ok: true, models, source: "provider" };
+  }
+  if (modelsResponse.status === 404 || modelsResponse.status === 405) {
+    // "When supported": a missing list endpoint is not a failure.
+    cache.set(cacheKey, { models: null, expiresAt: now() + ttlSeconds * 1000 });
+    return { ok: true, models: null, source: "provider" };
+  }
+  const failure = classifyHttpFailure(modelsResponse.status, "models", undefined);
+  return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
+}
