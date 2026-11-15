@@ -316,6 +316,23 @@ export async function updateResumeSharing(
 }
 
 /**
+ * Download metadata for an owned resume (any consent state — the candidate
+ * may always retrieve their own file); the caller reads bytes through the
+ * storage layer with the returned key.
+ */
+export async function getOwnResumeForDownload(
+  userId: string,
+  resumeId: string,
+): Promise<Pick<CandidateResume, "storageKey" | "mimeType" | "originalFileName">> {
+  const row = await loadOwnedResume(userId, resumeId);
+  return {
+    storageKey: row.storageKey,
+    mimeType: row.mimeType,
+    originalFileName: row.originalFileName,
+  };
+}
+
+/**
  * Deletes an owned resume row and returns its storage key so the caller can
  * remove the stored file idempotently (slice 3b wires the storage call).
  */

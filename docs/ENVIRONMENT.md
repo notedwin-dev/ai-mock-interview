@@ -24,6 +24,7 @@ missing.
 | `PROVIDER_ENCRYPTION_MASTER_KEY` | ✅ server (provider config) | Master key (32 bytes, base64) for AES-256-GCM encryption of user provider API keys at rest — **stored outside the database**. Validated lazily by `src/lib/providers/env.ts` on first provider-crypto use — never at build time. Generate: `openssl rand -base64 32` |
 | `PROVIDER_ENCRYPTION_KEY_VERSION` | ✅ server (provider config) | Active key version written to `user_provider_configuration.encryption_key_version` on save and prefixed into the envelope (`v<version>:…`, ADR-0005) |
 | `PROVIDER_ENCRYPTION_LEGACY_KEYS` | server (provider config, rotation only) | Comma-separated retired keys as `<version>=<base64 32-byte key>` pairs, kept decryptable during rotation until no stored row references their version. Omitting a version that rows still reference **fails decryption closed** (repo extension of ADR-0005, flagged for owner review) |
+| `STORAGE_LOCAL_ROOT` | server (resume storage) | Local volume root for private resume files (default `./storage`, gitignored; mount a Docker volume at this path in deployment). Keys are built server-side only; files are served exclusively through authenticated route handlers that re-check ownership (recruiter consent re-check lands with FR-RECRUITER-004, M4) |
 
 ## Planned (add with their milestone — do not enable early)
 

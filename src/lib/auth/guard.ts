@@ -46,3 +46,28 @@ export async function requireAccount(
 
   return { session, account };
 }
+
+/**
+ * Route-handler variant: same database-backed identity, status and role
+ * checks, but resolves null instead of redirecting so /api/v1 handlers can
+ * answer with JSON 401/403 (FR-AUTH-005 semantics, JSON surface).
+ */
+export async function requireApiAccount(
+  options: { role?: string } = {},
+): Promise<GuardedAccount | null> {
+  await connection();
+
+  const session = await auth();
+  if (!session?.user?.id) return null;
+
+  const account = await db.userAccount.findUnique({
+    where: { userId: session.user.id },
+  });
+  if (!account || account.accountStatus !== "active") return null;
+
+  if (options.role !== undefined && account.accountRole !== options.role) {
+    return null;
+  }
+
+  return { session, account };
+}
