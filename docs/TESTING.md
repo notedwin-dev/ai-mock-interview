@@ -22,6 +22,13 @@ reported as manual evidence, never claimed as automated coverage.
 - Colocated: `src/**/<module>.test.ts`. Integration tests that need PostgreSQL live in
   `src/**/*.db.test.ts` and are **skipped** when `TEST_DATABASE_URL` is unset, so the
   default `pnpm test` stays hermetic and fast (no network, no DB).
+- Service-level integration tests: services read the database through `@/lib/db`
+  (`DATABASE_URL`). When the `TEST_DATABASE_URL` gate is set, `vitest.setup.mts`
+  points `DATABASE_URL` at the test database inside the test process (before module
+  import), so service tests run against the dedicated database only — never the dev
+  database. Gated suites wrap hooks and tests in `describe.skipIf` (see
+  `src/lib/providers/config.db.test.ts`); DB suites must not run files in parallel
+  (they truncate shared tables), hence `fileParallelism: false` in `vitest.config.mts`.
 - No test may call a real AI provider. Provider adapters are tested against
   request-shaping and response-parsing logic with recorded fixtures; live provider
   verification belongs to the feasibility matrix task (TT-16) and is documented
