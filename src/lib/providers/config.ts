@@ -45,7 +45,7 @@ export const capabilitiesJsonSchema = z
   .partialRecord(z.enum(CAPABILITIES), capabilitySettingsSchema)
   .refine(
     (value) => Object.keys(value).length >= 1,
-    "Configure at least one capability (asr, llm, tts or scorer).",
+    "Configure at least one capability (asr, llm, tts, scorer or realtime).",
   );
 
 export type CapabilitiesJson = z.infer<typeof capabilitiesJsonSchema>;

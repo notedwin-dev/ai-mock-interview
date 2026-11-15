@@ -24,11 +24,23 @@ import type {
 
 /**
  * AI configuration experience (FR-PROVIDER-001..009; ADR-028/029/030; owner
- * directive §6, 2026-11-16). Four independent capability sections — ASR/STT,
- * LLM, TTS and the evaluation scorer — each with pre-configured provider
- * chips and its own Custom OpenAI-compatible option (own Base URL, API key
- * and exact model_id). Nothing is inherited or substituted across
- * capabilities; the scorer is configured independently of the interview LLM.
+ * mockup + directive, 2026-11-16). The page mirrors the approved runtime
+ * architecture (ADR-006) with two mutually exclusive interview runtime
+ * options:
+ *
+ *  - Option 1 — Pre-configured Realtime Agents ("Native integrations"):
+ *    Gemini Live / OpenAI Realtime run the whole interview as one native
+ *    realtime session; users don't configure separate ASR, LLM and TTS
+ *    models in this mode. One row per provider: when a row for the provider
+ *    already exists, adding realtime PATCHes the capability onto it.
+ *  - Option 2 — Custom Configuration ("Composable pipeline"): ASR/STT, LLM,
+ *    TTS and the evaluation scorer, each with pre-configured provider chips
+ *    and its own Custom OpenAI-compatible option (own Base URL, API key and
+ *    exact model_id). Nothing is inherited or substituted across
+ *    capabilities; the scorer is configured independently of the
+ *    interviewer LLM (FR-PROVIDER-003).
+ *
+ * Which option runs an interview is chosen at interview creation, not here.
  *
  * Wire-only invariants preserved here: credentials are write-only (sent to
  * the API, never displayed or stored in client state beyond a password
@@ -40,25 +52,25 @@ import type {
 const CAPABILITY_SECTIONS = [
   {
     capability: "asr",
-    title: "Speech recognition (ASR)",
-    role: "Transcribes the candidate's voice for the interviewer.",
+    title: "ASR / STT",
+    role: "Speech recognition provider and model.",
     Icon: Mic,
   },
   {
     capability: "llm",
-    title: "Interviewer (LLM)",
-    role: "Conducts the interview, asks questions and follows up.",
+    title: "LLM",
+    role: "Interview conversation, question generation and follow-ups.",
     Icon: Brain,
   },
   {
     capability: "tts",
-    title: "Voice output (TTS)",
-    role: "Speaks the interviewer's turns aloud.",
+    title: "TTS",
+    role: "Interviewer speech synthesis provider and model.",
     Icon: AudioLines,
   },
   {
     capability: "scorer",
-    title: "Evaluation scorer",
+    title: "Scorer",
     role: "Scores completed interviews separately from the interviewer model.",
     Icon: ClipboardCheck,
   },
@@ -74,6 +86,7 @@ const CAPABILITY_LABELS: Record<Capability, string> = {
   llm: "LLM",
   tts: "TTS",
   scorer: "Scorer",
+  realtime: "Realtime",
 };
 
 const CREDENTIAL_STATUS: Record<
@@ -175,6 +188,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     llm: false,
     tts: true,
     scorer: true,
+    realtime: true,
   });
 
   async function refresh(): Promise<ProviderConfigSummary[]> {
@@ -323,34 +337,130 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     if (error === null) await refresh();
   }
 
+  /**
+   * Option 1 add flow (one row per provider): without an existing row the
+   * provider configuration is created with only the realtime capability;
+   * with one, the realtime capability is PATCHed onto the stored row and the
+   * existing credential stays untouched (an apiKey-less patch never
+   * re-encrypts). Model IDs are never invented: the form takes the exact ID
+   * and discovery loads the account's list after saving.
+   */
+  async function addRealtime(
+    providerName: string,
+    apiKey: string | null,
+    modelId: string,
+  ): Promise<boolean> {
+    const key = `realtime:${providerName}`;
+    const existing = rows.find(
+      (row) => row.providerType === "preset" && row.providerName === providerName,
+    );
+    const error = await runAction(key, async () => {
+      if (existing) {
+        if (existing.capabilities.realtime) return null;
+        const result = await callApi<{ configuration: ProviderConfigSummary }>(
+          `/api/v1/providers/configurations/${encodeURIComponent(providerName)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              capabilities: { ...existing.capabilities, realtime: { modelId } },
+            }),
+          },
+        );
+        if (!result.ok) return result.error;
+        setRows((current) =>
+          current.map((candidate) =>
+            candidate.userProviderConfigurationId ===
+            result.data.configuration.userProviderConfigurationId
+              ? result.data.configuration
+              : candidate,
+          ),
+        );
+        await findModels(result.data.configuration);
+        return null;
+      }
+      const result = await callApi<{ configuration: ProviderConfigSummary }>(
+        "/api/v1/providers/configurations",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            providerType: "preset",
+            providerName,
+            apiKey: apiKey ?? "",
+            capabilities: { realtime: { modelId } },
+          }),
+        },
+      );
+      if (!result.ok) return result.error;
+      const fresh = await refresh();
+      const row =
+        fresh.find((candidate) => candidate.providerName === providerName) ??
+        result.data.configuration;
+      await findModels(row);
+      return null;
+    });
+    return error === null;
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <ReadinessStrip rows={rows} onJump={(capability) => setCollapsed((c) => ({ ...c, [capability]: false }))} />
-      {CAPABILITY_SECTIONS.map((section) => (
-        <CapabilitySection
-          key={section.capability}
-          section={section}
-          rows={rows}
-          collapsed={collapsed[section.capability]}
-          onToggle={() =>
-            setCollapsed((c) => ({ ...c, [section.capability]: !c[section.capability] }))
-          }
-          modelsByRow={modelsByRow}
-          probeByRow={probeByRow}
-          pending={pending}
-          actionError={actionError}
-          onFindModels={findModels}
-          onProbe={runProbe}
-          onPatch={patchRow}
-          onDelete={deleteRow}
-          onCreated={async (created) => {
-            const fresh = await refresh();
-            const row =
-              fresh.find((r) => r.providerName === created.providerName) ?? created;
-            await findModels(row);
-          }}
+
+      <RealtimeOptionCard
+        rows={rows}
+        modelsByRow={modelsByRow}
+        probeByRow={probeByRow}
+        pending={pending}
+        actionError={actionError}
+        onFindModels={findModels}
+        onProbe={runProbe}
+        onPatch={patchRow}
+        onDelete={deleteRow}
+        onAddRealtime={addRealtime}
+      />
+
+      <section
+        aria-labelledby="custom-config-heading"
+        className="overflow-hidden rounded-3xl border border-line bg-surface"
+      >
+        <OptionCardHeader
+          id="custom-config-heading"
+          title="Custom Configuration"
+          badge="Composable pipeline"
+          subtitle="Compose the interview pipeline from independently configured capabilities."
         />
-      ))}
+        <div className="border-t border-line">
+          {CAPABILITY_SECTIONS.map((section) => (
+            <CapabilitySection
+              key={section.capability}
+              section={section}
+              rows={rows}
+              collapsed={collapsed[section.capability]}
+              onToggle={() =>
+                setCollapsed((c) => ({ ...c, [section.capability]: !c[section.capability] }))
+              }
+              modelsByRow={modelsByRow}
+              probeByRow={probeByRow}
+              pending={pending}
+              actionError={actionError}
+              onFindModels={findModels}
+              onProbe={runProbe}
+              onPatch={patchRow}
+              onDelete={deleteRow}
+              onCreated={async (created) => {
+                const fresh = await refresh();
+                const row =
+                  fresh.find((r) => r.providerName === created.providerName) ?? created;
+                await findModels(row);
+              }}
+            />
+          ))}
+          <p className="px-5 pb-5 text-xs text-ink-muted sm:px-6">
+            Users independently select providers and models for each capability.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }
@@ -417,6 +527,336 @@ function ReadinessStrip({
   );
 }
 
+/* ----------------------- option 1: realtime agents -------------------------- */
+
+/**
+ * Register Option A ("Pre-configured Realtime Agents", ADR-006): native
+ * realtime sessions that replace the composed ASR/LLM/TTS pipeline. Only the
+ * two provider-native presets are offered; the realtime model ID comes from
+ * the user (discovery + manual entry) because the owner-maintained catalogue
+ * lists no realtime agent model IDs yet.
+ */
+const REALTIME_OPTIONS = [
+  {
+    providerName: "google",
+    optionTitle: "Gemini Live",
+    monogram: "G",
+    blurb: "Native realtime voice session on the Gemini Live API.",
+  },
+  {
+    providerName: "openai",
+    optionTitle: "OpenAI Realtime",
+    monogram: "OA",
+    blurb: "Native realtime voice session on the OpenAI Realtime API.",
+  },
+] as const satisfies ReadonlyArray<{
+  providerName: string;
+  optionTitle: string;
+  monogram: string;
+  blurb: string;
+}>;
+
+/** Subtle monogram tiles — clean initials, no trademark artwork. */
+const MONOGRAM_TILE: Record<string, string> = {
+  google: "border-sky-400/30 bg-sky-400/10 text-sky-300",
+  openai: "border-line bg-raised text-ink-soft",
+};
+
+function MonogramTile({ providerName, monogram }: { providerName: string; monogram: string }) {
+  return (
+    <span
+      aria-hidden
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border text-sm font-bold tracking-wide ${MONOGRAM_TILE[providerName] ?? "border-line bg-raised text-ink-soft"}`}
+    >
+      {monogram}
+    </span>
+  );
+}
+
+function OptionCardHeader({
+  id,
+  title,
+  badge,
+  subtitle,
+}: {
+  id: string;
+  title: string;
+  badge: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2 p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id={id} className="font-display text-lg font-semibold tracking-tight text-ink">
+          {title}
+        </h2>
+        <span className="rounded-full border border-line bg-raised px-2.5 py-1 text-xs font-medium text-ink-muted">
+          {badge}
+        </span>
+      </div>
+      <p className="text-sm text-ink-muted">{subtitle}</p>
+    </div>
+  );
+}
+
+interface RealtimeOptionCardProps {
+  rows: ProviderConfigSummary[];
+  modelsByRow: Record<string, ModelState>;
+  probeByRow: Record<string, ConfigurationProbeResult>;
+  pending: string | null;
+  actionError: Record<string, ApiError>;
+  onFindModels: (row: ProviderConfigSummary) => void;
+  onProbe: (row: ProviderConfigSummary) => void;
+  onPatch: (
+    row: ProviderConfigSummary,
+    patch: Record<string, unknown>,
+    key: string,
+  ) => Promise<boolean>;
+  onDelete: (row: ProviderConfigSummary) => void;
+  onAddRealtime: (
+    providerName: string,
+    apiKey: string | null,
+    modelId: string,
+  ) => Promise<boolean>;
+}
+
+function RealtimeOptionCard(props: RealtimeOptionCardProps) {
+  const [formOpenFor, setFormOpenFor] = useState<string | null>(null);
+  return (
+    <section
+      aria-labelledby="realtime-agents-heading"
+      className="overflow-hidden rounded-3xl border border-line bg-surface"
+    >
+      <OptionCardHeader
+        id="realtime-agents-heading"
+        title="Pre-configured Realtime Agents"
+        badge="Native integrations"
+        subtitle="Runs the whole interview as one native realtime session — users don't configure separate ASR, LLM and TTS models in this mode."
+      />
+      <div className="divide-y divide-line border-t border-line">
+        {REALTIME_OPTIONS.map((option) => (
+          <NativeRealtimeBlock
+            key={option.providerName}
+            option={option}
+            formOpen={formOpenFor === option.providerName}
+            onToggleForm={() =>
+              setFormOpenFor((current) =>
+                current === option.providerName ? null : option.providerName,
+              )
+            }
+            {...props}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type NativeRealtimeOption = (typeof REALTIME_OPTIONS)[number];
+
+/**
+ * One provider block: monogram card header (status + action) and, when
+ * configured, the realtime row with the same row-card treatment as Option 2.
+ * Without a stored row the block offers create (API key + model); with one
+ * missing only the realtime capability it offers the PATCH flow.
+ */
+function NativeRealtimeBlock({
+  option,
+  formOpen,
+  onToggleForm,
+  rows,
+  modelsByRow,
+  probeByRow,
+  pending,
+  actionError,
+  onFindModels,
+  onProbe,
+  onPatch,
+  onDelete,
+  onAddRealtime,
+}: RealtimeOptionCardProps & {
+  option: NativeRealtimeOption;
+  formOpen: boolean;
+  onToggleForm: () => void;
+}) {
+  const row =
+    rows.find(
+      (candidate) =>
+        candidate.providerType === "preset" && candidate.providerName === option.providerName,
+    ) ?? null;
+  const realtime = row?.capabilities.realtime ?? null;
+  const formKey = `realtime:${option.providerName}`;
+
+  const status = !row
+    ? { text: "Not set up", cls: "text-ink-muted", dot: "bg-ink-muted/60" }
+    : realtime
+      ? (() => {
+          const credential = CREDENTIAL_STATUS[row.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated!;
+          return {
+            text: `${credential.word} · ${row.isEnabled ? "enabled" : "disabled"}`,
+            cls: credential.text,
+            dot: credential.dot,
+          };
+        })()
+    : { text: "Configured — realtime capability not added yet", cls: "text-amber-300", dot: "bg-amber-400" };
+
+  return (
+    <article className="p-5 sm:p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <MonogramTile providerName={option.providerName} monogram={option.monogram} />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-ink">{option.optionTitle}</p>
+            <p className="mt-0.5 text-sm text-ink-muted">{option.blurb}</p>
+            <span className={`mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium ${status.cls}`}>
+              <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+              {status.text}
+            </span>
+          </div>
+        </div>
+        {!row ? (
+          <button type="button" onClick={onToggleForm} disabled={pending !== null} className={PRIMARY_PILL}>
+            <Plus className="h-4 w-4" aria-hidden />
+            Set up
+          </button>
+        ) : !realtime ? (
+          <button type="button" onClick={onToggleForm} disabled={pending !== null} className={GHOST_PILL}>
+            <Plus className="h-4 w-4" aria-hidden />
+            Add realtime
+          </button>
+        ) : null}
+      </div>
+
+      {formOpen ? (
+        <RealtimeAddForm
+          option={option}
+          needsKey={!row}
+          formKey={formKey}
+          pending={pending}
+          actionError={actionError}
+          onSubmit={(apiKey, modelId) => onAddRealtime(option.providerName, apiKey, modelId)}
+          onCancel={onToggleForm}
+        />
+      ) : null}
+
+      {row && realtime ? (
+        <div className="mt-4">
+          <ConfigurationRowCard
+            row={row}
+            capability="realtime"
+            modelsByRow={modelsByRow}
+            probeByRow={probeByRow}
+            pending={pending}
+            actionError={actionError}
+            onFindModels={onFindModels}
+            onProbe={onProbe}
+            onPatch={onPatch}
+            onDelete={onDelete}
+          />
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function RealtimeAddForm({
+  option,
+  needsKey,
+  formKey,
+  pending,
+  actionError,
+  onSubmit,
+  onCancel,
+}: {
+  option: NativeRealtimeOption;
+  needsKey: boolean;
+  formKey: string;
+  pending: string | null;
+  actionError: Record<string, ApiError>;
+  onSubmit: (apiKey: string | null, modelId: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [apiKey, setApiKey] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [error, setError] = useState<ApiError | null>(null);
+
+  async function submit() {
+    setError(null);
+    if (!modelId.trim()) {
+      setError({ code: "invalid_input", message: "Enter the exact realtime model ID." });
+      return;
+    }
+    if (needsKey && !apiKey.trim()) {
+      setError({ code: "missing_credential", message: "An API key is required." });
+      return;
+    }
+    const ok = await onSubmit(needsKey ? apiKey.trim() : null, modelId.trim());
+    if (ok) onCancel();
+  }
+
+  return (
+    <form
+      className="mt-4 flex flex-col gap-4 rounded-2xl border border-emerald-400/40 bg-raised/40 p-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium text-ink">
+          {needsKey ? `Set up ${option.optionTitle}` : `Add realtime to ${option.optionTitle}`}
+        </span>
+        <button type="button" onClick={onCancel} disabled={pending !== null} className={GHOST_PILL}>
+          Cancel
+        </button>
+      </div>
+      {needsKey ? (
+        <label className="flex flex-col gap-1.5">
+          <span className={LABEL_CLASS}>API key</span>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            className={`${FIELD_CLASS} font-mono`}
+            placeholder="Paste the provider API key"
+            autoComplete="off"
+            maxLength={4096}
+          />
+        </label>
+      ) : (
+        <p className="rounded-xl bg-surface px-4 py-2.5 text-xs text-ink-muted">
+          {option.optionTitle} is already configured — this adds the realtime capability to
+          that configuration and keeps the stored API key.
+        </p>
+      )}
+      <label className="flex flex-col gap-1.5">
+        <span className={LABEL_CLASS}>Realtime model ID</span>
+        <input
+          value={modelId}
+          onChange={(event) => setModelId(event.target.value)}
+          className={FIELD_CLASS}
+          placeholder="Exact provider realtime model ID"
+          maxLength={200}
+        />
+        <span className="text-xs text-ink-muted">
+          Realtime agent model IDs are not pre-listed — enter the exact ID your account
+          exposes. After saving, &ldquo;Find models&rdquo; loads the list your key can use.
+        </span>
+      </label>
+      {error ? <p className="text-xs text-red-400">{error.message}</p> : null}
+      {actionError[formKey] ? (
+        <p className="text-xs text-red-400">{actionError[formKey]!.message}</p>
+      ) : null}
+      <div>
+        <button type="submit" disabled={pending !== null} className={PRIMARY_PILL}>
+          {pending === formKey ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
+          {needsKey ? "Create configuration" : "Add realtime capability"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 /* --------------------------------- section ---------------------------------- */
 
 type SectionMeta = (typeof CAPABILITY_SECTIONS)[number];
@@ -452,14 +892,14 @@ function CapabilitySection(props: CapabilitySectionProps) {
   return (
     <section
       id={`capability-${section.capability}`}
-      className="rounded-3xl border border-line bg-surface"
+      className="border-b border-line"
       aria-labelledby={`${section.capability}-heading`}
     >
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={!collapsed}
-        className="flex w-full cursor-pointer items-center gap-4 rounded-3xl p-5 text-left outline-none transition-colors hover:bg-raised/40 focus-visible:ring-2 focus-visible:ring-emerald-400 sm:p-6"
+        className="flex w-full cursor-pointer items-center gap-4 p-5 text-left outline-none transition-colors hover:bg-raised/40 focus-visible:ring-2 focus-visible:ring-emerald-400 sm:p-6"
       >
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
           <section.Icon className="h-5 w-5" aria-hidden />
@@ -703,7 +1143,7 @@ function ConfigurationRowCard({
       {probe ? (
         <div className="mt-4 rounded-xl border border-line bg-surface p-3">
           <span className={LABEL_CLASS}>Last test result</span>
-          <ProbeResultView result={probeForCapability ?? null} fullResult={probe} />
+          <ProbeResultView result={probeForCapability ?? null} fullResult={probe} capability={capability} />
         </div>
       ) : null}
 
@@ -768,9 +1208,11 @@ const PROBE_STATUS_WORDS: Record<CapabilityProbeResult["status"], { word: string
 function ProbeResultView({
   result,
   fullResult,
+  capability,
 }: {
   result: CapabilityProbeResult | null;
   fullResult: ConfigurationProbeResult;
+  capability: Capability;
 }) {
   if (!result) {
     return (
@@ -798,8 +1240,9 @@ function ProbeResultView({
       ) : null}
       {result.status === "skipped" ? (
         <p className="text-xs text-amber-300">
-          This preset needs its native-protocol adapter before the test can run; the stored
-          status is untouched until then.
+          {capability === "realtime"
+            ? "Native realtime sessions are verified with the realtime interview runtime; the configuration is stored unchanged in the meantime."
+            : "This preset needs its native-protocol adapter before the test can run; the stored status is untouched until then."}
         </p>
       ) : null}
     </div>

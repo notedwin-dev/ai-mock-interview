@@ -17,7 +17,15 @@
  * existing probe path (GET /models + POST /chat/completions) covers them.
  */
 
-export const CAPABILITIES = ["asr", "llm", "tts", "scorer"] as const;
+/**
+ * Capabilities a configuration row can serve. `realtime` covers the native
+ * realtime agent runtimes (Gemini Live, OpenAI Realtime) — the register's
+ * Option A: the provider negotiates its own realtime protocol, so the row is
+ * configured like any other capability (provider + exact model ID + own
+ * credential) but must never be driven over the OpenAI-compatible wires used
+ * by the ASR/LLM/TTS/scorer probes.
+ */
+export const CAPABILITIES = ["asr", "llm", "tts", "scorer", "realtime"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 export interface ProviderPreset {
@@ -38,7 +46,12 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "openai",
     displayName: "OpenAI",
     defaultBaseUrl: "https://api.openai.com/v1",
-    capabilities: ["asr", "llm", "scorer"],
+    // `realtime` = the OpenAI Realtime API on the same documented base URL
+    // (register Option A, "Pre-configured Realtime Agents"). No realtime
+    // agent model IDs exist in the owner-maintained catalogue yet, so the UI
+    // offers live discovery + manual entry only — IDs are never invented
+    // here.
+    capabilities: ["asr", "llm", "scorer", "realtime"],
   },
   {
     providerName: "anthropic",
@@ -50,7 +63,11 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "google",
     displayName: "Google",
     defaultBaseUrl: "https://generativelanguage.googleapis.com",
-    capabilities: ["asr", "llm", "scorer"],
+    // `realtime` = the Gemini Live API on the same documented base URL
+    // (register Option A, "Pre-configured Realtime Agents"). Same catalogue
+    // rule as openai: no realtime agent model IDs are listed yet — discovery
+    // + manual entry only.
+    capabilities: ["asr", "llm", "scorer", "realtime"],
   },
   {
     providerName: "elevenlabs",

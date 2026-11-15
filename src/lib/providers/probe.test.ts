@@ -154,6 +154,41 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("unvalidated");
   });
 
+  it("reports the realtime capability skipped and never touches any wire (native realtime protocol)", async () => {
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
+      jsonFetch([]), // must not be called at all — realtime never hits these wires
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "realtime",
+      status: "skipped",
+      endpointReachable: false,
+      credentialValid: false,
+    });
+    // Skipped ≠ validated: the configuration stays unvalidated, never "valid".
+    expect(result.credentialStatus).toBe("unvalidated");
+  });
+
+  it("skips realtime even on a probeable preset while still validating the row's other capabilities", async () => {
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "openai",
+        baseUrl: null,
+        capabilitiesJson: { llm: { modelId: "test-model" }, realtime: { modelId: "realtime-model" } },
+      }),
+      jsonFetch([
+        { match: /\/models$/, status: 200, body: { data: [{ id: "test-model" }] } },
+        { match: /\/chat\/completions$/, status: 200, body: { id: "chatcmpl-ping" } },
+      ]),
+    );
+    const byCapability = new Map(result.capabilities.map((r) => [r.capability, r]));
+    expect(byCapability.get("llm")).toMatchObject({ status: "validated" });
+    expect(byCapability.get("realtime")).toMatchObject({ status: "skipped" });
+    // A skipped capability keeps the whole row unvalidated (status-neutral).
+    expect(result.credentialStatus).toBe("unvalidated");
+  });
+
   it("probes every enabled capability and validates only when all pass", async () => {
     const result = await runProbe(
       configRow({ capabilitiesJson: { llm: { modelId: "test-model" }, scorer: { modelId: "test-model" } } }),

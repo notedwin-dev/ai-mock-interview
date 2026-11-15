@@ -18,8 +18,11 @@ import { evaluateBaseUrl } from "./ssrf";
  * OpenAI-compatible wire (`GET /models`, `POST /chat/completions`,
  * `POST /audio/speech`, `POST /audio/transcriptions`); the `fish-audio`
  * preset speaks its native TTS wire (`POST /v1/tts`, model selected by a
- * request header). Other presets need their M2 adapters and are reported as
- * skipped, which does not validate the configuration. DNS-rebinding/redirect
+ * request header). Native realtime sessions (the `realtime` capability:
+ * Gemini Live, OpenAI Realtime) negotiate the provider's own protocol and
+ * always report skipped until the realtime runtime lands — they must never
+ * reach the wires above. Other presets need their M2 adapters and are
+ * reported as skipped, which does not validate the configuration. DNS-rebinding/redirect
  * pinning at connect time lands with the M2 adapter transport (see ssrf.ts
  * notes).
  *
@@ -212,6 +215,25 @@ export async function probeProviderConfiguration(
 
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
+
+    // Native realtime sessions (Gemini Live, OpenAI Realtime) negotiate the
+    // provider's own realtime protocol — they must never be driven over the
+    // OpenAI-compatible wires below. Native realtime verification lands with
+    // the realtime interview runtime (register Option A, built after the
+    // custom pipeline is stable), so realtime reports skipped: status-neutral,
+    // exactly like the not-yet-adaptered presets.
+    if (capability === "realtime") {
+      results.push({
+        capability,
+        status: "skipped",
+        endpointReachable: false,
+        credentialValid: false,
+        modelsDiscovered: null,
+        selectedModelAccepted: null,
+        detail: "Native realtime sessions are verified with the realtime interview runtime; this test does not contact the provider yet.",
+      });
+      continue;
+    }
 
     // Base URL: custom rows carry their own; presets resolve via the registry.
     let baseUrl: string | null = row.baseUrl;

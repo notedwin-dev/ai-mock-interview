@@ -32,6 +32,14 @@ describe("capabilitiesJsonSchema", () => {
     expect(parsed.scorer?.modelId).toBe("gpt-4o-mini");
   });
 
+  it("accepts the realtime capability (register Option A) with its own model_id", () => {
+    const parsed = capabilitiesJsonSchema.parse({
+      llm: { modelId: "gpt-4o" },
+      realtime: { modelId: "realtime-agent-model" },
+    });
+    expect(parsed.realtime?.modelId).toBe("realtime-agent-model");
+  });
+
   it("rejects unknown capability keys", () => {
     expect(() =>
       capabilitiesJsonSchema.parse({ stt: { modelId: "whisper-1" } }),
