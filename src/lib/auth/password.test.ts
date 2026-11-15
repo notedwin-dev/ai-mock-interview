@@ -26,11 +26,16 @@ describe("password hashing (ADR-0006)", () => {
 
   it("rejects a tampered hash", async () => {
     const passwordHash = await hashPassword(password);
-    // Corrupt the final base64 character of the digest, keeping the PHC
+    // Corrupt the first base64 character of the digest, keeping the PHC
     // string structurally valid so verification runs against wrong bytes.
-    const last = passwordHash.at(-1) ?? "A";
-    const replacement = last === "A" ? "B" : "A";
-    const tampered = passwordHash.slice(0, -1) + replacement;
+    // The LAST character is not safe to tamper: in unpadded base64 it
+    // carries canonical zero padding bits, so replacing it (e.g. A->B)
+    // yields a non-canonical string the decoder rejects — observed flake.
+    const segments = passwordHash.split("$");
+    const digest = segments[5] ?? "";
+    const first = digest[0] ?? "A";
+    segments[5] = (first === "A" ? "B" : "A") + digest.slice(1);
+    const tampered = segments.join("$");
     await expect(verifyPassword(tampered, password)).resolves.toBe(false);
   });
 });
