@@ -1,0 +1,185 @@
+import { describe, expect, it } from "vitest";
+import {
+  capabilitiesJsonSchema,
+  providerConfigInputSchema,
+  ProviderConfigError,
+  validateProviderRules,
+} from "./config";
+import { ProviderCryptoError } from "./encryption";
+
+describe("capabilitiesJsonSchema", () => {
+  it("accepts a subset of capabilities (one row can serve asr+llm only)", () => {
+    const parsed = capabilitiesJsonSchema.parse({
+      asr: { modelId: "whisper-1" },
+      llm: { modelId: "gpt-4o" },
+    });
+    expect(parsed.asr?.modelId).toBe("whisper-1");
+    expect(parsed.llm?.modelId).toBe("gpt-4o");
+  });
+
+  it("preserves exact model_id casing (never normalised)", () => {
+    expect(
+      capabilitiesJsonSchema.parse({ llm: { modelId: "GPT-4o-Mini" } }).llm?.modelId,
+    ).toBe("GPT-4o-Mini");
+  });
+
+  it("rejects unknown capability keys", () => {
+    expect(() =>
+      capabilitiesJsonSchema.parse({ stt: { modelId: "whisper-1" } }),
+    ).toThrow();
+  });
+
+  it("rejects blank or missing model_id", () => {
+    expect(() => capabilitiesJsonSchema.parse({ llm: { modelId: "   " } })).toThrow();
+    expect(() => capabilitiesJsonSchema.parse({ llm: {} })).toThrow();
+  });
+
+  it("rejects model_id beyond the 200-character limit", () => {
+    expect(() =>
+      capabilitiesJsonSchema.parse({ llm: { modelId: "m".repeat(201) } }),
+    ).toThrow();
+  });
+});
+
+describe("providerConfigInputSchema", () => {
+  const base = {
+    providerType: "custom",
+    providerName: "my-endpoint",
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    capabilities: { llm: { modelId: "gpt-4o" } },
+  };
+
+  it("rejects an empty capabilities map", () => {
+    expect(() => providerConfigInputSchema.parse({ ...base, capabilities: {} })).toThrow();
+  });
+
+  it("rejects unknown fields (strict contract for API boundaries)", () => {
+    expect(() => providerConfigInputSchema.parse({ ...base, voice: "x" })).toThrow();
+  });
+
+  it("rejects a provider name beyond the VARCHAR(120) limit", () => {
+    expect(() =>
+      providerConfigInputSchema.parse({ ...base, providerName: "p".repeat(121) }),
+    ).toThrow();
+  });
+
+  it("rejects an apiKey beyond the 4096-character cap", () => {
+    expect(() =>
+      providerConfigInputSchema.parse({ ...base, apiKey: "k".repeat(4097) }),
+    ).toThrow();
+  });
+});
+
+describe("validateProviderRules", () => {
+  it("accepts a preset that declares the requested capabilities", () => {
+    const rules = validateProviderRules({
+      providerType: "preset",
+      providerName: "openai",
+      capabilities: { asr: { modelId: "whisper-1" }, llm: { modelId: "gpt-4o" } },
+    });
+    expect(rules.normalizedBaseUrl).toBeNull();
+  });
+
+  it("rejects an unknown preset name", () => {
+    try {
+      validateProviderRules({
+        providerType: "preset",
+        providerName: "does-not-exist",
+        capabilities: { llm: { modelId: "x" } },
+      });
+      expect.unreachable("unknown preset must be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProviderConfigError);
+      expect((error as ProviderConfigError).code).toBe("unknown_preset");
+    }
+  });
+
+  it("rejects a preset used for a capability it does not declare (openai+tts)", () => {
+    try {
+      validateProviderRules({
+        providerType: "preset",
+        providerName: "openai",
+        capabilities: { tts: { modelId: "tts-1" } },
+      });
+      expect.unreachable("openai cannot serve tts in the registry");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProviderConfigError);
+      expect((error as ProviderConfigError).code).toBe("capability_not_supported");
+    }
+  });
+
+  it("rejects a preset row that carries its own Base URL", () => {
+    try {
+      validateProviderRules({
+        providerType: "preset",
+        providerName: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        capabilities: { llm: { modelId: "gpt-4o" } },
+      });
+      expect.unreachable("presets must not carry a Base URL");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("invalid_input");
+    }
+  });
+
+  it("rejects a custom endpoint shadowing a reserved preset name", () => {
+    try {
+      validateProviderRules({
+        providerType: "custom",
+        providerName: "openai",
+        baseUrl: "https://api.example.com/v1",
+        capabilities: { llm: { modelId: "gpt-4o" } },
+      });
+      expect.unreachable("preset names are reserved");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("reserved_preset_name");
+    }
+  });
+
+  it("rejects a custom endpoint without a Base URL", () => {
+    try {
+      validateProviderRules({
+        providerType: "custom",
+        providerName: "my-endpoint",
+        capabilities: { llm: { modelId: "gpt-4o" } },
+      });
+      expect.unreachable("custom requires a Base URL");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("invalid_input");
+    }
+  });
+
+  it("normalises a custom Base URL and rejects blocked destinations", () => {
+    const rules = validateProviderRules({
+      providerType: "custom",
+      providerName: "my-endpoint",
+      baseUrl: "  https://API.Example.COM/v1  ",
+      capabilities: { llm: { modelId: "gpt-4o" } },
+    });
+    expect(rules.normalizedBaseUrl).toBe("https://api.example.com/v1");
+
+    try {
+      validateProviderRules({
+        providerType: "custom",
+        providerName: "my-endpoint",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        capabilities: { llm: { modelId: "gpt-4o" } },
+      });
+      expect.unreachable("loopback destinations must be rejected");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("invalid_base_url");
+    }
+  });
+});
+
+describe("error taxonomy", () => {
+  it("keeps provider config errors distinct from crypto errors", () => {
+    const configError = new ProviderConfigError("not_found", "missing");
+    const cryptoError = new ProviderCryptoError("decrypt_failed", "tampered");
+    expect(configError.name).toBe("ProviderConfigError");
+    expect(cryptoError.name).toBe("ProviderCryptoError");
+    expect(configError.code).toBe("not_found");
+    expect(cryptoError.code).toBe("decrypt_failed");
+  });
+});
