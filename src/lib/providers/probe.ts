@@ -168,12 +168,20 @@ export class ProbeHttpError extends Error {
 }
 
 /**
- * Presets the probe can verify natively today: `openai` speaks the
- * OpenAI-compatible wire shape, and `fish-audio` speaks its own documented
- * TTS wire (see the capability ping below). Every other preset still awaits
- * its M2 adapter and is reported skipped — never silently "validated".
+ * Presets the probe can verify natively today: `openai`, `deepseek`,
+ * `zai-glm` and `qwen` speak the OpenAI-compatible wire shape, and
+ * `fish-audio` speaks its own documented TTS wire (see the capability ping
+ * below). The remaining presets (`anthropic`, `google`, `elevenlabs`) still
+ * await their native-protocol adapters and are reported skipped — never
+ * silently "validated".
  */
-const PROBEABLE_PRESETS = new Set<string>(["openai", "fish-audio"]);
+const PROBEABLE_PRESETS = new Set<string>([
+  "openai",
+  "fish-audio",
+  "deepseek",
+  "zai-glm",
+  "qwen",
+]);
 
 /**
  * Runs the probe for one configuration and returns per-capability results.
