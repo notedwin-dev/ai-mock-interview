@@ -3,10 +3,10 @@ import { requireAccount } from "@/lib/auth/guard";
 import { listProviderConfigurations } from "@/lib/providers/config";
 
 /**
- * Minimal profile page: the read-only fix-it destination for provider
- * readiness issues surfaced on the dashboard and setup wizard. Status is
- * always dot + word, never colour alone; the rows use the rehearsal-log
- * language (ruled list, one panel). Editing and probing arrive with the
+ * Profile page: the read-only fix-it destination for provider readiness
+ * issues surfaced on the dashboard and setup wizard, restyled onto the dark
+ * identity (round 4). Status is always dot + word, never colour alone; the
+ * rows keep the ruled-list language. Editing and probing arrive with the
  * provider configuration surface (M2); resume and visibility management
  * arrive with the profile slice.
  */
@@ -14,18 +14,18 @@ import { listProviderConfigurations } from "@/lib/providers/config";
 const CREDENTIAL_STATUS: Record<string, { word: string; dot: string; text: string }> = {
   valid: {
     word: "Validated",
-    dot: "bg-emerald-600 dark:bg-emerald-400",
-    text: "text-emerald-700 dark:text-emerald-300",
+    dot: "bg-emerald-400",
+    text: "text-emerald-400",
   },
   unvalidated: {
     word: "Not validated yet",
-    dot: "bg-amber-500",
-    text: "text-amber-700 dark:text-amber-300",
+    dot: "bg-amber-400",
+    text: "text-amber-300",
   },
   invalid: {
     word: "Check failed",
-    dot: "bg-red-600 dark:bg-red-400",
-    text: "text-red-700 dark:text-red-300",
+    dot: "bg-red-400",
+    text: "text-red-400",
   },
 };
 
@@ -50,21 +50,21 @@ export default async function Page() {
       <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
         Profile
       </h1>
-      <p className="mt-1 text-sm text-ink-soft">
+      <p className="mt-1 text-sm text-ink-muted">
         Signed in as {account.email} ({account.accountRole}).
       </p>
 
       <section className="mt-8">
         <h2 className="text-sm font-medium text-ink">Provider configurations</h2>
         {configurations.length === 0 ? (
-          <div className="mt-2 rounded-xl border border-line bg-card p-5">
-            <p className="text-sm text-ink-soft">
+          <div className="mt-2 rounded-2xl border border-dashed border-line bg-surface/50 p-6">
+            <p className="text-sm text-ink-muted">
               No provider configurations yet. Interviews need at least one
               enabled configuration serving the interviewer (LLM) capability.
             </p>
           </div>
         ) : (
-          <ul className="mt-2 divide-y divide-line rounded-xl border border-line bg-card">
+          <ul className="mt-2 divide-y divide-line rounded-2xl border border-line bg-surface">
             {configurations.map((row) => {
               const credentials =
                 CREDENTIAL_STATUS[row.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated;
@@ -88,7 +88,7 @@ export default async function Page() {
                         <span
                           aria-hidden
                           className={`h-1.5 w-1.5 rounded-full ${
-                            row.isEnabled ? "bg-emerald-600 dark:bg-emerald-400" : "bg-ink-muted/60"
+                            row.isEnabled ? "bg-emerald-400" : "bg-ink-muted/60"
                           }`}
                         />
                         {row.isEnabled ? "Enabled" : "Disabled"}

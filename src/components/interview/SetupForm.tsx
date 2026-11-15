@@ -14,16 +14,18 @@ import type { InterviewCategorySummary } from "@/lib/interview/service";
 import type { ProviderConfigSummary } from "@/lib/providers/config";
 
 /**
- * Interview setup form (FR-SETUP-001..005, FR-INTERVIEW-001): one screen,
- * client-side validation against the shared zod contract (the same object the
+ * Interview setup form (FR-SETUP-001..005, FR-INTERVIEW-001), PrepWise-
+ * adapted: one screen, question-style labels, pill/select controls, client-
+ * side validation against the shared zod contract (the same object the
  * server validates), then POST /api/v1/interviews; a 201 redirects into the
  * meeting room. Runtime mode renders as stacked, mutually exclusive cards
  * (FR-SETUP-005 acceptance wording).
  */
 
-const fieldClassName =
-  "h-10 rounded-lg border border-line bg-card px-3 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20";
-const labelClassName = "text-sm font-medium text-ink";
+const FIELD_CLASS =
+  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
+const LABEL_CLASS = "text-sm font-medium text-ink";
+const ERROR_CLASS = "text-xs text-red-400";
 
 const EVALUATION_MODE_DESCRIPTIONS: Record<EvaluationMode, string> = {
   supportive: "Encouraging tone with gentler feedback.",
@@ -59,9 +61,9 @@ interface SetupFormProps {
 }
 
 function cardClassName(selected: boolean): string {
-  return `cursor-pointer rounded-lg border px-4 py-3 transition-colors ${
+  return `cursor-pointer rounded-2xl border px-4 py-3 transition-colors ${
     selected
-      ? "border-emerald-600 bg-emerald-50 dark:border-emerald-400 dark:bg-emerald-950/40"
+      ? "border-emerald-400 bg-emerald-400/10"
       : "border-line hover:border-ink-muted"
   }`;
 }
@@ -139,8 +141,8 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1">
-        <label htmlFor="jobRole" className={labelClassName}>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="jobRole" className={LABEL_CLASS}>
           Target job role
         </label>
         <input
@@ -151,17 +153,16 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           onChange={(event) => setJobRole(event.target.value)}
           maxLength={150}
           required
-          className={fieldClassName}
+          placeholder="Select the role you want to practise"
+          className={FIELD_CLASS}
         />
         {fieldErrors.jobRole ? (
-          <p className="text-xs text-red-700 dark:text-red-400">
-            {fieldErrors.jobRole}
-          </p>
+          <p className={ERROR_CLASS}>{fieldErrors.jobRole}</p>
         ) : null}
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label htmlFor="jobDescription" className={labelClassName}>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="jobDescription" className={LABEL_CLASS}>
           Job description (optional)
         </label>
         <textarea
@@ -171,87 +172,82 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           onChange={(event) => setJobDescription(event.target.value)}
           maxLength={8000}
           rows={5}
-          className="rounded-lg border border-line bg-card px-3 py-2 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20"
+          placeholder="Paste the description here; it is used to contextualise the questions."
+          className="rounded-2xl border border-transparent bg-raised px-5 py-3.5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20"
         />
         <div className="flex items-baseline justify-between gap-4">
-          <p className="text-xs text-ink-muted">
-            Pasted here, it is used to contextualise the interview questions.
-          </p>
+          {fieldErrors.jobDescription ? (
+            <p className={ERROR_CLASS}>{fieldErrors.jobDescription}</p>
+          ) : (
+            <span />
+          )}
           <span className="text-xs text-ink-muted">
             {jobDescription.length}/8000
           </span>
         </div>
-        {fieldErrors.jobDescription ? (
-          <p className="text-xs text-red-700 dark:text-red-400">
-            {fieldErrors.jobDescription}
-          </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="categoryId" className={LABEL_CLASS}>
+          What type of interview would you like to practise?
+        </label>
+        <select
+          id="categoryId"
+          name="categoryId"
+          value={categoryId ?? ""}
+          onChange={(event) => setCategoryId(event.target.value || null)}
+          className={FIELD_CLASS}
+        >
+          <option value="" disabled>
+            Select an interview type
+          </option>
+          {categories.map((category) => (
+            <option key={category.categoryId} value={category.categoryId}>
+              {category.categoryName}
+            </option>
+          ))}
+        </select>
+        {fieldErrors.categoryId ? (
+          <p className={ERROR_CLASS}>{fieldErrors.categoryId}</p>
+        ) : null}
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="evaluationMode" className={LABEL_CLASS}>
+          How should the interviewer treat you?
+        </label>
+        <select
+          id="evaluationMode"
+          name="evaluationMode"
+          value={evaluationMode ?? ""}
+          onChange={(event) =>
+            setEvaluationMode(
+              (event.target.value || null) as EvaluationMode | null,
+            )
+          }
+          className={FIELD_CLASS}
+        >
+          <option value="" disabled>
+            Select an evaluation mode
+          </option>
+          {EVALUATION_MODES.map((mode) => (
+            <option key={mode} value={mode}>
+              {mode.charAt(0).toUpperCase() + mode.slice(1)}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-ink-muted">
+          {evaluationMode
+            ? EVALUATION_MODE_DESCRIPTIONS[evaluationMode]
+            : "Choose how much pressure the feedback should carry."}
+        </p>
+        {fieldErrors.evaluationMode ? (
+          <p className={ERROR_CLASS}>{fieldErrors.evaluationMode}</p>
         ) : null}
       </div>
 
       <fieldset className="flex flex-col gap-2">
-        <legend className={labelClassName}>Interview category</legend>
-        {categories.map((category) => (
-          <label
-            key={category.categoryId}
-            className={cardClassName(categoryId === category.categoryId)}
-          >
-            <input
-              type="radio"
-              name="categoryId"
-              value={category.categoryId}
-              checked={categoryId === category.categoryId}
-              onChange={() => setCategoryId(category.categoryId)}
-              className="sr-only"
-            />
-            <span className="block text-sm font-medium text-ink">
-              {category.categoryName}
-            </span>
-            {category.description ? (
-              <span className="block text-xs text-ink-soft">
-                {category.description}
-              </span>
-            ) : null}
-          </label>
-        ))}
-        {fieldErrors.categoryId ? (
-          <p className="text-xs text-red-700 dark:text-red-400">
-            {fieldErrors.categoryId}
-          </p>
-        ) : null}
-      </fieldset>
-
-      <fieldset className="flex flex-col gap-2">
-        <legend className={labelClassName}>Evaluation mode</legend>
-        {EVALUATION_MODES.map((mode) => (
-          <label
-            key={mode}
-            className={cardClassName(evaluationMode === mode)}
-          >
-            <input
-              type="radio"
-              name="evaluationMode"
-              value={mode}
-              checked={evaluationMode === mode}
-              onChange={() => setEvaluationMode(mode)}
-              className="sr-only"
-            />
-            <span className="block text-sm font-medium capitalize text-ink">
-              {mode}
-            </span>
-            <span className="block text-xs text-ink-soft">
-              {EVALUATION_MODE_DESCRIPTIONS[mode]}
-            </span>
-          </label>
-        ))}
-        {fieldErrors.evaluationMode ? (
-          <p className="text-xs text-red-700 dark:text-red-400">
-            {fieldErrors.evaluationMode}
-          </p>
-        ) : null}
-      </fieldset>
-
-      <fieldset className="flex flex-col gap-2">
-        <legend className={labelClassName}>Runtime mode</legend>
+        <legend className={LABEL_CLASS}>How should the room run?</legend>
         {RUNTIME_MODES.map((mode) => (
           <label
             key={mode}
@@ -270,13 +266,13 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
                 ? "Pre-configured Realtime Agents"
                 : "Custom Configuration"}
             </span>
-            <span className="block text-xs text-ink-soft">
+            <span className="mt-0.5 block text-xs text-ink-muted">
               {RUNTIME_MODE_DESCRIPTIONS[mode]}
             </span>
           </label>
         ))}
         {runtimeMode === "custom" ? (
-          <div className="rounded-lg border border-line bg-card px-4 py-3">
+          <div className="rounded-2xl border border-line bg-raised px-4 py-3">
             <p className="text-xs font-medium text-ink-soft">
               Pipeline readiness
             </p>
@@ -302,7 +298,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
                         Not set up,{" "}
                         <Link
                           href="/dashboard/profile"
-                          className="font-medium text-emerald-700 underline underline-offset-2 outline-none transition-colors hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200"
+                          className="font-medium text-emerald-400 underline underline-offset-2 outline-none transition-colors hover:text-emerald-300"
                         >
                           set it up
                         </Link>
@@ -315,14 +311,12 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           </div>
         ) : null}
         {fieldErrors.runtimeMode ? (
-          <p className="text-xs text-red-700 dark:text-red-400">
-            {fieldErrors.runtimeMode}
-          </p>
+          <p className={ERROR_CLASS}>{fieldErrors.runtimeMode}</p>
         ) : null}
       </fieldset>
 
       {submitError ? (
-        <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+        <p className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {submitError.message}
           {submitError.code === "provider_route_missing" ? (
             <>
@@ -341,7 +335,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
       <button
         type="submit"
         disabled={pending}
-        className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white outline-none transition-all hover:bg-emerald-800 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:focus-visible:ring-emerald-400 dark:focus-visible:ring-offset-paper"
+        className="h-11 w-full cursor-pointer rounded-full bg-emerald-400 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {pending ? "Creating room…" : "Create interview room"}
       </button>

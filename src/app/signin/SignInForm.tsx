@@ -6,9 +6,9 @@ import type { AuthFormState } from "@/lib/auth/validation";
 
 const initialState: AuthFormState = {};
 
-const fieldClassName =
-  "h-10 rounded-lg border border-line bg-card px-3 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20";
-const labelClassName = "text-sm font-medium text-ink";
+const FIELD_CLASS =
+  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
+const LABEL_CLASS = "text-sm font-medium text-ink-soft";
 
 export function SignInForm() {
   const [state, formAction, pending] = useActionState(
@@ -18,8 +18,8 @@ export function SignInForm() {
 
   return (
     <form action={formAction} className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <label htmlFor="email" className={labelClassName}>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="email" className={LABEL_CLASS}>
           Email
         </label>
         <input
@@ -28,11 +28,11 @@ export function SignInForm() {
           type="email"
           required
           autoComplete="email"
-          className={fieldClassName}
+          className={FIELD_CLASS}
         />
       </div>
-      <div className="flex flex-col gap-1">
-        <label htmlFor="password" className={labelClassName}>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="password" className={LABEL_CLASS}>
           Password
         </label>
         <input
@@ -41,18 +41,18 @@ export function SignInForm() {
           type="password"
           required
           autoComplete="current-password"
-          className={fieldClassName}
+          className={FIELD_CLASS}
         />
       </div>
       {state.error ? (
-        <p role="alert" className="text-sm text-red-700 dark:text-red-400">
+        <p role="alert" className="text-sm text-red-400">
           {state.error}
         </p>
       ) : null}
       <button
         type="submit"
         disabled={pending}
-        className="h-10 cursor-pointer rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white outline-none transition-all hover:bg-emerald-800 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:focus-visible:ring-emerald-400"
+        className="mt-2 h-11 w-full cursor-pointer rounded-full bg-emerald-400 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {pending ? "Signing in…" : "Sign in"}
       </button>

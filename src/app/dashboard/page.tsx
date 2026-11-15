@@ -5,16 +5,19 @@ import {
   listProviderConfigurations,
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
-import { SignalChain } from "@/components/dashboard/SignalChain";
-import { SessionLog } from "@/components/dashboard/SessionLog";
+import {
+  ChainStrip,
+  ConsoleBanner,
+} from "@/components/dashboard/SignalChain";
+import { PastInterviews } from "@/components/dashboard/PastInterviews";
 
 /**
- * Candidate dashboard (TT-6): a rehearsal-room console, desktop-first. The
- * signal-chain panel is the primary surface (FR-SETUP-005, FR-INTERVIEW-001);
- * recent sessions sit below as a date-grouped rehearsal log. The shell
- * (dashboard/layout.tsx) owns identity, navigation and sign-out. Server
- * components read via Prisma / services directly (ARCHITECTURE §4); readiness
- * summaries carry no credential material (ADR-0005).
+ * Candidate dashboard (TT-6, PrepWise-adapted): a hero banner with the
+ * primary action over a signal-chain strip, then "Your past interviews" as a
+ * restrained card grid of real sessions. The shell (dashboard/layout.tsx)
+ * owns identity, navigation and sign-out. Server components read via Prisma
+ * / services directly (ARCHITECTURE §4); readiness summaries carry no
+ * credential material (ADR-0005).
  */
 
 interface RecentSessionRow {
@@ -30,7 +33,7 @@ function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
   return db.interviewSession.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
-    take: 5,
+    take: 6,
     select: {
       sessionId: true,
       jobRole: true,
@@ -64,16 +67,23 @@ async function DashboardContent() {
   }
 
   return (
-    <div className="flex flex-col gap-10 lg:gap-12">
-      <SignalChain configurations={configurations} readinessFailed={readinessFailed} />
+    <div className="flex flex-col gap-8 lg:gap-10">
+      <ConsoleBanner
+        configurations={configurations}
+        readinessFailed={readinessFailed}
+      />
+      <ChainStrip
+        configurations={configurations}
+        readinessFailed={readinessFailed}
+      />
 
       <section aria-labelledby="recent-sessions-heading">
         <div className="flex items-baseline justify-between gap-4">
           <h2
             id="recent-sessions-heading"
-            className="font-display text-lg font-semibold tracking-tight text-ink"
+            className="font-display text-xl font-semibold tracking-tight text-ink"
           >
-            Recent sessions
+            Your past interviews
           </h2>
           {sessionsFailed ? (
             <span className="text-xs text-ink-muted">
@@ -81,13 +91,13 @@ async function DashboardContent() {
             </span>
           ) : null}
         </div>
-        <div className="mt-1">
+        <div className="mt-4">
           {sessionsFailed ? (
             <p className="py-6 text-sm text-ink-muted">
               Your session list could not be loaded. Try again in a moment.
             </p>
           ) : (
-            <SessionLog sessions={recentSessions} />
+            <PastInterviews sessions={recentSessions} />
           )}
         </div>
       </section>
@@ -97,7 +107,7 @@ async function DashboardContent() {
 
 export default function DashboardPage() {
   return (
-    <main className="mx-auto w-full max-w-[76rem] flex-1 px-6 py-8 lg:px-12 lg:py-10">
+    <main className="mx-auto w-full max-w-[80rem] flex-1 px-6 py-8 lg:px-10 lg:py-10">
       <Suspense fallback={<p className="text-sm text-ink-muted">Loading…</p>}>
         <DashboardContent />
       </Suspense>
