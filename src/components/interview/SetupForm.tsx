@@ -297,7 +297,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
                       <span className="text-ink-muted">
                         Not set up,{" "}
                         <Link
-                          href="/dashboard/profile"
+                          href="/dashboard/configuration"
                           className="font-medium text-emerald-400 underline underline-offset-2 outline-none transition-colors hover:text-emerald-300"
                         >
                           set it up
@@ -322,7 +322,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
             <>
               {" "}
               <Link
-                href="/dashboard/profile"
+                href="/dashboard/configuration"
                 className="font-medium underline"
               >
                 Configure a provider
