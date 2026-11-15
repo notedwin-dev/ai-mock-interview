@@ -264,6 +264,47 @@ d("provider configuration service (integration)", () => {
     expect(resolved.apiKey).toBe("sk-plaintext-secret");
   });
 
+  it("refuses to re-enable a configuration whose probe marked it invalid", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, customInput);
+
+    // Simulate the persisted post-probe state after a failed capability test:
+    // the probe stores "invalid" AND disables the row (FR-PROVIDER-006 —
+    // a failed test prevents the capability being or remaining enabled).
+    const row = await db.userProviderConfiguration.findFirstOrThrow({
+      where: { userId, providerName: "my-endpoint" },
+    });
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: row.userProviderConfigurationId },
+      data: { credentialStatus: "invalid", isEnabled: false },
+    });
+
+    await expect(updateProviderConfiguration(userId, "my-endpoint", { isEnabled: true })).rejects
+      .toMatchObject({ code: "probe_failed" });
+    expect((await listProviderConfigurations(userId))[0]?.isEnabled).toBe(false);
+  });
+
+  it("allows re-enabling in the same patch that fixes the credential", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, customInput);
+    const row = await db.userProviderConfiguration.findFirstOrThrow({
+      where: { userId, providerName: "my-endpoint" },
+    });
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: row.userProviderConfigurationId },
+      data: { credentialStatus: "invalid", isEnabled: false },
+    });
+
+    // A re-saved key is a material change: the status resets to unvalidated,
+    // so the failed probe must no longer block enabling.
+    const updated = await updateProviderConfiguration(userId, "my-endpoint", {
+      apiKey: "sk-fixed-key",
+      isEnabled: true,
+    });
+    expect(updated.isEnabled).toBe(true);
+    expect(updated.credentialStatus).toBe("unvalidated");
+  });
+
   it("resolves preset Base URLs from the registry at call time", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, presetInput);

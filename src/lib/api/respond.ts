@@ -1,6 +1,7 @@
 import { ProfileError } from "@/lib/profile/service";
 import { ResumeFileError } from "@/lib/profile/resume-file";
 import { InterviewError } from "@/lib/interview/service";
+import { ProviderConfigError } from "@/lib/providers/config";
 import { z } from "zod";
 
 /**
@@ -33,6 +34,15 @@ export function errorResponse(error: unknown): Response {
         : error.code === "not_found"
           ? 404
           : 409; // invalid_state / provider_route_missing are conflict-shaped
+    return jsonError(status, error.code, error.message);
+  }
+  if (error instanceof ProviderConfigError) {
+    const status =
+      error.code === "not_found"
+        ? 404
+        : error.code === "config_exists" || error.code === "probe_failed"
+          ? 409
+          : 400; // missing_credential / invalid_base_url / capability_not_supported / unknown_preset / reserved_preset_name / invalid_input
     return jsonError(status, error.code, error.message);
   }
   if (error instanceof z.ZodError) {

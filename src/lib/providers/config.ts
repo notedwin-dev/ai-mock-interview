@@ -85,6 +85,7 @@ export type ProviderConfigErrorCode =
   | "capability_not_supported"
   | "unknown_preset"
   | "reserved_preset_name"
+  | "probe_failed"
   | "invalid_input";
 
 export class ProviderConfigError extends Error {
@@ -181,6 +182,24 @@ function parseUserId(userId: string): string {
   return parsed;
 }
 
+/**
+ * Enablement gate (FR-PROVIDER-006): a failed capability probe marks the
+ * stored credential invalid, and a failed test must prevent enabling the
+ * capability. Disabling is always allowed; `valid`/`unvalidated` rows may be
+ * enabled (the probe is what turns unvalidated into valid).
+ */
+export function assertEnablementAllowed(
+  credentialStatus: "unvalidated" | "valid" | "invalid",
+  isEnabled: boolean,
+): void {
+  if (isEnabled && credentialStatus === "invalid") {
+    throw new ProviderConfigError(
+      "probe_failed",
+      "Fix the failing capability test (re-run the probe) before enabling this configuration.",
+    );
+  }
+}
+
 /** Stable JSON string for comparing JSONB payloads regardless of key order. */
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -234,6 +253,16 @@ async function findOwnedConfig(userId: string, providerName: string) {
   return db.userProviderConfiguration.findFirst({
     where: { userId, providerName },
   });
+}
+
+/**
+ * Internal accessor for sibling provider modules (the capability probe and
+ * model discovery) that need the raw row, including the encrypted key. The
+ * return type carries write-only credential material: it must never be
+ * serialised into a client response or a log.
+ */
+export async function findOwnedConfigRow(userId: string, providerName: string) {
+  return findOwnedConfig(userId, providerName);
 }
 
 /**
@@ -337,10 +366,6 @@ export async function updateProviderConfiguration(
 
   let materialChange = false;
 
-  if (parsed.isEnabled !== undefined && parsed.isEnabled !== row.isEnabled) {
-    data.isEnabled = parsed.isEnabled;
-  }
-
   if (parsed.capabilities !== undefined) {
     const nextType = row.providerType as ProviderType;
     const rules = validateProviderRules({
@@ -386,6 +411,17 @@ export async function updateProviderConfiguration(
 
   if (materialChange) {
     data.credentialStatus = "unvalidated";
+  }
+
+  // Enablement gate (FR-PROVIDER-006) runs on the EFFECTIVE status: a patch
+  // that also fixes the credential (material change) resets the status to
+  // unvalidated, so a previously failed probe no longer blocks enabling.
+  const effectiveStatus = materialChange
+    ? ("unvalidated" as const)
+    : (row.credentialStatus as "unvalidated" | "valid" | "invalid");
+  if (parsed.isEnabled !== undefined && parsed.isEnabled !== row.isEnabled) {
+    assertEnablementAllowed(effectiveStatus, parsed.isEnabled);
+    data.isEnabled = parsed.isEnabled;
   }
 
   const updated = await db.userProviderConfiguration.update({
