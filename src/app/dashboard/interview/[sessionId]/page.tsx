@@ -36,7 +36,7 @@ export default async function Page(
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+        className="text-sm text-ink-soft transition-colors hover:text-ink"
       >
         ← Back to dashboard
       </Link>

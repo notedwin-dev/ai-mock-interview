@@ -2,15 +2,32 @@ import Link from "next/link";
 
 /**
  * The rehearsal log: recent sessions as a date-grouped ruled list (not a card
- * grid). Status is always dot + word, never colour alone. A server component —
- * the whole row deep-links into the interview room.
+ * grid). Status is always dot + word, never colour alone — green means in
+ * progress, red means failed. A server component — the whole row deep-links
+ * into the interview room.
  */
 
 const STATUS_WORDS: Record<string, { word: string; dot: string; text: string }> = {
-  created: { word: "Set up", dot: "bg-stone-400", text: "text-stone-500 dark:text-stone-400" },
-  active: { word: "In progress", dot: "bg-teal-600 dark:bg-teal-400", text: "text-teal-700 dark:text-teal-300" },
-  completed: { word: "Completed", dot: "bg-stone-500 dark:bg-stone-400", text: "text-stone-600 dark:text-stone-300" },
-  failed: { word: "Failed", dot: "bg-red-600 dark:bg-red-400", text: "text-red-700 dark:text-red-300" },
+  created: {
+    word: "Set up",
+    dot: "bg-ink-muted/60",
+    text: "text-ink-muted",
+  },
+  active: {
+    word: "In progress",
+    dot: "bg-emerald-600 dark:bg-emerald-400",
+    text: "text-emerald-700 dark:text-emerald-300",
+  },
+  completed: {
+    word: "Completed",
+    dot: "bg-ink-soft",
+    text: "text-ink-soft",
+  },
+  failed: {
+    word: "Failed",
+    dot: "bg-red-600 dark:bg-red-400",
+    text: "text-red-700 dark:text-red-300",
+  },
 };
 
 interface SessionLogProps {
@@ -51,7 +68,7 @@ function groupLabel(date: Date, now: Date): string {
 export function SessionLog({ sessions }: SessionLogProps) {
   if (sessions.length === 0) {
     return (
-      <p className="py-6 text-sm text-stone-500 dark:text-stone-400">
+      <p className="py-6 text-sm text-ink-muted">
         No sessions yet — your first round is one click away.
       </p>
     );
@@ -74,26 +91,26 @@ export function SessionLog({ sessions }: SessionLogProps) {
       {groups.map((group, groupIndex) => (
         <li key={group.label}>
           <p
-            className={`text-xs font-medium text-stone-400 dark:text-stone-500 ${
+            className={`text-xs font-medium text-ink-muted ${
               groupIndex === 0 ? "pb-1" : "pb-1 pt-6"
             }`}
           >
             {group.label}
           </p>
-          <ul className="divide-y divide-stone-200 dark:divide-stone-800">
+          <ul className="divide-y divide-line">
             {group.items.map((session) => {
               const status = STATUS_WORDS[session.status] ?? STATUS_WORDS.created;
               return (
                 <li key={session.sessionId}>
                   <Link
                     href={`/dashboard/interview/${session.sessionId}`}
-                    className="group grid cursor-pointer grid-cols-[1fr_auto] items-baseline gap-x-4 py-3 outline-none transition-colors hover:bg-stone-50 focus-visible:bg-stone-50 dark:hover:bg-stone-900 dark:focus-visible:bg-stone-900"
+                    className="group grid cursor-pointer grid-cols-[1fr_auto] items-baseline gap-x-4 py-3 outline-none transition-colors hover:bg-card focus-visible:bg-card"
                   >
                     <span className="min-w-0">
-                      <span className="block truncate text-sm font-medium text-stone-900 transition-colors group-hover:text-teal-800 dark:text-stone-100 dark:group-hover:text-teal-300">
+                      <span className="block truncate text-sm font-medium text-ink transition-colors group-hover:text-emerald-700 dark:group-hover:text-emerald-300">
                         {session.jobRole}
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-stone-500 dark:text-stone-400">
+                      <span className="mt-0.5 block truncate text-xs text-ink-muted">
                         {session.categoryNameSnapshot}, {session.evaluationMode}{" "}
                         evaluation
                       </span>

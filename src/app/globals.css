@@ -1,13 +1,37 @@
 @import "tailwindcss";
 
+/*
+ * AIMIS "green room" tokens (frontend-design pass, round 3).
+ * Green is semantic, not decorative: it marks the ready/live state and
+ * the primary action. Stage surfaces are green-black, content sits on
+ * cool paper. Status: amber = needs attention, red = failure only.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #f7f8f6;
+  --card: #ffffff;
+  --ink: #161b18;
+  --ink-soft: #47514b;
+  --ink-muted: #6b736e;
+  --line: #e4e7e4;
+  --stage: #101512;
+  --stage-raised: #1a211d;
+  --stage-border: #28302b;
+  --stage-text: #e8efea;
+  --stage-muted: #9cafa5;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-paper: var(--paper);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-muted: var(--ink-muted);
+  --color-line: var(--line);
+  --color-stage: var(--stage);
+  --color-stage-raised: var(--stage-raised);
+  --color-stage-border: var(--stage-border);
+  --color-stage-text: var(--stage-text);
+  --color-stage-muted: var(--stage-muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-display);
@@ -15,13 +39,25 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --paper: #0d100e;
+    --card: #161c18;
+    --ink: #edf2ee;
+    --ink-soft: #b3bcb6;
+    --ink-muted: #8b948e;
+    --line: #242b26;
+    --stage: #131a16;
+    --stage-raised: #1b231e;
+    --stage-border: #2b342e;
+    --stage-text: #e8efea;
+    --stage-muted: #9cafa5;
   }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  /* Geist (not Arial): the font variables are attached to <html> in the
+   * root layout; body previously hardcoded Arial, so the loaded fonts
+   * never rendered. */
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
