@@ -37,6 +37,12 @@ missing.
 | `LOG_LEVEL` | M1 logging | Minimal, content-free operational logging |
 | `APP_URL` | M2 interview | Absolute app origin for absolute URLs (downloads, OAuth-free callbacks) |
 
+## Smoke-only secrets (never read by application code)
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `FISH_AUDIO_API_KEY` | live provider smokes only | Owner-supplied Fish Audio key used by one-off evidence scripts (e.g. the TT-16 feasibility run in `FEASIBILITY.md`). The application never reads this variable — provider keys are user-supplied BYOK values that enter through the API and are encrypted at rest. Not part of the `src/lib/env.ts` schema; scripts load it directly from `.env` and must never print it. |
+
 ## Secret handling
 
 - Provider API keys are **user-supplied** (BYOK). They are encrypted at rest with the

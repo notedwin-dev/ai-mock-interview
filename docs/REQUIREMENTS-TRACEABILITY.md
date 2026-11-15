@@ -65,7 +65,7 @@ text/status remain authoritative in Notion — this map is an index, not a regis
 | --- | --- | --- | --- | --- |
 | OPEN-004 | Performance targets (3 s / 2 s p95 are proposals) | Tech lead → owner | NFR-PERF-001/002 stay unverified | Measure baseline after first vertical slice; bring realistic targets |
 | OPEN-005 / OWNER-006 | O4 evaluation methodology (≥30 participants confirmed) | Supervisor | M4/O4 planning | Follow-up day is **today, Fri 13 Nov** per schedule; do not treat ~100 as required |
-| OPEN-007 | Provider capability feasibility matrix | Tech lead (TT-16/TT-20) | M2 interview runtime cannot be promised | Spikes during M1; catalogue fixed (ADR-030); do not re-ask owner |
+| OPEN-007 | Provider capability feasibility matrix | Tech lead (TT-16/TT-20) | M2 interview runtime cannot be promised | **Executed 2026-11-16**: fish-audio TTS live-validated, OpenAI-compatible wire smoke-verified — `docs/FEASIBILITY.md`; remaining presets land with M2 adapters (reported skipped, never silently validated) |
 | OPEN-008 | Dictionary → ERD/migrations derivation | Tech lead (TT-3 in progress) | All schema-dependent work | Derive from v0.4, test constraints early in M1 |
 | OWNER-003 | FR10 answer reattempt in scope? | Owner | History/report scope edge | Recommendation stands: defer from MVP unless owner decides |
 | OWNER-007 | Detailed scoring anchors + worked examples | Tech lead drafts → owner | TT-15 rubric detail | Draft during M3 from approved weights/anchors |

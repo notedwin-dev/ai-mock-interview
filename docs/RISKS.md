@@ -27,7 +27,7 @@ environment phase surfaced. Review at every milestone boundary.
 | --- | --- | --- | --- |
 | OPEN-004 | Measurable performance targets (current 3 s / 2 s p95 are proposals) | Tech lead proposes → owner approves | M4 baseline |
 | OPEN-005 / OWNER-006 | O4 methodology (instrument, procedure, inclusion criteria) | Supervisor | M4 evaluation prep |
-| OPEN-007 | Provider capability matrix results (execution, not a re-selection) | Tech lead | M2 interview runtime |
+| OPEN-007 | Provider capability matrix results (execution, not a re-selection) — **executed 2026-11-16**, see `FEASIBILITY.md`; fish-audio TTS + OpenAI-compatible wire verified, other presets defer to M2 adapters | Tech lead | M2 interview runtime |
 | OPEN-008 | ERD/migrations derivation sign-off from v0.4 | Tech lead | M1 schema work |
 | OWNER-003 | FR10 answer reattempt — defer from MVP? | Owner | M3 history scope |
 | OWNER-007 | Detailed rubric anchors + worked examples approval | Owner (tech lead drafts) | M3 evaluation |
