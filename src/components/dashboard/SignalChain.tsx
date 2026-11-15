@@ -5,7 +5,7 @@ import type { ProviderConfigSummary } from "@/lib/providers/config";
 import illustration from "../../../public/illustration.png";
 
 /**
- * Dashboard hero banner + signal-chain strip (PrepWise-adapted, round 4).
+ * Dashboard hero banner + signal-chain strip (reference-design-adapted, round 4).
  * The banner pairs the round-ready headline with the practice illustration
  * and one clear action; the strip below mirrors the candidate's provider
  * pipeline (ASR → LLM → TTS) with real credential states — never key

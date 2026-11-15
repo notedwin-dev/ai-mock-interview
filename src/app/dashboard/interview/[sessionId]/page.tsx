@@ -7,7 +7,7 @@ import {
 import { RoomControls } from "@/components/interview/RoomControls";
 
 /**
- * Meeting-style interview room (FR-INTERVIEW-003), PrepWise-adapted: the
+ * Meeting-style interview room (FR-INTERVIEW-003), reference-design-adapted: the
  * owner's session snapshot and chronological transcript render as a
  * two-participant layout with an added conversation sidebar (speaker
  * attribution is an AIMIS requirement the reference lacks). Controls

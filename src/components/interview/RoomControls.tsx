@@ -6,7 +6,7 @@ import { typedTurnSchema } from "@/lib/interview/validation";
 import type { SessionSummary, TranscriptMessage } from "@/lib/interview/service";
 
 /**
- * Meeting-room controls (FR-INTERVIEW-003/004/011), PrepWise-adapted: a
+ * Meeting-room controls (FR-INTERVIEW-003/004/011), reference-design-adapted: a
  * two-participant layout (AI interviewer tile + candidate tile), the latest
  * interviewer question in a full-width bar, and the AIMIS additions the
  * reference lacks — a chronological conversation sidebar with speaker

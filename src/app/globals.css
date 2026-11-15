@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 /*
- * AIMIS dark identity (round 4), adapted from the PrepWise reference kit
- * (docs/design/references/prepwise): charcoal surfaces on a faint room grid,
+ * AIMIS dark identity (round 4), adapted from the supplied reference design kit
+ * (docs/design/references): charcoal surfaces on a faint room grid,
  * spacious layouts, pill controls, restrained borders. The accent stays jade
  * (owner kept the green accent over the kit's lavender): jade = ready/live/
  * primary action, amber = needs attention, red = failure or leave.

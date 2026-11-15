@@ -12,7 +12,7 @@ import {
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
 
 /**
- * Candidate dashboard (TT-6, PrepWise-adapted): a hero banner with the
+ * Candidate dashboard (TT-6, reference-design-adapted): a hero banner with the
  * primary action over a signal-chain strip, then "Your past interviews" as a
  * restrained card grid of real sessions. The shell (dashboard/layout.tsx)
  * owns identity, navigation and sign-out. Server components read via Prisma
