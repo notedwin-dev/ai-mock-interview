@@ -1,32 +1,65 @@
 import Link from "next/link";
 import Image from "next/image";
-import { AudioLines, Brain, Mic } from "lucide-react";
+import { AudioLines, Brain, ClipboardCheck, Mic } from "lucide-react";
 import type { ProviderConfigSummary } from "@/lib/providers/config";
 import illustration from "../../../public/illustration.png";
 
 /**
- * Dashboard hero banner + signal-chain strip (reference-design-adapted, round 4).
- * The banner pairs the round-ready headline with the practice illustration
- * and one clear action; the strip below mirrors the candidate's provider
- * pipeline (ASR → LLM → TTS) with real credential states — never key
- * material (ADR-0005). Green means ready/live, amber needs attention, red is
- * failure only. Server components — links only, no client JS.
+ * Dashboard hero banner + AI capability strip (reference-design-adapted,
+ * round 5). The banner pairs the round-ready headline with the practice
+ * illustration and one clear action; the strip below is a STATUS LIST, not a
+ * pipeline: it mirrors the candidate's four independently configured AI
+ * capabilities (FR-PROVIDER-001..003) with real credential states — never key
+ * material (ADR-0005). Honesty rules encoded here:
+ *
+ * - Only the interviewer (LLM) gates starting a session (FR-INTERVIEW-001
+ *   resolves the llm capability; ASR/TTS are not required to start).
+ * - Speech recognition and speech output are the voice-loop providers, not
+ *   the user's microphone or speaker — the wording never suggests a device
+ *   check.
+ * - The evaluation scorer is configured separately from the interviewer
+ *   (ADR-028/029) and produces the post-interview report; a missing scorer
+ *   does not block interviews, it blocks reports, and the strip says so.
+ *
+ * Green means validated, amber needs attention, red is failure only.
+ * Server components — links only, no client JS.
  */
 
-const CHAIN_NODES = [
-  { capability: "asr", label: "Your voice", hint: "Microphone input", Icon: Mic },
-  { capability: "llm", label: "The interviewer", hint: "AI question and follow-up", Icon: Brain },
-  { capability: "tts", label: "Voice out", hint: "Spoken responses", Icon: AudioLines },
+const CAPABILITY_NODES = [
+  {
+    capability: "asr",
+    label: "Speech recognition (ASR)",
+    hint: "Transcribes your spoken answers",
+    Icon: Mic,
+  },
+  {
+    capability: "llm",
+    label: "Interviewer (LLM)",
+    hint: "Conducts the interview",
+    Icon: Brain,
+  },
+  {
+    capability: "tts",
+    label: "Speech output (TTS)",
+    hint: "Speaks the interviewer's questions",
+    Icon: AudioLines,
+  },
+  {
+    capability: "scorer",
+    label: "Evaluation scorer",
+    hint: "Scores the completed interview",
+    Icon: ClipboardCheck,
+  },
 ] as const;
 
-type ChainCapability = (typeof CHAIN_NODES)[number]["capability"];
+type CapabilityKey = (typeof CAPABILITY_NODES)[number]["capability"];
 
 const PRIMARY_PILL =
   "inline-flex h-11 cursor-pointer items-center rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400";
 
 function servingRow(
   configurations: ProviderConfigSummary[],
-  capability: ChainCapability,
+  capability: CapabilityKey,
 ): ProviderConfigSummary | null {
   return (
     configurations.find((row) => row.isEnabled && row.capabilities[capability]) ??
@@ -35,14 +68,15 @@ function servingRow(
 }
 
 /**
- * Node state in the chain strip: provider name once validated, amber while
- * unvalidated, red after a failed check, dim when nothing is set up.
+ * Node state in the capability strip: the serving provider's name once
+ * validated, amber while unvalidated, red after a failed check, dim when
+ * nothing is configured for that capability.
  */
 function nodeState(row: ProviderConfigSummary | null) {
   if (!row) {
     return {
       dot: "bg-ink-muted/60",
-      word: "Not set up",
+      word: "Not configured",
       tone: "text-ink-muted",
     };
   }
@@ -74,7 +108,7 @@ const UNKNOWN_STATE = {
   tone: "text-ink-muted",
 } as const;
 
-interface SignalChainProps {
+interface CapabilityStripProps {
   configurations: ProviderConfigSummary[];
   readinessFailed: boolean;
 }
@@ -82,7 +116,7 @@ interface SignalChainProps {
 export function ConsoleBanner({
   configurations,
   readinessFailed,
-}: SignalChainProps) {
+}: CapabilityStripProps) {
   const interviewerReady =
     !readinessFailed && servingRow(configurations, "llm") !== null;
 
@@ -95,10 +129,10 @@ export function ConsoleBanner({
           </h2>
           <p className="mt-3 max-w-md text-sm leading-relaxed text-ink-muted sm:text-base">
             {readinessFailed
-              ? "Pipeline status could not be loaded. Check back shortly."
+              ? "Capability status could not be loaded. Check back shortly."
               : interviewerReady
-                ? "Your signal chain is live. Set the scene, then step into the room."
-                : "The interviewer needs a working connection before a session can start."}
+                ? "Your interviewer connection is set up. Create an interview and step into the room."
+                : "The interviewer needs a configured connection before a session can start."}
           </p>
           <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
             {interviewerReady ? (
@@ -138,17 +172,26 @@ export function ConsoleBanner({
   );
 }
 
-export function ChainStrip({ configurations, readinessFailed }: SignalChainProps) {
-  const interviewerReady =
+export function CapabilityStrip({
+  configurations,
+  readinessFailed,
+}: CapabilityStripProps) {
+  const interviewerConfigured =
     !readinessFailed && servingRow(configurations, "llm") !== null;
+  const voiceConfigured =
+    !readinessFailed &&
+    servingRow(configurations, "asr") !== null &&
+    servingRow(configurations, "tts") !== null;
+  const scorerConfigured =
+    !readinessFailed && servingRow(configurations, "scorer") !== null;
 
   return (
     <section
-      aria-label="Voice pipeline status"
+      aria-label="AI capability status"
       className="rounded-2xl border border-line bg-surface p-4 sm:p-5"
     >
-      <ul className="grid gap-2 sm:grid-cols-3 sm:gap-4">
-        {CHAIN_NODES.map((node) => {
+      <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:gap-3">
+        {CAPABILITY_NODES.map((node) => {
           const row = servingRow(configurations, node.capability);
           const state = readinessFailed ? UNKNOWN_STATE : nodeState(row);
           return (
@@ -185,10 +228,22 @@ export function ChainStrip({ configurations, readinessFailed }: SignalChainProps
           );
         })}
       </ul>
-      {!interviewerReady && !readinessFailed ? (
+      {!readinessFailed && !interviewerConfigured ? (
         <p className="mt-2 px-1.5 text-xs text-ink-muted">
-          The interviewer needs a validated connection — set it up in AI
+          Interviews need a configured interviewer — set one up in AI
           configuration.
+        </p>
+      ) : null}
+      {!readinessFailed && interviewerConfigured && !voiceConfigured ? (
+        <p className="mt-2 px-1.5 text-xs text-ink-muted">
+          Spoken interviews also need speech recognition and speech output
+          configured — both live in AI configuration.
+        </p>
+      ) : null}
+      {!readinessFailed && !scorerConfigured ? (
+        <p className="mt-2 px-1.5 text-xs text-ink-muted">
+          Reports need the separately configured evaluation scorer — set it up
+          in AI configuration.
         </p>
       ) : null}
     </section>
