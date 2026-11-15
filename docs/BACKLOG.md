@@ -23,6 +23,14 @@ effective window 16 Nov – 16 Dec ≈ 30 days; presentation week of 4 Jan 2027)
 Optional work (native realtime runtime, recordings, admin dashboard) must not displace
 the core workflow — approved rule.
 
+> **Scope correction 2026-11-16 (owner decision):** the creation flow was corrected
+> to the approved agent-led journey (FR-SETUP-006), and scheduling + invitation
+> links moved from parked proposals to Approved (FR-SETUP-007/008; tracker task
+> created and In progress). Work items 24–27 below carry the new scope; 8's room
+> plan is re-layered (confirmation → waiting room → overlay-conversation room).
+> The full ADR-030 preset set (incl. DeepSeek, Z.ai GLM, Qwen) is in scope for
+> item 24. See docs/UI-PLAN.md §10.
+
 ## Workstream → task mapping (TT = Notion Task Tracker ID)
 
 | # | Work item | TT | Priority | Milestone |
@@ -54,8 +62,16 @@ the core workflow — approved rule.
 | 21 | Wireframe pass for runtime cards + capability rows + report states | TT-2 | High | Before M2 UI |
 | 22 | Diagram completion pass (architecture, use case, DFD, activity) | TT-14, TT-3/4/5 | High | M0→M4 |
 | 23 | Landing page | TT-1 | Low | M4 |
+| 24 | AI configuration experience `/dashboard/configuration` + registry presets completed (DeepSeek, Z.ai GLM, Qwen; distinct preset/Custom modes, per-capability sections, discovery + probe + readiness, independent scorer) | TT-20 | Critical | M2 |
+| 25 | Agent-led interview creation: conversational agent → structured configuration → auto-create scheduled interview | TT-8 | Critical | M2 |
+| 26 | Interview entry re-layer: confirmation screen → waiting room (device checks, local-only camera) → live room with overlay conversation | TT-8, TT-2 | Critical | M2 |
+| 27 | Scheduling + invitation links: schema migration (scheduled state, token + revocation), token-scoped `/i/[token]` entry, server-side authorization | TT-10 (new tracker task) | Critical | M2 |
 
 Dependencies that gate M1: 1 → 2/3/4 → 7; 5 gates M2's 9; 21 gates 8's UI detail.
+Dependencies added 2026-11-16: 24 → 25 (the creation agent needs a configured,
+validated LLM); 25 → 27 (scheduled state + link target the generated interview);
+27 gates the invitation-link entry; 26's confirmation/waiting-room layering reads
+the scheduled state from 27.
 
 ## Proposed new Task Tracker entries (owner to confirm before adding)
 

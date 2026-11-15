@@ -10,13 +10,21 @@ How to read: each FR group maps to the modules that implement it, the tasks that
 the work, and the engineering controls that satisfy the related NFRs. Requirement
 text/status remain authoritative in Notion — this map is an index, not a register.
 
+> **Register change 2026-11-16 (owner decision, recorded in Notion via MCP):** the
+> agent-led interview creation flow is approved as FR-SETUP-006 and replaces the
+> manual setup-form flow (FR-SETUP-001..005 remain the context data requirements,
+> now gathered by the agent); scheduling (FR-SETUP-007) and invitation links
+> (FR-SETUP-008) moved from parked proposals to Approved; tracker task "Implement
+> interview scheduling and invitation links" is In progress. ADR-030's DeepSeek,
+> Z.ai GLM and Qwen LLM presets are being added to the provider registry.
+
 ## 1. FR group → modules → tasks
 
 | FR group (count) | Implements | Home modules | Tasks (TT) | Depends on |
 | --- | --- | --- | --- | --- |
 | FR-AUTH (9) | Registration, sign-in/out, one-role access, owner-scoped private data, 7-day deletion grace (request/cancel/export/permanent) | `src/lib/auth`, `(auth)` routes, account API, deletion worker | TT-10 (API design), foundation auth task (M1) | Schema v0.4 `user_account`; Argon2id (ADR-0006); Auth.js v5 |
 | FR-PROFILE (6) | Candidate profile, visibility switch, public projection allowlist, career info, resume upload with unchecked-default consent, consent revoke | `(candidate)/profile`, `src/lib/profile`, resume storage route | TT-6, TT-10 | Schema v0.4 `candidate_profile`/`candidate_resume` |
-| FR-SETUP (5) | Role, JD, category, evaluation mode, runtime mode selection | `(candidate)/setup`, session creation API | TT-6, TT-8, TT-10 | Schema v0.4 `interview_session` snapshot fields |
+| FR-SETUP (8) | Role, JD, category, evaluation mode, runtime mode selection; **agent-led conversational creation (FR-SETUP-006, replaces the manual form flow — owner decision 2026-11-16)**; scheduled ready state (FR-SETUP-007); invitation-link access with revocation (FR-SETUP-008) | `(candidate)/dashboard`, agent creation route, confirmation/waiting-room entry, session creation API | TT-6, TT-8, TT-10, new tracker task "Implement interview scheduling and invitation links" | Schema v0.4 `interview_session` snapshot fields **+ scheduled-state and invitation-token fields (new migration)**; LLM adapter for the agent |
 | FR-PROVIDER (9) | Preset/custom per-capability configs, capability-scoped model settings, independent scorer, validation, discovery, runtime resolution | `src/lib/providers/*` (config, registry, probes), provider-config UI | TT-9, TT-20, TT-10 | Schema v0.4 `user_provider_configuration`; ADR-0002/0005; SSRF guard |
 | FR-INTERVIEW (13) | Meeting-style room, question generation, text/voice turns, TTS speech, follow-ups, acknowledgements, mic control, local camera, end-call (candidate + agent), native realtime (High, later) | `src/lib/interview/*`, `(candidate)/room`, TT-8 room UI | TT-8, TT-9, TT-16 | FR-PROVIDER resolved config; ASR/LLM/TTS adapters |
 | FR-TRANSCRIPT (6) | Finalized ordered messages (both speakers), grouping, transcript-as-source-of-truth, download | `src/lib/interview/transcript.ts`, `assessment-units.ts`, download route | TT-8, TT-15, TT-10 | Schema v0.4 `conversation_message`, `interview_assessment_unit` |

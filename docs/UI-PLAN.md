@@ -4,6 +4,11 @@ Plan for the candidate-facing UI: dashboard → new-interview setup → meeting-
 voice room. Written for backlog slice 21 (TT-2 wireframe pass, which gates slice 8's
 room UI detail) and slices 8–10 (room UI, ASR/TTS adapters, orchestrator).
 
+> **Superseded in part — see §10.** The 2026-11-16 owner decision replaces the
+> setup-form creation flow (§4) with an agent-led conversational creation flow
+> (FR-SETUP-006) and adds scheduling + invitation links (FR-SETUP-007/008). §4 is
+> retained as the historical record; §10 is the current creation journey.
+
 Sources of truth used: Notion FRs (all cited items **Approved**), ADR-0007 (UI
 stack), `ARCHITECTURE.md` §3–4, the existing typed-slice API contracts, and the
 owner-referenced UI pattern: "Full Stack AI App: Build a Real-Time Voice Agent
@@ -13,17 +18,18 @@ dashboard → create-interview form → real-time voice-agent room → feedback 
 ## 1. Scope rule (what is approved vs proposed)
 
 Everything in sections 3–5 maps to an approved FR. Three elements of the referenced
-video pattern are **not** covered by any approved requirement and are therefore
-listed as owner proposals in §7 — they are not silently built in:
+video pattern were **not** covered by any approved requirement and were therefore
+listed as owner proposals in §7 — they were not silently built in:
 
-1. **Scheduling** an interview for a future time — no FR exists; FR-INTERVIEW-001
-   is "start … using the saved setup" (immediate).
+1. **Scheduling** an interview for a later time — **approved 2026-11-16** as
+   FR-SETUP-007 (scheduled ready state) + FR-SETUP-008 (invitation links).
 2. **Resume content as interview context** ("resume summary") — resumes are
    profile/recruiter artifacts only (FR-PROFILE-005/006); FR-INTERVIEW-002 fixes
-   question context to *role + job description + category*.
-3. **An agent-led pre-interview briefing conversation** in the setup flow — the
-   approved tailoring happens via FR-INTERVIEW-002 (generation from setup) and
-   FR-INTERVIEW-007 (in-room follow-ups).
+   question context to *role + job description + category*. **Still parked (P-2).**
+3. **An agent-led pre-interview briefing conversation** in the setup flow —
+   **approved 2026-11-16** as FR-SETUP-006, which *replaces* the manual setup form
+   as the creation path (the agent gathers the FR-SETUP-001..005 context
+   conversationally and generates the structured configuration).
 
 ## 2. Information architecture (candidate route group)
 
@@ -52,7 +58,11 @@ meeting room": the primary card routes to the setup wizard.
 Server component reads via Prisma directly (ARCHITECTURE §4 rule); no client
 fetching on first paint.
 
-## 4. Setup wizard spec (`/dashboard/interview/new`)
+## 4. Setup wizard spec (`/dashboard/interview/new`) — SUPERSEDED by §10
+
+> Superseded 2026-11-16 by the agent-led creation flow (FR-SETUP-006). The form is
+> not part of the current build; this section is the historical record. The
+> backend payload below remains the contract the agent flow must produce.
 
 One screen, six controls, all client-side form state — no stepper (the approved
 setup is a single saved unit, FR-SETUP-001..005 acceptance criteria treat setup as
@@ -134,9 +144,9 @@ Domain components:
 
 | # | Proposal | Why it's not in the approved FRs | Recommendation |
 | --- | --- | --- | --- |
-| P-1 | Schedule an interview for later (date/time, reminder) | Only FR-INTERVIEW-001 immediate start is approved | Defer past MVP; immediate start covers the mock-interview loop |
+| P-1 | Schedule an interview for later (date/time, reminder) | **Approved 2026-11-16** — FR-SETUP-007 (scheduled ready state) + FR-SETUP-008 (invitation links); tracker task In progress | In scope now; reminder notifications stay out of scope |
 | P-2 | Resume-aware interview context (candidate picks an uploaded resume; backend derives a summary into the prompt) | FR-PROFILE-005/006 scope resumes to profile + recruiter sharing; FR-INTERVIEW-002 fixes context to role + JD + category | Worth an owner decision — strong value for behavioural interviews; needs a new FR + data-model field (e.g. `resume_context_snapshot`) and privacy review before M3 evaluation sees it |
-| P-3 | Agent-led pre-interview briefing chat in setup | Tailoring is approved only as FR-INTERVIEW-002/007 | Skip; the setup form + in-room follow-ups achieve the video's tailoring effect |
+| P-3 | Agent-led pre-interview briefing chat in setup | **Approved 2026-11-16** — FR-SETUP-006, elevated from a pre-interview briefing to the full creation journey, replacing the manual form flow | In scope now |
 
 ## 8. Build order alignment
 
@@ -145,9 +155,9 @@ the room renders live interviewer behaviour only when slices 9–10 (ASR/TTS
 adapters, orchestrator) land. Until then the room shows `waiting` with the text
 answer path — which is already end-to-end.
 
-## 9. PrepWise visual adaptation (round 4)
+## 9. Reference-design visual adaptation (round 4)
 
-Owner mandate: the PrepWise design assets (`docs/design/references/prepwise/`,
+Owner mandate: the supplied design reference assets (`docs/design/references/`,
 from the JavaScript Mastery interview platform kit — the same video pattern
 referenced in the header) are the mandatory visual reference for layout and
 presentation; the green accent is kept over the kit's lavender (owner decision),
@@ -188,3 +198,66 @@ failure/leave. Adapted layouts, not copies.
 - Feedback screen → M3 (see table).
 - Camera preview (FR-INTERVIEW-010, local-only) → arrives with the voice-loop
   slices; not part of the typed-path room.
+
+## 10. Flow correction (2026-11-16 owner decision)
+
+Owner mandate: a product-flow correction, not a visual redesign. The implemented
+creation flow deviated from the product's intended journey; the corrected journey
+is mandatory and the manual setup form is retired as the creation path.
+
+### 10.1 Approved journey (acceptance path)
+
+```
+/dashboard  "Launch AI Interview Agent" (primary CTA)
+   └─ /dashboard/interview/agent      conversational agent gathers purpose /
+                                      role / JD + strictness (Supportive /
+                                      Balanced / Rigorous)  [FR-SETUP-006]
+   └─ generated structured configuration shown to the user
+   └─ auto-create interview in scheduled/ready state   [FR-SETUP-007]
+        (no manual form between generation and creation)
+   └─ interviewee entry — owner route or invitation link /i/[token]  [FR-SETUP-008]
+   └─ confirmation screen  (pre-configured details, review-and-confirm)
+   └─ waiting room  (camera preview local-only, mic/speaker selection +
+      status, meeting details, explicit "Join Call"; no auto-start)
+   └─ live interview room  (two participant panels, AI states; conversation
+      is an independently openable OVERLAY, not a sidebar)
+   └─ completion → transcript finalised → separately configured scorer
+      → approved evaluation architecture → feedback report
+      (summary, overall score + mode, criteria + evidence, strengths,
+      improvements, per-assessment-unit feedback)  [FR-EVAL/FR-ASYNC]
+```
+
+### 10.2 Route-level corrections
+
+| Route | Change | FR / basis |
+| --- | --- | --- |
+| `/dashboard` | Primary CTA becomes **Launch AI Interview Agent** (agent route); provider-readiness signal chain stays | FR-SETUP-006 |
+| `/dashboard/interview/agent` | **New.** Conversational agent → generated configuration review → auto-create | FR-SETUP-006 |
+| `/dashboard/interview/[sessionId]` | Re-layered: confirmation → waiting room → live room states; conversation becomes an overlay panel | FR-INTERVIEW-003/010, FR-SETUP-007 |
+| `/i/[token]` | **New.** Invitation-link entry → confirmation/waiting room for that interview only | FR-SETUP-008 |
+| `/dashboard/configuration` | **New.** Dedicated AI configuration experience (distinct preset vs Custom modes; per-capability expandable sections ASR/LLM/TTS with provider chips; per-capability Custom OpenAI-compatible URL/key/model; model discovery + probe + readiness; independent scorer section) | FR-PROVIDER-001..009, ADR-028/029/030 |
+| `/dashboard/interview/new` | Retired as creation path (SetupForm superseded; may remain as a direct-create fallback only if the owner asks) | FR-SETUP-006 supersedes |
+| `/dashboard/history` | Unchanged plan; fills out with reports in M3 | FR-HISTORY |
+
+### 10.3 Rules carried into the corrected flow
+
+- Camera input is local preview only — never AI input (ADR-005, AGENTS rule).
+- No auto-start: scheduled interviews start only after an explicit join action
+  (FR-SETUP-007).
+- No configuration inheritance or silent provider substitution across
+  capabilities; the scorer is configured independently of the interview LLM
+  (ADR-028/029; FR-PROVIDER).
+- Rubric mode (Supportive/Balanced/Rigorous) is an evaluation decision, distinct
+  from the interview LLM choice and the scorer choice.
+- All new authorization (invitation links) is enforced server-side at the
+  boundary; links open exactly one interview and are revocable (FR-SETUP-008).
+
+### 10.4 Build order (backlog slices 8–15)
+
+1. Provider registry presets (DeepSeek, Z.ai GLM, Qwen — ADR-030 gap closed) +
+   `/dashboard/configuration` experience (existing probe/models APIs).
+2. LLM adapter + orchestrator (slices 9–10) — powers both the creation agent and
+   the in-room interviewer.
+3. Agent creation flow, confirmation screen, waiting room, overlay room.
+4. Scheduling + invitation links (schema migration + server-side authorization).
+5. Evaluation job/worker/scorer (M3 slices 12–13) + report UI + history route.
