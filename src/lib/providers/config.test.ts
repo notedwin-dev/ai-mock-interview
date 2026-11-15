@@ -23,6 +23,14 @@ describe("capabilitiesJsonSchema", () => {
     ).toBe("GPT-4o-Mini");
   });
 
+  it("accepts the scorer capability (FR-PROVIDER-003) with its own model_id", () => {
+    const parsed = capabilitiesJsonSchema.parse({
+      llm: { modelId: "gpt-4o" },
+      scorer: { modelId: "gpt-4o-mini" },
+    });
+    expect(parsed.scorer?.modelId).toBe("gpt-4o-mini");
+  });
+
   it("rejects unknown capability keys", () => {
     expect(() =>
       capabilitiesJsonSchema.parse({ stt: { modelId: "whisper-1" } }),
@@ -79,6 +87,28 @@ describe("validateProviderRules", () => {
       capabilities: { asr: { modelId: "whisper-1" }, llm: { modelId: "gpt-4o" } },
     });
     expect(rules.normalizedBaseUrl).toBeNull();
+  });
+
+  it("accepts a preset serving the scorer capability it declares", () => {
+    const rules = validateProviderRules({
+      providerType: "preset",
+      providerName: "openai",
+      capabilities: { scorer: { modelId: "gpt-4o-mini" } },
+    });
+    expect(rules.normalizedBaseUrl).toBeNull();
+  });
+
+  it("rejects a tts-only preset used for the scorer capability", () => {
+    try {
+      validateProviderRules({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        capabilities: { scorer: { modelId: "x" } },
+      });
+      expect.unreachable("tts-only presets cannot serve scorer");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("capability_not_supported");
+    }
   });
 
   it("rejects an unknown preset name", () => {

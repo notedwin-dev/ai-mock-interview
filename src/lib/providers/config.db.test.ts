@@ -274,6 +274,21 @@ d("provider configuration service (integration)", () => {
     expect(resolved.apiKey).toBe("sk-openai-key");
   });
 
+  it("resolves the scorer capability from a configuration (FR-PROVIDER-003)", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      ...presetInput,
+      capabilities: {
+        llm: { modelId: "gpt-4o" },
+        scorer: { modelId: "gpt-4o-mini" },
+      },
+    });
+
+    const resolved = await resolveForOutboundCall(userId, "scorer");
+    expect(resolved.modelId).toBe("gpt-4o-mini");
+    expect(resolved.apiKey).toBe("sk-openai-key");
+  });
+
   it("fails closed when no enabled configuration serves the capability", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);

@@ -11,7 +11,7 @@
  * exposes anything.
  */
 
-export const CAPABILITIES = ["asr", "llm", "tts"] as const;
+export const CAPABILITIES = ["asr", "llm", "tts", "scorer"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 export interface ProviderPreset {
@@ -25,23 +25,26 @@ export interface ProviderPreset {
 }
 
 export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
+  // The scorer capability (FR-PROVIDER-003) is an LLM-style structured-output
+  // call, so it is declared on presets that serve llm; tts-only presets do not
+  // serve it. Custom OpenAI-compatible endpoints may serve any capability.
   {
     providerName: "openai",
     displayName: "OpenAI",
     defaultBaseUrl: "https://api.openai.com/v1",
-    capabilities: ["asr", "llm"],
+    capabilities: ["asr", "llm", "scorer"],
   },
   {
     providerName: "anthropic",
     displayName: "Anthropic",
     defaultBaseUrl: "https://api.anthropic.com",
-    capabilities: ["llm"],
+    capabilities: ["llm", "scorer"],
   },
   {
     providerName: "google",
     displayName: "Google",
     defaultBaseUrl: "https://generativelanguage.googleapis.com",
-    capabilities: ["asr", "llm"],
+    capabilities: ["asr", "llm", "scorer"],
   },
   {
     providerName: "elevenlabs",
