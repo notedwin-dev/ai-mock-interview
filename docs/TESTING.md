@@ -77,8 +77,9 @@ deployed database; integration tests must clean up what they create.
 
 | Option | Isolation | Notes |
 | --- | --- | --- |
-| Docker compose (`docker compose up -d db`) | full | Preferred: create/use the `aimis_test` database on the compose Postgres |
-| `pnpm prisma dev --name aimis-test` (Prisma Postgres dev) | per-server | Second named dev server has its own storage; run `pnpm prisma migrate deploy` against it once. Note: within ONE dev server, `CREATE DATABASE` does not isolate (PGlite shares storage), hence a separate server for tests |
+| Native Postgres, owner-managed (port 5432 — approved local dev DB) | full | Owner-created `aimis-test` database; run `pnpm prisma migrate deploy` against it once (URL swap via `TEST_DATABASE_URL`). Current local setup: `aimis` (dev) + `aimis-backup` (shadow) + `aimis-test` on PostgreSQL 17 |
+| Docker compose (`docker compose up -d db`) | full | Deployment-only per owner decision (2026-11-14); still valid for a server deployment's test database |
+| `pnpm prisma dev --name aimis-test` (Prisma Postgres dev) | per-server | Fallback without native Postgres; second named dev server has its own storage; run `pnpm prisma migrate deploy` against it once. Note: within ONE dev server, `CREATE DATABASE` does not isolate (PGlite shares storage), hence a separate server for tests |
 | The `default` dev server | none | Dev only — do not use for `TEST_DATABASE_URL` |
 
 Known limitation: the PGlite-backed `prisma dev` server is single-connection, so
