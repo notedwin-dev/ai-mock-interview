@@ -28,4 +28,29 @@ describe("provider adapter registry", () => {
     );
     expect(getPresetAdapter("does-not-exist")).toBeUndefined();
   });
+
+  it("implements the complete ADR-030 preset set", () => {
+    expect(PRESET_ADAPTERS.map((preset) => preset.providerName)).toEqual([
+      "openai",
+      "anthropic",
+      "google",
+      "elevenlabs",
+      "fish-audio",
+      "deepseek",
+      "zai-glm",
+      "qwen",
+    ]);
+  });
+
+  it("OpenAI-protocol LLM presets serve llm + scorer only with verified base URLs", () => {
+    for (const [name, baseUrl] of [
+      ["deepseek", "https://api.deepseek.com"],
+      ["zai-glm", "https://api.z.ai/api/paas/v4"],
+      ["qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"],
+    ] as const) {
+      const preset = getPresetAdapter(name);
+      expect(preset?.defaultBaseUrl).toBe(baseUrl);
+      expect(preset?.capabilities).toEqual(["llm", "scorer"]);
+    }
+  });
 });
