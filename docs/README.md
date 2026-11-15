@@ -16,6 +16,7 @@ and verification workflow explicit for humans and AI agents.
 | [BACKLOG.md](./BACKLOG.md) | Initial implementation backlog and milestone plan |
 | [RISKS.md](./RISKS.md) | Risk register and unresolved decision register |
 | [FEASIBILITY.md](./FEASIBILITY.md) | Provider/voice-pipeline feasibility matrix with live evidence (TT-16, no CI) |
+| [UI-PLAN.md](./UI-PLAN.md) | Candidate UI plan: dashboard, interview setup wizard, meeting-style room (TT-2/TT-8) |
 | [REVIEW.md](./REVIEW.md) | Code review instructions and checklists |
 | [AGENT-ROLES.md](./AGENT-ROLES.md) | Specialised agent role definitions (architect/implementer/reviewer/tester) |
 | [adr/](./adr/) | Architecture decision records (repo-local ADR process) |

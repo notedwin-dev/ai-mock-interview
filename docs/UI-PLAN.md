@@ -1,0 +1,146 @@
+# Candidate UI Plan — Dashboard, Interview Setup & Meeting Room (TT-2 / TT-8)
+
+Plan for the candidate-facing UI: dashboard → new-interview setup → meeting-style
+voice room. Written for backlog slice 21 (TT-2 wireframe pass, which gates slice 8's
+room UI detail) and slices 8–10 (room UI, ASR/TTS adapters, orchestrator).
+
+Sources of truth used: Notion FRs (all cited items **Approved**), ADR-0007 (UI
+stack), `ARCHITECTURE.md` §3–4, the existing typed-slice API contracts, and the
+owner-referenced UI pattern: "Full Stack AI App: Build a Real-Time Voice Agent
+Interview Platform" (JavaScript Mastery, `youtube.com/watch?v=8GK8R77Bd7g`) — a
+dashboard → create-interview form → real-time voice-agent room → feedback flow.
+
+## 1. Scope rule (what is approved vs proposed)
+
+Everything in sections 3–5 maps to an approved FR. Three elements of the referenced
+video pattern are **not** covered by any approved requirement and are therefore
+listed as owner proposals in §7 — they are not silently built in:
+
+1. **Scheduling** an interview for a future time — no FR exists; FR-INTERVIEW-001
+   is "start … using the saved setup" (immediate).
+2. **Resume content as interview context** ("resume summary") — resumes are
+   profile/recruiter artifacts only (FR-PROFILE-005/006); FR-INTERVIEW-002 fixes
+   question context to *role + job description + category*.
+3. **An agent-led pre-interview briefing conversation** in the setup flow — the
+   approved tailoring happens via FR-INTERVIEW-002 (generation from setup) and
+   FR-INTERVIEW-007 (in-room follow-ups).
+
+## 2. Information architecture (candidate route group)
+
+```
+(candidate)/guard: requireAccount({ role: "candidate" })   [exists, src/lib/auth/guard.ts]
+/dashboard                     — home: status, quick actions, recent sessions   [server]
+/dashboard/interview/new       — setup wizard → POST /api/v1/interviews         [client form]
+/dashboard/interview/[sessionId] — meeting room (M2)                            [client]
+/dashboard/history             — session list / reports (M3; entry point only)  [server]
+/dashboard/profile             — resume + visibility + provider configuration    [server + client rows]
+```
+
+Navigation: top bar with Dashboard / History / Profile (+ sign-out; already present
+as a server action). The dashboard is the single access point for "create a new
+meeting room": the primary card routes to the setup wizard.
+
+## 3. Dashboard spec
+
+| Element | Behaviour | Requirement / contract |
+| --- | --- | --- |
+| Provider readiness card | Summarises each capability row (ASR/LLM/TTS): preset or custom, credential status (`unvalidated`/`valid`/`invalid`), enabled; deep-links to `/dashboard/profile` provider section. Shows probe state, never key material. | FR-PROVIDER-002/003/006 UI mirror of the capability rows |
+| New interview card | Primary CTA → `/dashboard/interview/new`. Disabled with a fix-it link when no validated runtime route exists for the chosen default (LLM route missing → `provider_route_missing` on create otherwise). | FR-SETUP-005, FR-INTERVIEW-001 |
+| Recent sessions | Last N sessions from Prisma (server component): job role, category, evaluation mode, status chip (`created`/`started`/`completed`/`failed`), created time. Rows deep-link into the room (resume) or history entry. | data path exists (`interview_session`, typed slice) |
+| History / profile links | Entry points only in M2; history fills out in M3. | TT-6 |
+
+Server component reads via Prisma directly (ARCHITECTURE §4 rule); no client
+fetching on first paint.
+
+## 4. Setup wizard spec (`/dashboard/interview/new`)
+
+One screen, six controls, all client-side form state — no stepper (the approved
+setup is a single saved unit, FR-SETUP-001..005 acceptance criteria treat setup as
+one record).
+
+| Field | Control | Rules | FR |
+| --- | --- | --- | --- |
+| Target job role | Text input | Required, ≤150 chars; error state inline | FR-SETUP-001 |
+| Job description | Textarea (paste-first), optional | ≤8000 chars; helper "used to contextualise questions"; char counter | FR-SETUP-002 |
+| Interview category | Radio cards, exactly one | Options fetched live from `GET /api/v1/interviews/categories` (`listActiveInterviewCategories`), never hardcoded — General / Technical / Behavioral per approved data | FR-SETUP-003 |
+| Evaluation mode | Radio cards, exactly one | Supportive / Balanced / Rigorous with one-line descriptions | FR-SETUP-004 |
+| Runtime mode | **Stacked, mutually exclusive cards** (acceptance wording), exactly one | `Pre-configured Realtime Agents` vs `Custom Configuration`; custom card expands the per-capability readiness summary (validated ASR/LLM/TTS rows or fix-it links); scorer independence noted in card footer | FR-SETUP-005 |
+| Submit | "Create interview room" | Client validation with the **shared zod contract** imported from `src/lib/interview/validation.ts` (single source of truth — client and server validate the same object); `POST /api/v1/interviews`; on 201 redirect to the room; on `provider_route_missing` → inline readiness error | FR-INTERVIEW-001 |
+
+What the backend receives (the "craft the prompt" handoff):
+
+```json
+{ "jobRole": "…", "jobDescription": "…", "categoryId": "<uuid>",
+  "evaluationMode": "supportive|balanced|rigorous",
+  "runtimeMode": "preset_realtime|custom" }
+```
+
+`createInterviewSession` already snapshots the resolved LLM provider route
+(`providerRouteSnapshot`, credentials excluded) and stamps
+`interviewerPromptVersion`; M2 slices 9–10 consume exactly this payload for
+question generation (FR-INTERVIEW-002) and the orchestrator state machine.
+No other fields may be invented without an approved FR (see §7 proposals).
+
+## 5. Meeting room spec (`/dashboard/interview/[sessionId]`)
+
+Meeting-style interactive room (FR-INTERVIEW-003) — client component with
+`getUserMedia` local preview only (FR-INTERVIEW-010: **camera is never sent to the
+AI**; AGENTS.md rule preserved).
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  [Agent tile: avatar + speaking state]      [Your preview]     │
+│                                                                │
+│  status chip: connecting ▸ waiting ▸ live ▸ ended/failed       │
+│                                                                │
+│  ┌ Transcript pane (chronological, speaker-attributed) ──────  │
+│  │  Interviewer: …            Candidate: … (mode chip text/voice)│
+│  └──────────────────────────────────────────────────────────────┘
+│                                                                │
+│  [Mic toggle] [Camera toggle] [End interview]                  │
+│  Text answer input (always available) ─────────────── [Send]   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+| Control / area | Behaviour | FR |
+| --- | --- | --- |
+| Agent tile | Avatar + speaking indicator; spoken interviewer turns (native speech or configured TTS) drive the state | FR-INTERVIEW-006 |
+| Mic toggle | Push-to-talk style control for voice turns; disabled + tooltip when the resolved runtime has no ASR capability | FR-INTERVIEW-005/009 |
+| Camera toggle | Local-only preview, off by default | FR-INTERVIEW-010 |
+| Transcript pane | Live, chronological, speaker-attributed; mirrors `conversation_message` ordering; includes interviewer acknowledgements/transitions as part of the flow | FR-INTERVIEW-007/008 |
+| Text answer | Always present (fallback even in voice runtimes); submits `POST /api/v1/interviews/[sessionId]/turns` with `inputMode:"text"` + client-generated idempotency key (retry-safe) | FR-INTERVIEW-004, NFR-REL-002 |
+| End interview | Candidate end → confirm dialog → `POST …/end` (idempotent); agent `end_call` finishes the session automatically and the UI shows the transition | FR-INTERVIEW-011/012 |
+| Room states | `connecting` (snapshot loaded, adapters warm) → `waiting` → `live` → `ending` → `completed`/`failed` (failure code surfaced, re-entry allowed for report later) | lifecycle in typed slice |
+
+The orchestrator (slice 10) owns turn transitions and `end_call`; the room renders
+state — it never invents interviewer turns locally.
+
+## 6. Component inventory (ADR-0007 pattern)
+
+`src/components/ui/*` (copy-in on demand): button, input, textarea, radio-group,
+card, dialog (end-call confirm), badge (status chips), toast (errors).
+Domain components:
+
+- `src/components/interview/SetupForm.tsx` — client; shared zod import.
+- `src/components/interview/Room.tsx` (+ `TranscriptPane`, `MicControl`,
+  `CameraPreview`, `EndCallButton`) — client; WebRTC-free, `getUserMedia` local.
+- `src/components/dashboard/ProviderReadinessCard.tsx`, `RecentSessions.tsx`.
+- Provider config UI (existing slice 4 surface formalised per ARCHITECTURE §4):
+  three capability rows with per-row Custom sub-form and per-capability test
+  action — TT-2 states: scanning / models found / test passed / test failed /
+  manual model_id entry (free-text where no model list exists, e.g. fish-audio).
+
+## 7. Owner proposals (not built without approval)
+
+| # | Proposal | Why it's not in the approved FRs | Recommendation |
+| --- | --- | --- | --- |
+| P-1 | Schedule an interview for later (date/time, reminder) | Only FR-INTERVIEW-001 immediate start is approved | Defer past MVP; immediate start covers the mock-interview loop |
+| P-2 | Resume-aware interview context (candidate picks an uploaded resume; backend derives a summary into the prompt) | FR-PROFILE-005/006 scope resumes to profile + recruiter sharing; FR-INTERVIEW-002 fixes context to role + JD + category | Worth an owner decision — strong value for behavioural interviews; needs a new FR + data-model field (e.g. `resume_context_snapshot`) and privacy review before M3 evaluation sees it |
+| P-3 | Agent-led pre-interview briefing chat in setup | Tailoring is approved only as FR-INTERVIEW-002/007 | Skip; the setup form + in-room follow-ups achieve the video's tailoring effect |
+
+## 8. Build order alignment
+
+Dashboard + setup wizard can land with the existing typed-slice API immediately;
+the room renders live interviewer behaviour only when slices 9–10 (ASR/TTS
+adapters, orchestrator) land. Until then the room shows `waiting` with the text
+answer path — which is already end-to-end.
