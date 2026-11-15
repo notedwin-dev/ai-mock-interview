@@ -6,7 +6,7 @@ import { signOutAction } from "@/lib/auth/actions";
 import { BrandMark } from "@/components/BrandMark";
 
 /**
- * Dashboard shell navigation (round 4, PrepWise-adapted): a sticky top bar —
+ * Dashboard shell navigation (round 4, reference-design-adapted): a sticky top bar —
  * wordmark left, section pills beside it, account block right. Marks the
  * active section from the live pathname; a client component for that reason.
  */

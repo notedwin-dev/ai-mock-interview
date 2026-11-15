@@ -14,7 +14,7 @@ import type { InterviewCategorySummary } from "@/lib/interview/service";
 import type { ProviderConfigSummary } from "@/lib/providers/config";
 
 /**
- * Interview setup form (FR-SETUP-001..005, FR-INTERVIEW-001), PrepWise-
+ * Interview setup form (FR-SETUP-001..005, FR-INTERVIEW-001), reference-design-
  * adapted: one screen, question-style labels, pill/select controls, client-
  * side validation against the shared zod contract (the same object the
  * server validates), then POST /api/v1/interviews; a 201 redirects into the

@@ -6,7 +6,7 @@ import { SignInForm } from "./SignInForm";
 export const metadata: Metadata = { title: "Sign in · AIMIS" };
 
 /**
- * Auth surface, PrepWise-adapted: a centred card on the room grid, wordmark
+ * Auth surface, reference-design-adapted: a centred card on the room grid, wordmark
  * above, labelled pill inputs inside, one clear primary action.
  */
 export default function SignInPage() {

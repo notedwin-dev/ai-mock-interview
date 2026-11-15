@@ -5,7 +5,7 @@ import { listProviderConfigurations } from "@/lib/providers/config";
 import { SetupForm } from "@/components/interview/SetupForm";
 
 /**
- * Interview setup (FR-SETUP-001..005, FR-INTERVIEW-001), PrepWise-adapted:
+ * Interview setup (FR-SETUP-001..005, FR-INTERVIEW-001), reference-design-adapted:
  * one centred card, plain question-style labels, select controls where a
  * dropdown reads simpler and stacked mutually exclusive cards where the FR
  * pins them (runtime mode, FR-SETUP-005 acceptance wording). Categories come

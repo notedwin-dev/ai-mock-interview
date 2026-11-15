@@ -3,7 +3,7 @@ import { Calendar } from "lucide-react";
 
 /**
  * "Your past interviews": the candidate's real sessions as a restrained card
- * grid (PrepWise-adapted) — category chip, role, date, status always as
+ * grid (reference-design-adapted) — category chip, role, date, status always as
  * dot + word (never colour alone), and an explicit open action. No invented
  * scores or company branding; scores arrive with the evaluation slice (M3).
  * The whole card deep-links into the room. Server component.
