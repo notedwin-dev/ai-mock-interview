@@ -1,44 +1,52 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
-import { listProviderConfigurations } from "@/lib/providers/config";
 
 /**
- * Profile page: the read-only fix-it destination for provider readiness
- * issues surfaced on the dashboard and setup wizard, restyled onto the dark
- * identity (round 4). Status is always dot + word, never colour alone; the
- * rows keep the ruled-list language. Editing and probing arrive with the
- * provider configuration surface (M2); resume and visibility management
- * arrive with the profile slice.
+ * Profile page (round 5): identity now, with provider management moved to the
+ * dedicated AI configuration experience (/dashboard/configuration) — the
+ * capability-first configurator owns provider rows, keys, models, tests and
+ * readiness. Resume and visibility management arrive with the profile slice.
+ * The dynamic account access sits inside a Suspense boundary (same pattern
+ * as the dashboard and configuration pages).
  */
 
-const CREDENTIAL_STATUS: Record<string, { word: string; dot: string; text: string }> = {
-  valid: {
-    word: "Validated",
-    dot: "bg-emerald-400",
-    text: "text-emerald-400",
-  },
-  unvalidated: {
-    word: "Not validated yet",
-    dot: "bg-amber-400",
-    text: "text-amber-300",
-  },
-  invalid: {
-    word: "Check failed",
-    dot: "bg-red-400",
-    text: "text-red-400",
-  },
-};
+const LINK_PILL =
+  "inline-flex h-10 cursor-pointer items-center rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400";
 
-const CAPABILITY_LABELS: Record<string, string> = {
-  asr: "Speech recognition",
-  llm: "Interviewer",
-  tts: "Voice output",
-};
-
-export default async function Page() {
+async function ProfileContent() {
   const { account } = await requireAccount({ role: "candidate" });
-  const configurations = await listProviderConfigurations(account.userId);
 
+  return (
+    <>
+      <p className="mt-1 text-sm text-ink-muted">
+        Signed in as {account.email} ({account.accountRole}).
+      </p>
+
+      <section className="mt-8 rounded-2xl border border-line bg-surface p-6">
+        <h2 className="font-display text-lg font-semibold tracking-tight text-ink">
+          AI configuration
+        </h2>
+        <p className="mt-2 max-w-xl text-sm leading-relaxed text-ink-muted">
+          Providers, credentials, models, capability tests and readiness for
+          the four independent capabilities (ASR, interviewer LLM, voice
+          output, evaluation scorer) live on the configuration page.
+        </p>
+        <div className="mt-4">
+          <Link href="/dashboard/configuration" className={LINK_PILL}>
+            Open AI configuration
+          </Link>
+        </div>
+      </section>
+
+      <p className="mt-4 text-xs text-ink-muted">
+        Resume and visibility management arrive with the profile slice.
+      </p>
+    </>
+  );
+}
+
+export default function ProfilePage() {
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
       <Link
@@ -50,78 +58,9 @@ export default async function Page() {
       <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
         Profile
       </h1>
-      <p className="mt-1 text-sm text-ink-muted">
-        Signed in as {account.email} ({account.accountRole}).
-      </p>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-medium text-ink">Provider configurations</h2>
-        {configurations.length === 0 ? (
-          <div className="mt-2 rounded-2xl border border-dashed border-line bg-surface/50 p-6">
-            <p className="text-sm text-ink-muted">
-              No provider configurations yet. Interviews need at least one
-              enabled configuration serving the interviewer (LLM) capability.
-            </p>
-          </div>
-        ) : (
-          <ul className="mt-2 divide-y divide-line rounded-2xl border border-line bg-surface">
-            {configurations.map((row) => {
-              const credentials =
-                CREDENTIAL_STATUS[row.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated;
-              return (
-                <li key={row.userProviderConfigurationId} className="p-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-sm font-medium text-ink">
-                      {row.providerName}
-                    </span>
-                    <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                      <span
-                        className={`flex items-center gap-1.5 font-medium ${credentials.text}`}
-                      >
-                        <span
-                          aria-hidden
-                          className={`h-1.5 w-1.5 rounded-full ${credentials.dot}`}
-                        />
-                        {credentials.word}
-                      </span>
-                      <span className="flex items-center gap-1.5 text-ink-soft">
-                        <span
-                          aria-hidden
-                          className={`h-1.5 w-1.5 rounded-full ${
-                            row.isEnabled ? "bg-emerald-400" : "bg-ink-muted/60"
-                          }`}
-                        />
-                        {row.isEnabled ? "Enabled" : "Disabled"}
-                      </span>
-                    </span>
-                  </div>
-                  <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                    {Object.entries(row.capabilities).map(
-                      ([capability, settings]) =>
-                        settings ? (
-                          <li key={capability} className="text-xs text-ink-muted">
-                            {CAPABILITY_LABELS[capability] ?? capability} serving{" "}
-                            {settings.modelId}
-                          </li>
-                        ) : null,
-                    )}
-                  </ul>
-                  <p className="mt-2 text-xs text-ink-muted">
-                    Updated {row.updatedAt.slice(0, 10)}, configuration v
-                    {row.configurationVersion}
-                  </p>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        <p className="mt-4 text-xs text-ink-muted">
-          Configuration editing and credential probing are available through the
-          provider configuration API; the configuration UI arrives in an
-          upcoming slice. Resume and visibility management arrive with the
-          profile slice.
-        </p>
-      </section>
+      <Suspense fallback={<p className="mt-1 text-sm text-ink-muted">Loading…</p>}>
+        <ProfileContent />
+      </Suspense>
     </main>
   );
 }

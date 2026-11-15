@@ -117,7 +117,7 @@ export function ConsoleBanner({
                 </button>
                 {!readinessFailed ? (
                   <Link
-                    href="/dashboard/profile"
+                    href="/dashboard/configuration"
                     className="text-sm font-medium text-emerald-400 underline decoration-emerald-400/40 underline-offset-4 outline-none transition-colors hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"
                   >
                     Set up the interviewer connection
@@ -154,7 +154,7 @@ export function ChainStrip({ configurations, readinessFailed }: SignalChainProps
           return (
             <li key={node.capability}>
               <Link
-                href="/dashboard/profile"
+                href="/dashboard/configuration"
                 className="flex items-center gap-3 rounded-xl px-1.5 py-1.5 outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400"
               >
                 <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
@@ -187,8 +187,8 @@ export function ChainStrip({ configurations, readinessFailed }: SignalChainProps
       </ul>
       {!interviewerReady && !readinessFailed ? (
         <p className="mt-2 px-1.5 text-xs text-ink-muted">
-          The interviewer needs a validated connection — set it up on the
-          profile page.
+          The interviewer needs a validated connection — set it up in AI
+          configuration.
         </p>
       ) : null}
     </section>

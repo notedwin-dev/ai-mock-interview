@@ -18,6 +18,11 @@ const NAV_ITEMS = [
     isActive: (pathname: string) => pathname === "/dashboard",
   },
   {
+    href: "/dashboard/configuration",
+    label: "Configuration",
+    isActive: (pathname: string) => pathname.startsWith("/dashboard/configuration"),
+  },
+  {
     href: "/dashboard/profile",
     label: "Profile",
     isActive: (pathname: string) => pathname.startsWith("/dashboard/profile"),
