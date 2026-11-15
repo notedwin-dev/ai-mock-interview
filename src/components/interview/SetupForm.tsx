@@ -22,9 +22,8 @@ import type { ProviderConfigSummary } from "@/lib/providers/config";
  */
 
 const fieldClassName =
-  "h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100";
-const labelClassName =
-  "text-sm font-medium text-zinc-900 dark:text-zinc-100";
+  "h-10 rounded-lg border border-line bg-card px-3 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20";
+const labelClassName = "text-sm font-medium text-ink";
 
 const EVALUATION_MODE_DESCRIPTIONS: Record<EvaluationMode, string> = {
   supportive: "Encouraging tone with gentler feedback.",
@@ -47,6 +46,13 @@ const CAPABILITY_HINT_LABELS: Record<HintCapability, string> = {
   tts: "Voice output (TTS)",
 };
 
+/** Plain-language wording for credential states in readiness hints. */
+const CREDENTIAL_STATUS_WORDS: Record<string, string> = {
+  valid: "validated",
+  unvalidated: "not validated yet",
+  invalid: "check failed",
+};
+
 interface SetupFormProps {
   categories: InterviewCategorySummary[];
   configurations: ProviderConfigSummary[];
@@ -55,8 +61,8 @@ interface SetupFormProps {
 function cardClassName(selected: boolean): string {
   return `cursor-pointer rounded-lg border px-4 py-3 transition-colors ${
     selected
-      ? "border-zinc-900 bg-zinc-50 dark:border-zinc-100 dark:bg-zinc-800"
-      : "border-zinc-300 hover:border-zinc-500 dark:border-zinc-700 dark:hover:border-zinc-500"
+      ? "border-emerald-600 bg-emerald-50 dark:border-emerald-400 dark:bg-emerald-950/40"
+      : "border-line hover:border-ink-muted"
   }`;
 }
 
@@ -165,13 +171,13 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           onChange={(event) => setJobDescription(event.target.value)}
           maxLength={8000}
           rows={5}
-          className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          className="rounded-lg border border-line bg-card px-3 py-2 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20"
         />
         <div className="flex items-baseline justify-between gap-4">
-          <p className="text-xs text-zinc-600 dark:text-zinc-400">
+          <p className="text-xs text-ink-muted">
             Pasted here, it is used to contextualise the interview questions.
           </p>
-          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          <span className="text-xs text-ink-muted">
             {jobDescription.length}/8000
           </span>
         </div>
@@ -197,11 +203,11 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
               onChange={() => setCategoryId(category.categoryId)}
               className="sr-only"
             />
-            <span className="block text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            <span className="block text-sm font-medium text-ink">
               {category.categoryName}
             </span>
             {category.description ? (
-              <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+              <span className="block text-xs text-ink-soft">
                 {category.description}
               </span>
             ) : null}
@@ -229,10 +235,10 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
               onChange={() => setEvaluationMode(mode)}
               className="sr-only"
             />
-            <span className="block text-sm font-medium capitalize text-zinc-900 dark:text-zinc-100">
+            <span className="block text-sm font-medium capitalize text-ink">
               {mode}
             </span>
-            <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+            <span className="block text-xs text-ink-soft">
               {EVALUATION_MODE_DESCRIPTIONS[mode]}
             </span>
           </label>
@@ -259,19 +265,19 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
               onChange={() => setRuntimeMode(mode)}
               className="sr-only"
             />
-            <span className="block text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            <span className="block text-sm font-medium text-ink">
               {mode === "preset_realtime"
                 ? "Pre-configured Realtime Agents"
                 : "Custom Configuration"}
             </span>
-            <span className="block text-xs text-zinc-600 dark:text-zinc-400">
+            <span className="block text-xs text-ink-soft">
               {RUNTIME_MODE_DESCRIPTIONS[mode]}
             </span>
           </label>
         ))}
         {runtimeMode === "custom" ? (
-          <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
-            <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+          <div className="rounded-lg border border-line bg-card px-4 py-3">
+            <p className="text-xs font-medium text-ink-soft">
               Pipeline readiness
             </p>
             <ul className="mt-2 flex flex-col gap-1">
@@ -282,21 +288,23 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
                     key={capability}
                     className="flex items-center justify-between gap-3 text-xs"
                   >
-                    <span className="text-zinc-600 dark:text-zinc-400">
+                    <span className="text-ink-muted">
                       {CAPABILITY_HINT_LABELS[capability]}
                     </span>
                     {row ? (
-                      <span className="text-zinc-600 dark:text-zinc-400">
-                        {row.providerName} · {row.credentialStatus}
+                      <span className="text-ink-soft">
+                        {row.providerName},{" "}
+                        {CREDENTIAL_STATUS_WORDS[row.credentialStatus] ??
+                          row.credentialStatus}
                       </span>
                     ) : (
-                      <span className="text-zinc-600 dark:text-zinc-400">
-                        Not configured —{" "}
+                      <span className="text-ink-muted">
+                        Not set up,{" "}
                         <Link
                           href="/dashboard/profile"
-                          className="underline hover:text-zinc-900 dark:hover:text-zinc-100"
+                          className="font-medium text-emerald-700 underline underline-offset-2 outline-none transition-colors hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200"
                         >
-                          configure
+                          set it up
                         </Link>
                       </span>
                     )}
@@ -333,7 +341,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
       <button
         type="submit"
         disabled={pending}
-        className="inline-flex h-10 items-center justify-center rounded-md bg-zinc-900 px-4 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+        className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white outline-none transition-all hover:bg-emerald-800 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:focus-visible:ring-emerald-400 dark:focus-visible:ring-offset-paper"
       >
         {pending ? "Creating room…" : "Create interview room"}
       </button>

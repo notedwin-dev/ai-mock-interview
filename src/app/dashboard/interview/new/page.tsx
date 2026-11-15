@@ -22,14 +22,14 @@ export default async function Page() {
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+        className="text-sm text-ink-soft transition-colors hover:text-ink"
       >
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 text-xl font-semibold text-zinc-900 dark:text-zinc-50">
+      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
         New interview
       </h1>
-      <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+      <p className="mt-1 text-sm text-ink-soft">
         Set up the mock interview; the interviewer tailors its questions from
         these details.
       </p>

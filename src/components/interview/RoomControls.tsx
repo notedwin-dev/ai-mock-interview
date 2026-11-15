@@ -12,15 +12,23 @@ import type { SessionSummary, TranscriptMessage } from "@/lib/interview/service"
  * itself is the M2 orchestrator, backlog slices 9-10).
  */
 
-const SESSION_STATUS_CLASSES: Record<string, string> = {
-  created: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  active: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300",
-  completed: "bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200",
-  failed: "bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300",
+const SESSION_STATUS_WORDS: Record<string, { word: string; dot: string; text: string }> = {
+  created: { word: "Set up", dot: "bg-ink-muted/60", text: "text-ink-muted" },
+  active: {
+    word: "In progress",
+    dot: "bg-emerald-600 dark:bg-emerald-400",
+    text: "text-emerald-700 dark:text-emerald-300",
+  },
+  completed: { word: "Completed", dot: "bg-ink-soft", text: "text-ink-soft" },
+  failed: {
+    word: "Failed",
+    dot: "bg-red-600 dark:bg-red-400",
+    text: "text-red-700 dark:text-red-300",
+  },
 };
 
 const fieldClassName =
-  "h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100";
+  "h-10 rounded-lg border border-line bg-card px-3 text-sm text-ink outline-none transition-colors focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 dark:focus:border-emerald-400 dark:focus:ring-emerald-400/20";
 
 interface RoomControlsProps {
   initialSession: SessionSummary;
@@ -113,47 +121,50 @@ export function RoomControls({
     await refresh(session.sessionId);
   }
 
-  const statusClass =
-    SESSION_STATUS_CLASSES[session.status] ?? SESSION_STATUS_CLASSES.created;
+  const status =
+    SESSION_STATUS_WORDS[session.status] ?? SESSION_STATUS_WORDS.created;
 
   return (
     <div className="mt-6 flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
             Interview room — {session.jobRole}
           </h1>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            {session.categoryNameSnapshot} · evaluation: {session.evaluationMode} ·
-            runtime: {session.runtimeMode === "preset_realtime"
-              ? "Pre-configured Realtime Agents"
-              : "Custom Configuration"}
+          <p className="mt-1 text-sm text-ink-soft">
+            {session.categoryNameSnapshot} interview,{" "}
+            {session.evaluationMode} evaluation,{" "}
+            {session.runtimeMode === "preset_realtime"
+              ? "pre-configured realtime agents"
+              : "custom configuration"}{" "}
+            runtime.
           </p>
         </div>
-        <span className={`rounded px-2 py-1 text-xs font-medium ${statusClass}`}>
-          {session.status}
+        <span
+          className={`flex items-center gap-1.5 text-xs font-medium ${status.text}`}
+        >
+          <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+          {status.word}
         </span>
       </div>
 
-      <div className="flex min-h-64 flex-col gap-4 rounded-lg border border-zinc-200 p-5 dark:border-zinc-800">
-        <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-          Transcript
-        </p>
+      <div className="flex min-h-64 flex-col gap-4 rounded-xl border border-line bg-card p-5">
+        <p className="text-xs font-medium text-ink-muted">Transcript</p>
         {messages.length === 0 ? (
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          <p className="text-sm text-ink-soft">
             No messages yet. Start the interview, then submit your answers below.
           </p>
         ) : (
           <ol className="flex flex-col gap-4">
             {messages.map((message) => (
               <li key={message.messageId} className="flex flex-col gap-0.5">
-                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                <span className="text-xs font-medium text-ink-muted">
                   {message.speakerType === "interviewer" ? "Interviewer" : "You"}
                   {message.speakerType === "candidate" && message.candidateInputMode
-                    ? ` · ${message.candidateInputMode}`
+                    ? ` (${message.candidateInputMode === "voice" ? "voice" : "typed"})`
                     : ""}
                 </span>
-                <p className="whitespace-pre-wrap text-sm text-zinc-900 dark:text-zinc-100">
+                <p className="whitespace-pre-wrap text-sm text-ink">
                   {message.contentText}
                 </p>
               </li>
@@ -173,7 +184,7 @@ export function RoomControls({
           type="button"
           disabled={pending}
           onClick={() => postLifecycle("start")}
-          className="inline-flex h-10 items-center justify-center rounded-md bg-zinc-900 px-4 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white outline-none transition-all hover:bg-emerald-800 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:focus-visible:ring-emerald-400 dark:focus-visible:ring-offset-paper"
         >
           {pending ? "Starting…" : "Start interview"}
         </button>
@@ -193,12 +204,12 @@ export function RoomControls({
             <button
               type="submit"
               disabled={pending || answerText.trim().length === 0}
-              className="inline-flex h-10 items-center rounded-md bg-zinc-900 px-4 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              className="inline-flex h-10 cursor-pointer items-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white outline-none transition-all hover:bg-emerald-800 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:focus-visible:ring-emerald-400 dark:focus-visible:ring-offset-paper"
             >
               {pending ? "Sending…" : "Send"}
             </button>
           </form>
-          <p className="text-xs text-zinc-600 dark:text-zinc-400">
+          <p className="text-xs text-ink-muted">
             Voice and camera controls arrive with the realtime voice loop; your
             typed answers are recorded on the transcript now.
           </p>
@@ -206,7 +217,7 @@ export function RoomControls({
             type="button"
             disabled={pending}
             onClick={() => postLifecycle("end")}
-            className="inline-flex h-10 items-center justify-center rounded-md border border-red-300 px-4 text-sm font-medium text-red-800 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/50"
+            className="inline-flex h-10 cursor-pointer items-center justify-center rounded-lg border border-red-300 px-4 text-sm font-semibold text-red-700 outline-none transition-colors hover:bg-red-50 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/50 dark:focus-visible:ring-red-400"
           >
             {pending ? "Ending…" : "End interview"}
           </button>
@@ -214,13 +225,13 @@ export function RoomControls({
       ) : null}
 
       {session.status === "completed" ? (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        <p className="text-sm text-ink-soft">
           This interview is completed. Your full transcript is saved for review.
         </p>
       ) : null}
 
       {session.status === "failed" ? (
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        <p className="text-sm text-ink-soft">
           This interview failed
           {session.failureCode ? ` (${session.failureCode})` : ""}. You can start
           a new interview from the dashboard.

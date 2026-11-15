@@ -71,19 +71,19 @@ async function DashboardContent() {
         <div className="flex items-baseline justify-between gap-4">
           <h2
             id="recent-sessions-heading"
-            className="font-display text-lg font-semibold tracking-tight text-stone-900 dark:text-stone-100"
+            className="font-display text-lg font-semibold tracking-tight text-ink"
           >
             Recent sessions
           </h2>
           {sessionsFailed ? (
-            <span className="text-xs text-stone-500 dark:text-stone-400">
+            <span className="text-xs text-ink-muted">
               Could not load sessions
             </span>
           ) : null}
         </div>
         <div className="mt-1">
           {sessionsFailed ? (
-            <p className="py-6 text-sm text-stone-500 dark:text-stone-400">
+            <p className="py-6 text-sm text-ink-muted">
               Your session list could not be loaded. Try again in a moment.
             </p>
           ) : (
@@ -98,7 +98,7 @@ async function DashboardContent() {
 export default function DashboardPage() {
   return (
     <main className="mx-auto w-full max-w-[76rem] flex-1 px-6 py-8 lg:px-12 lg:py-10">
-      <Suspense fallback={<p className="text-sm text-stone-500">Loading…</p>}>
+      <Suspense fallback={<p className="text-sm text-ink-muted">Loading…</p>}>
         <DashboardContent />
       </Suspense>
     </main>
