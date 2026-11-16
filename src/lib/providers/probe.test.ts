@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
-import { probeProviderConfiguration, discoverProviderModels, type ProbeDeps } from "./probe";
+import { probeProviderConfiguration, discoverProviderModels, discoverCandidateModels, type ProbeDeps } from "./probe";
 import { encryptApiKey } from "./encryption";
 
 /**
@@ -515,5 +515,104 @@ describe("discoverProviderModels (FR-PROVIDER-009)", () => {
 
     expect(seenUrls).toEqual(["https://api.fish.audio/models"]);
     expect(result).toMatchObject({ ok: true, models: null, source: "provider" });
+  });
+
+  it("lists a stored google row through Google's native list wire (x-goog-api-key, models/ prefix stripped)", async () => {
+    const seenUrls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      seenUrls.push(typeof input === "string" ? input : input.toString());
+      return new Response(JSON.stringify({ models: [{ name: "models/gemini-3.6-flash" }] }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await discoverProviderModels(USER_ID, CONFIG_ID, {
+      load: async () => configRow({ providerType: "preset", providerName: "google", baseUrl: null }),
+      fetchImpl,
+      cache: new Map(),
+    });
+    expect(seenUrls).toEqual(["https://generativelanguage.googleapis.com/v1beta/models"]);
+    expect(result).toMatchObject({ ok: true, models: ["gemini-3.6-flash"], source: "provider" });
+  });
+});
+
+describe("discoverCandidateModels (FR-PROVIDER-009, transient pre-create discovery)", () => {
+  const candidateInput = {
+    providerType: "preset" as const,
+    providerName: "openai",
+    apiKey: "sk-candidate-key",
+  };
+
+  it("lists a preset's models from its documented endpoint without persisting anything", async () => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, auth: new Headers(init?.headers ?? undefined).get("authorization") });
+      return new Response(JSON.stringify({ data: [{ id: "gpt-6-luna" }] }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await discoverCandidateModels(candidateInput, { fetchImpl });
+    expect(seen).toEqual([{ url: "https://api.openai.com/v1/models", auth: "Bearer sk-candidate-key" }]);
+    expect(result).toMatchObject({ ok: true, models: ["gpt-6-luna"], source: "provider" });
+  });
+
+  it("classifies a rejected candidate key in the probe taxonomy", async () => {
+    const result = await discoverCandidateModels(candidateInput, {
+      fetchImpl: jsonFetch([{ match: /\/models$/, status: 401, body: {} }]),
+    });
+    expect(result).toMatchObject({ ok: false, errorCode: "authentication_failed" });
+  });
+
+  it("rejects an invalid candidate target before any network call", async () => {
+    let fetchCalled = false;
+    const fetchImpl = (async () => {
+      fetchCalled = true;
+      throw new Error("must not fetch");
+    }) as typeof fetch;
+    await expect(
+      discoverCandidateModels({ providerType: "preset", providerName: "does-not-exist", apiKey: "k" }, { fetchImpl }),
+    ).rejects.toMatchObject({ code: "unknown_preset" });
+    await expect(
+      discoverCandidateModels(
+        { providerType: "preset", providerName: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "k" },
+        { fetchImpl },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      discoverCandidateModels(
+        { providerType: "custom", providerName: "openai", baseUrl: "https://x.example.com", apiKey: "k" },
+        { fetchImpl },
+      ),
+    ).rejects.toMatchObject({ code: "reserved_preset_name" });
+    await expect(
+      discoverCandidateModels(
+        { providerType: "custom", providerName: "gw", baseUrl: "http://127.0.0.1:8080", apiKey: "k" },
+        { fetchImpl },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_base_url" });
+    expect(fetchCalled).toBe(false);
+  });
+
+  it("speaks Google's native list wire for the google preset (x-goog-api-key, models/ prefix stripped)", async () => {
+    const seen: Array<{ url: string; keyHeader: string | null }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, keyHeader: new Headers(init?.headers ?? undefined).get("x-goog-api-key") });
+      return new Response(
+        JSON.stringify({ models: [{ name: "models/gemini-3.6-flash" }, { name: "gemini-3.5-transcribe" }] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const result = await discoverCandidateModels(
+      { providerType: "preset", providerName: "google", apiKey: "g-key" },
+      { fetchImpl },
+    );
+    expect(seen).toEqual([
+      { url: "https://generativelanguage.googleapis.com/v1beta/models", keyHeader: "g-key" },
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      models: ["gemini-3.6-flash", "gemini-3.5-transcribe"],
+      source: "provider",
+    });
   });
 });

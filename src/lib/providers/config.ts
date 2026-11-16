@@ -117,14 +117,16 @@ export interface ProviderConfigSummary {
 }
 
 /**
- * Shared rule validation for create and update (pure — unit-testable):
- * preset names must exist in the registry and only serve capabilities the
- * preset declares; custom endpoints must carry an SSRF-validated Base URL and
- * may not shadow a preset name (user-supplied names are labels, never
- * executable identity). Returns the normalised Base URL for custom rows.
+ * Shared identity/URL validation for a provider target, independent of any
+ * capability set (pure — unit-testable). Used by create/update AND by
+ * transient model discovery before a row exists: preset names must exist in
+ * the registry and may not carry their own Base URL; custom endpoints must
+ * not shadow a preset name (user-supplied names are labels, never executable
+ * identity) and must carry an SSRF-validated Base URL. Returns the
+ * normalised Base URL for custom rows.
  */
-export function validateProviderRules(
-  input: Pick<ProviderConfigInput, "providerType" | "providerName" | "baseUrl" | "capabilities">,
+export function validateProviderTarget(
+  input: Pick<ProviderConfigInput, "providerType" | "providerName" | "baseUrl">,
 ): { normalizedBaseUrl: string | null } {
   if (input.providerType === "preset") {
     const preset = getPresetAdapter(input.providerName);
@@ -139,14 +141,6 @@ export function validateProviderRules(
         "invalid_input",
         "Preset providers use their documented Base URL; leave it empty.",
       );
-    }
-    for (const capability of Object.keys(input.capabilities)) {
-      if (!preset.capabilities.includes(capability as Capability)) {
-        throw new ProviderConfigError(
-          "capability_not_supported",
-          `Preset "${preset.displayName}" does not support the ${capability} capability.`,
-        );
-      }
     }
     return { normalizedBaseUrl: null };
   }
@@ -172,6 +166,28 @@ export function validateProviderRules(
     );
   }
   return { normalizedBaseUrl: decision.normalizedUrl };
+}
+
+/**
+ * Full rule validation for create and update: target validation above, then
+ * the capability check — a preset only serves capabilities it declares.
+ */
+export function validateProviderRules(
+  input: Pick<ProviderConfigInput, "providerType" | "providerName" | "baseUrl" | "capabilities">,
+): { normalizedBaseUrl: string | null } {
+  const { normalizedBaseUrl } = validateProviderTarget(input);
+  if (input.providerType === "preset") {
+    const preset = getPresetAdapter(input.providerName)!;
+    for (const capability of Object.keys(input.capabilities)) {
+      if (!preset.capabilities.includes(capability as Capability)) {
+        throw new ProviderConfigError(
+          "capability_not_supported",
+          `Preset "${preset.displayName}" does not support the ${capability} capability.`,
+        );
+      }
+    }
+  }
+  return { normalizedBaseUrl };
 }
 
 function parseUserId(userId: string): string {
