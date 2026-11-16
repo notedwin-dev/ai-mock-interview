@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CAPABILITIES, getPresetAdapter, PRESET_ADAPTERS } from "./registry";
+import { CAPABILITIES, getPresetAdapter, PRESET_ADAPTERS, PRESET_MODEL_LIST_WIRES } from "./registry";
 import { evaluateBaseUrl } from "./ssrf";
 
 describe("provider adapter registry", () => {
@@ -62,5 +62,15 @@ describe("provider adapter registry", () => {
       if (preset.providerName === "openai" || preset.providerName === "google") continue;
       expect(preset.capabilities, preset.providerName).not.toContain("realtime");
     }
+  });
+
+  it("registers the native list-model wire override for the google preset", () => {
+    expect(PRESET_MODEL_LIST_WIRES["google"]).toEqual({
+      path: "/v1beta/models",
+      auth: "x-goog-api-key",
+      format: "google-v1beta",
+    });
+    // Presets without an override use the OpenAI-shaped GET /models.
+    expect(PRESET_MODEL_LIST_WIRES["openai"]).toBeUndefined();
   });
 });

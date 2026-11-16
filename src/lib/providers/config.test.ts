@@ -5,6 +5,7 @@ import {
   providerConfigInputSchema,
   ProviderConfigError,
   validateProviderRules,
+  validateProviderTarget,
 } from "./config";
 import { ProviderCryptoError } from "./encryption";
 
@@ -85,6 +86,31 @@ describe("providerConfigInputSchema", () => {
     expect(() =>
       providerConfigInputSchema.parse({ ...base, apiKey: "k".repeat(4097) }),
     ).toThrow();
+  });
+});
+
+describe("validateProviderTarget (target rules independent of capabilities)", () => {
+  it("validates the same target rules as create/update, usable before a row exists", () => {
+    expect(
+      validateProviderTarget({ providerType: "preset", providerName: "openai" }).normalizedBaseUrl,
+    ).toBeNull();
+    expect(
+      validateProviderTarget({
+        providerType: "custom",
+        providerName: "my-endpoint",
+        baseUrl: "  https://API.Example.COM/v1  ",
+      }).normalizedBaseUrl,
+    ).toBe("https://api.example.com/v1");
+    try {
+      validateProviderTarget({
+        providerType: "custom",
+        providerName: "openai",
+        baseUrl: "https://api.example.com/v1",
+      });
+      expect.unreachable("preset names are reserved");
+    } catch (error) {
+      expect((error as ProviderConfigError).code).toBe("reserved_preset_name");
+    }
   });
 });
 

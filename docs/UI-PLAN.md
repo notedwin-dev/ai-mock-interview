@@ -293,3 +293,14 @@ at interview creation, not on this page.
   declare it (Gemini Live / OpenAI Realtime on their documented base URLs).
   `probe.ts` guards realtime per capability so native realtime rows never hit
   the OpenAI-compatible probe wires.
+- **Model setup is list-driven (owner directive 2026-11-16, same day):** every
+  model picker waits for the API key, then lists the provider's models via the
+  list-models API and the user picks — no manual ID typing by default.
+  Pre-create forms call the transient `POST /api/v1/providers/discover-models`
+  (key used once, never stored); stored rows use the per-row endpoint with the
+  stored key. Google's native list wire (`GET /v1beta/models`,
+  `x-goog-api-key`, `models/{id}` names) is honoured through
+  `PRESET_MODEL_LIST_WIRES` in the registry; other presets use the OpenAI
+  shape. Fallback order: live discovery → approved catalogue (pick list, never
+  typing) → manual entry only for a custom endpoint with neither. Realtime
+  cards are strict pick-only (both target providers expose list endpoints).

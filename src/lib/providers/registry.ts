@@ -226,3 +226,25 @@ export const PRESET_MODEL_SUGGESTIONS: Readonly<
     ],
   },
 };
+
+/**
+ * Per-preset overrides for the list-models wire (FR-PROVIDER-009). A preset
+ * listed here negotiates its own documented list endpoint and envelope;
+ * every other preset (and every custom endpoint) uses the OpenAI shape
+ * (`GET {base}/models`, Bearer credential). Verified against provider
+ * documentation (2026-11-16): the Gemini API lists models at
+ * `GET /v1beta/models` with the key in the `x-goog-api-key` header and
+ * resource names in the `models/{model_id}` shape.
+ */
+export interface ModelListWire {
+  /** Path appended to the preset's documented Base URL. */
+  path: string;
+  /** How the credential travels on the list request. */
+  auth: "bearer" | "x-goog-api-key";
+  /** Response envelope shape. */
+  format: "openai" | "google-v1beta";
+}
+
+export const PRESET_MODEL_LIST_WIRES: Readonly<Record<string, ModelListWire>> = {
+  google: { path: "/v1beta/models", auth: "x-goog-api-key", format: "google-v1beta" },
+};

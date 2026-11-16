@@ -42,11 +42,18 @@ import type {
  *
  * Which option runs an interview is chosen at interview creation, not here.
  *
+ * Model setup is list-driven (owner directive 2026-11-16): every form waits
+ * for the API key, then loads the provider's model list and the user picks
+ * an exact ID — no manual typing by default. Pre-create forms use transient
+ * discovery (POST /api/v1/providers/discover-models, key used once, never
+ * stored); stored rows use the per-row endpoint with the stored key. When a
+ * provider exposes no list endpoint, the approved catalogue offers the
+ * choices; only a custom endpoint with neither falls back to manual entry.
+ *
  * Wire-only invariants preserved here: credentials are write-only (sent to
  * the API, never displayed or stored in client state beyond a password
- * field), model IDs are always the exact provider strings (discovery
- * populates choices, manual entry always available), and a failed test is
- * reported honestly — never smoothed over.
+ * field), model IDs are always the exact provider strings, and a failed test
+ * is reported honestly — never smoothed over.
  */
 
 const CAPABILITY_SECTIONS = [
@@ -149,11 +156,68 @@ async function callApi<T>(
   }
 }
 
-/** Which model list a configuration row has loaded (or why it has none). */
-interface ModelState {
-  state: "loading" | "ready" | "manual";
+/**
+ * Raw per-row discovery outcome (stored-key discovery). Forms resolve it
+ * into picker state together with the capability's catalogue fallback.
+ */
+interface RowModelList {
+  state: "loading" | "done";
+  result: DiscoveryResult | null;
+}
+
+/**
+ * Picker state resolved from a discovery outcome (owner directive
+ * 2026-11-16: model setup waits for the API key, then lists the provider's
+ * models and the user picks — typing an ID is the honest last resort, never
+ * the default). Priority: live discovery → approved catalogue fallback →
+ * manual entry when neither exists.
+ */
+interface ModelListState {
+  state: "idle" | "loading" | "ready" | "failed";
   models: string[];
+  /** Where the picker options came from, when ready. */
+  source: "discovery" | "catalogue" | null;
   note?: string;
+}
+
+const IDLE_MODEL_LIST: ModelListState = { state: "idle", models: [], source: null };
+
+function resolveModelList(
+  raw: RowModelList,
+  catalogue: readonly ModelSuggestion[],
+): ModelListState {
+  if (raw.state === "loading") return { state: "loading", models: [], source: null };
+  const result = raw.result;
+  if (result === null) return IDLE_MODEL_LIST;
+  const catalogueIds = catalogue.map((s) => s.modelId);
+  if (result.ok) {
+    if (result.models && result.models.length > 0) {
+      return { state: "ready", models: result.models, source: "discovery" };
+    }
+    if (catalogueIds.length > 0) {
+      return {
+        state: "ready",
+        models: catalogueIds,
+        source: "catalogue",
+        note: "This provider exposes no model list — the choices below come from the approved model catalogue; verify the exact ID in your provider console.",
+      };
+    }
+    return {
+      state: "failed",
+      models: [],
+      source: null,
+      note: "This provider exposes no model list — enter the exact model ID from your provider console.",
+    };
+  }
+  if (catalogueIds.length > 0) {
+    return {
+      state: "ready",
+      models: catalogueIds,
+      source: "catalogue",
+      note: `${result.detail} Choices below come from the approved model catalogue; verify the exact ID in your provider console.`,
+    };
+  }
+  return { state: "failed", models: [], source: null, note: result.detail };
 }
 
 function suggestionsFor(
@@ -179,7 +243,7 @@ interface ProviderConfiguratorProps {
 
 export function ProviderConfigurator({ initialConfigurations }: ProviderConfiguratorProps) {
   const [rows, setRows] = useState<ProviderConfigSummary[]>(initialConfigurations);
-  const [modelsByRow, setModelsByRow] = useState<Record<string, ModelState>>({});
+  const [modelsByRow, setModelsByRow] = useState<Record<string, RowModelList>>({});
   const [probeByRow, setProbeByRow] = useState<Record<string, ConfigurationProbeResult>>({});
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<Record<string, ApiError>>({});
@@ -234,39 +298,28 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
 
   async function findModels(row: ProviderConfigSummary) {
     const rowId = row.userProviderConfigurationId;
-    const key = `${rowId}:models`;
+    // GET …/models runs the list-models wire with the STORED key and answers
+    // with the DiscoveryResult union: ok:true with the model IDs (null when
+    // the provider has no list endpoint), or ok:false with the probe error
+    // taxonomy. The row card resolves the outcome together with the
+    // capability's catalogue fallback — a failed discovery never fabricates
+    // a model list.
     setModelsByRow((current) => ({
       ...current,
-      [rowId]: { state: "loading", models: [] },
+      [rowId]: { state: "loading", result: null },
     }));
-    // GET …/models answers with the DiscoveryResult union: ok:true with the
-    // model IDs (null when the provider has no list endpoint), or ok:false
-    // with the probe error taxonomy. Everything below is reported honestly —
-    // a failed discovery never fabricates a model list.
-    const finish = (next: ModelState) =>
-      setModelsByRow((current) => ({ ...current, [rowId]: next }));
-    await runAction(key, async () => {
-      const result = await callApi<DiscoveryResult>(
+    await runAction(`${rowId}:models`, async () => {
+      const response = await callApi<DiscoveryResult>(
         `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/models`,
         { cache: "no-store" },
       );
-      if (!result.ok) {
-        finish({ state: "manual", models: [], note: result.error.message });
-        return null;
-      }
-      if (!result.data.ok) {
-        finish({ state: "manual", models: [], note: result.data.detail });
-        return null;
-      }
-      if (result.data.models && result.data.models.length > 0) {
-        finish({ state: "ready", models: result.data.models });
-        return null;
-      }
-      finish({
-        state: "manual",
-        models: [],
-        note: "This provider exposes no model list — enter the exact model ID manually.",
-      });
+      const result: DiscoveryResult = response.ok
+        ? response.data
+        : { ok: false, errorCode: "provider_error", detail: response.error.message };
+      setModelsByRow((current) => ({
+        ...current,
+        [rowId]: { state: "done", result },
+      }));
       return null;
     });
   }
@@ -376,7 +429,6 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
               : candidate,
           ),
         );
-        await findModels(result.data.configuration);
         return null;
       }
       const result = await callApi<{ configuration: ProviderConfigSummary }>(
@@ -393,11 +445,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
         },
       );
       if (!result.ok) return result.error;
-      const fresh = await refresh();
-      const row =
-        fresh.find((candidate) => candidate.providerName === providerName) ??
-        result.data.configuration;
-      await findModels(row);
+      await refresh();
       return null;
     });
     return error === null;
@@ -448,11 +496,8 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
               onProbe={runProbe}
               onPatch={patchRow}
               onDelete={deleteRow}
-              onCreated={async (created) => {
-                const fresh = await refresh();
-                const row =
-                  fresh.find((r) => r.providerName === created.providerName) ?? created;
-                await findModels(row);
+              onCreated={async () => {
+                await refresh();
               }}
             />
           ))}
@@ -601,7 +646,7 @@ function OptionCardHeader({
 
 interface RealtimeOptionCardProps {
   rows: ProviderConfigSummary[];
-  modelsByRow: Record<string, ModelState>;
+  modelsByRow: Record<string, RowModelList>;
   probeByRow: Record<string, ConfigurationProbeResult>;
   pending: string | null;
   actionError: Record<string, ApiError>;
@@ -686,6 +731,27 @@ function NativeRealtimeBlock({
     ) ?? null;
   const realtime = row?.capabilities.realtime ?? null;
   const formKey = `realtime:${option.providerName}`;
+  // PATCH path: the stored-key model list lives here so it can load when the
+  // form OPENS (a click handler, not a mount effect) without ever seeing the
+  // stored credential.
+  const [storedList, setStoredList] = useState<ModelListState>(IDLE_MODEL_LIST);
+
+  async function loadStoredModels(): Promise<ModelListState> {
+    setStoredList({ state: "loading", models: [], source: null });
+    const response = await callApi<DiscoveryResult>(
+      `/api/v1/providers/configurations/${encodeURIComponent(option.providerName)}/models`,
+      { cache: "no-store" },
+    );
+    const raw: RowModelList = {
+      state: "done",
+      result: response.ok
+        ? response.data
+        : { ok: false, errorCode: "provider_error", detail: response.error.message },
+    };
+    const resolved = resolveModelList(raw, []);
+    setStoredList(resolved);
+    return resolved;
+  }
 
   const status = !row
     ? { text: "Not set up", cls: "text-ink-muted", dot: "bg-ink-muted/60" }
@@ -720,7 +786,15 @@ function NativeRealtimeBlock({
             Set up
           </button>
         ) : !realtime ? (
-          <button type="button" onClick={onToggleForm} disabled={pending !== null} className={GHOST_PILL}>
+          <button
+            type="button"
+            onClick={() => {
+              onToggleForm();
+              void loadStoredModels();
+            }}
+            disabled={pending !== null}
+            className={GHOST_PILL}
+          >
             <Plus className="h-4 w-4" aria-hidden />
             Add realtime
           </button>
@@ -734,6 +808,8 @@ function NativeRealtimeBlock({
           formKey={formKey}
           pending={pending}
           actionError={actionError}
+          storedList={storedList}
+          onReloadStored={loadStoredModels}
           onSubmit={(apiKey, modelId) => onAddRealtime(option.providerName, apiKey, modelId)}
           onCancel={onToggleForm}
         />
@@ -765,6 +841,8 @@ function RealtimeAddForm({
   formKey,
   pending,
   actionError,
+  storedList,
+  onReloadStored,
   onSubmit,
   onCancel,
 }: {
@@ -773,24 +851,68 @@ function RealtimeAddForm({
   formKey: string;
   pending: string | null;
   actionError: Record<string, ApiError>;
+  /** PATCH path: the block owns the stored-key list state (loaded on open). */
+  storedList: ModelListState;
+  onReloadStored: () => Promise<ModelListState>;
   onSubmit: (apiKey: string | null, modelId: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
   const [modelId, setModelId] = useState("");
   const [error, setError] = useState<ApiError | null>(null);
+  const [typedList, setTypedList] = useState<ModelListState>(IDLE_MODEL_LIST);
+  const list = needsKey ? typedList : storedList;
+
+  // Owner directive 2026-11-16: the form never asks for a model ID — it lists
+  // the provider's models and the user picks one. Both native realtime
+  // presets expose a model-list endpoint, so there is no manual fallback:
+  // create loads through the transient discovery endpoint with the typed key;
+  // the PATCH path (credential already stored) loads through the stored-row
+  // endpoint without ever seeing the key.
+  async function loadList(): Promise<ModelListState> {
+    if (!needsKey) return onReloadStored();
+    const trimmed = apiKey.trim();
+    if (!trimmed) return IDLE_MODEL_LIST;
+    setTypedList({ state: "loading", models: [], source: null });
+    const response = await callApi<DiscoveryResult>("/api/v1/providers/discover-models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providerType: "preset",
+        providerName: option.providerName,
+        apiKey: trimmed,
+      }),
+    });
+    const raw: RowModelList = {
+      state: "done",
+      result: response.ok
+        ? response.data
+        : { ok: false, errorCode: "provider_error", detail: response.error.message },
+    };
+    const resolved = resolveModelList(raw, []);
+    setTypedList(resolved);
+    return resolved;
+  }
 
   async function submit() {
     setError(null);
-    if (!modelId.trim()) {
-      setError({ code: "invalid_input", message: "Enter the exact realtime model ID." });
-      return;
-    }
     if (needsKey && !apiKey.trim()) {
       setError({ code: "missing_credential", message: "An API key is required." });
       return;
     }
-    const ok = await onSubmit(needsKey ? apiKey.trim() : null, modelId.trim());
+    let current = list;
+    if (current.state !== "ready") {
+      current = await loadList();
+    }
+    if (current.state !== "ready") {
+      setError({ code: "invalid_input", message: "Load the model list first, then select a model." });
+      return;
+    }
+    if (!modelId) {
+      setError({ code: "invalid_input", message: "Select a model from the list." });
+      return;
+    }
+    const ok = await onSubmit(needsKey ? apiKey.trim() : null, modelId);
     if (ok) onCancel();
   }
 
@@ -816,12 +938,21 @@ function RealtimeAddForm({
           <input
             type="password"
             value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
+            onChange={(event) => {
+              setApiKey(event.target.value);
+              setTypedList(IDLE_MODEL_LIST);
+            }}
+            onBlur={() => {
+              if (list.state === "idle" || list.state === "failed") void loadList();
+            }}
             className={`${FIELD_CLASS} font-mono`}
             placeholder="Paste the provider API key"
             autoComplete="off"
             maxLength={4096}
           />
+          <span className="text-xs text-ink-muted">
+            The provider&apos;s model list loads automatically once the key is entered.
+          </span>
         </label>
       ) : (
         <p className="rounded-xl bg-surface px-4 py-2.5 text-xs text-ink-muted">
@@ -829,20 +960,59 @@ function RealtimeAddForm({
           that configuration and keeps the stored API key.
         </p>
       )}
-      <label className="flex flex-col gap-1.5">
-        <span className={LABEL_CLASS}>Realtime model ID</span>
-        <input
-          value={modelId}
-          onChange={(event) => setModelId(event.target.value)}
-          className={FIELD_CLASS}
-          placeholder="Exact provider realtime model ID"
-          maxLength={200}
-        />
-        <span className="text-xs text-ink-muted">
-          Realtime agent model IDs are not pre-listed — enter the exact ID your account
-          exposes. After saving, &ldquo;Find models&rdquo; loads the list your key can use.
-        </span>
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <span className={LABEL_CLASS}>Model</span>
+        {list.state === "ready" ? (
+          <select
+            value={modelId}
+            onChange={(event) => setModelId(event.target.value)}
+            className={FIELD_CLASS}
+            aria-label={`Model for ${option.optionTitle}`}
+          >
+            <option value="" disabled>
+              Select a model…
+            </option>
+            {list.models.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="flex h-11 items-center gap-2 rounded-full bg-raised px-5 text-sm text-ink-muted">
+            {list.state === "loading" ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                Loading the model list…
+              </>
+            ) : list.state === "failed" ? (
+              "The model list could not be loaded."
+            ) : (
+              "The provider's model list appears here once the API key is entered."
+            )}
+          </div>
+        )}
+        {list.state === "ready" && list.source === "discovery" ? (
+          <span className="text-xs text-ink-muted">
+            {list.models.length} models loaded from the provider&apos;s list — pick the
+            realtime model your account exposes.
+          </span>
+        ) : null}
+        {list.note ? <span className="text-xs text-amber-300">{list.note}</span> : null}
+        {list.state === "failed" ? (
+          <span>
+            <button
+              type="button"
+              onClick={() => void loadList()}
+              disabled={pending !== null}
+              className={GHOST_PILL}
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden />
+              Load models
+            </button>
+          </span>
+        ) : null}
+      </div>
       {error ? <p className="text-xs text-red-400">{error.message}</p> : null}
       {actionError[formKey] ? (
         <p className="text-xs text-red-400">{actionError[formKey]!.message}</p>
@@ -866,7 +1036,7 @@ interface CapabilitySectionProps {
   rows: ProviderConfigSummary[];
   collapsed: boolean;
   onToggle: () => void;
-  modelsByRow: Record<string, ModelState>;
+  modelsByRow: Record<string, RowModelList>;
   probeByRow: Record<string, ConfigurationProbeResult>;
   pending: string | null;
   actionError: Record<string, ApiError>;
@@ -980,14 +1150,21 @@ function ConfigurationRowCard({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const credentials = CREDENTIAL_STATUS[row.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated!;
-  const modelState = modelsByRow[rowId];
+  const suggestions = suggestionsFor(capability, row.providerType === "preset" ? row.providerName : null);
+  // The editor always opens with a fresh list load ("Change" triggers
+  // discovery), so an absent entry renders as loading until it lands.
+  const rawList = modelsByRow[rowId] ?? { state: "loading" as const, result: null };
+  const list = resolveModelList(rawList, suggestions);
   const probe = probeByRow[rowId];
   const probeForCapability = probe?.capabilities.find((r) => r.capability === capability);
-  const suggestions = suggestionsFor(capability, row.providerType === "preset" ? row.providerName : null);
-  const suggestionIds = useMemo(() => suggestions.map((s) => s.modelId), [suggestions]);
+  const noteById = new Map(suggestions.map((s) => [s.modelId, s.note] as const));
+  // Manual entry is the honest last resort: a custom endpoint whose gateway
+  // exposes no model list and has no catalogue. Presets always have one of
+  // the two, so they never ask the user to type an ID.
+  const allowManual = row.providerType === "custom" && list.state === "failed";
+  const savedModelId = servingCapability?.modelId ?? "";
 
-  const modelBusy = pending === `${rowId}:model` || modelState?.state === "loading";
-  const datalistId = `models-${rowId}-${capability}`;
+  const modelBusy = pending === `${rowId}:model` || rawList.state === "loading";
 
   return (
     <article className="rounded-2xl border border-line bg-raised/40 p-4 sm:p-5">
@@ -1013,31 +1190,23 @@ function ConfigurationRowCard({
 
       {/* Model */}
       <div className="mt-4">
-        <span className={LABEL_CLASS}>Model ID ({CAPABILITY_LABELS[capability]})</span>
+        <span className={LABEL_CLASS}>Model ({CAPABILITY_LABELS[capability]})</span>
         {!editingModel ? (
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <code className="rounded-full bg-surface px-3 py-1.5 text-sm text-ink">
-              {servingCapability?.modelId}
+              {savedModelId}
             </code>
-            <button type="button" onClick={() => { setModelDraft(servingCapability?.modelId ?? ""); setEditingModel(true); }} className={GHOST_PILL}>
-              Change
-            </button>
             <button
               type="button"
               onClick={() => {
-                // Discovery results (list or failure note) are rendered in the
-                // model editor, so open it when picking a model is the goal.
-                if (!editingModel) {
-                  setModelDraft(servingCapability?.modelId ?? "");
-                  setEditingModel(true);
-                }
+                setModelDraft(savedModelId);
+                setEditingModel(true);
                 onFindModels(row);
               }}
-              disabled={modelBusy || pending !== null}
+              disabled={pending !== null}
               className={GHOST_PILL}
             >
-              {modelState?.state === "loading" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
-              Find models
+              Change
             </button>
           </div>
         ) : (
@@ -1052,26 +1221,52 @@ function ConfigurationRowCard({
             }}
           >
             <div className="flex flex-col gap-2 sm:flex-row">
-              <input
-                list={suggestionIds.length > 0 ? datalistId : undefined}
-                value={modelDraft}
-                onChange={(event) => setModelDraft(event.target.value)}
-                className={FIELD_CLASS}
-                placeholder="Exact provider model ID"
-                aria-label={`Model ID for ${CAPABILITY_LABELS[capability]}`}
-                maxLength={200}
-              />
-              {suggestionIds.length > 0 ? (
-                <datalist id={datalistId}>
-                  {suggestions.map((s) => (
-                    <option key={s.modelId} value={s.modelId}>
-                      {s.note ? `${s.modelId} (${s.note})` : s.modelId}
+              {list.state === "ready" ? (
+                <select
+                  value={modelDraft}
+                  onChange={(event) => setModelDraft(event.target.value)}
+                  className={FIELD_CLASS}
+                  aria-label={`Model for ${CAPABILITY_LABELS[capability]}`}
+                >
+                  <option value="" disabled>
+                    Select a model…
+                  </option>
+                  {savedModelId && !list.models.includes(savedModelId) ? (
+                    <option value={savedModelId}>{savedModelId} (currently saved)</option>
+                  ) : null}
+                  {list.models.map((id) => (
+                    <option key={id} value={id}>
+                      {noteById.get(id) ? `${id} (${noteById.get(id)})` : id}
                     </option>
                   ))}
-                </datalist>
-              ) : null}
+                </select>
+              ) : allowManual ? (
+                <input
+                  value={modelDraft}
+                  onChange={(event) => setModelDraft(event.target.value)}
+                  className={FIELD_CLASS}
+                  placeholder="Exact provider model ID"
+                  aria-label={`Model ID for ${CAPABILITY_LABELS[capability]}`}
+                  maxLength={200}
+                />
+              ) : (
+                <div className="flex h-11 items-center gap-2 rounded-full bg-raised px-5 text-sm text-ink-muted">
+                  {list.state === "loading" ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      Loading the model list…
+                    </>
+                  ) : (
+                    "The model list is not loaded yet."
+                  )}
+                </div>
+              )}
               <div className="flex gap-2">
-                <button type="submit" disabled={modelBusy || pending !== null} className={PRIMARY_PILL}>
+                <button
+                  type="submit"
+                  disabled={modelBusy || pending !== null || (list.state === "ready" && !modelDraft)}
+                  className={PRIMARY_PILL}
+                >
                   {modelBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Check className="h-4 w-4" aria-hidden />}
                   Save model
                 </button>
@@ -1080,13 +1275,26 @@ function ConfigurationRowCard({
                 </button>
               </div>
             </div>
-            {modelState?.state === "ready" && modelState.models.length > 0 ? (
+            {list.state === "ready" && list.source === "discovery" ? (
               <p className="text-xs text-ink-muted">
-                {modelState.models.length} models discovered — pick one from the list or type an exact ID.
-                {modelState.models.includes(servingCapability?.modelId ?? "") ? " The saved model is in the list." : ""}
+                {list.models.length} models loaded from the provider&apos;s list.
+                {list.models.includes(savedModelId) ? " The saved model is in the list." : ""}
               </p>
             ) : null}
-            {modelState?.note ? <p className="text-xs text-amber-300">{modelState.note}</p> : null}
+            {list.note ? <p className="text-xs text-amber-300">{list.note}</p> : null}
+            {list.state === "failed" ? (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => onFindModels(row)}
+                  disabled={modelBusy || pending !== null}
+                  className={GHOST_PILL}
+                >
+                  <RefreshCw className="h-4 w-4" aria-hidden />
+                  Load models
+                </button>
+              </div>
+            ) : null}
             {actionError[`${rowId}:model`] ? (
               <p className="text-xs text-red-400">{actionError[`${rowId}:model`]!.message}</p>
             ) : null}
@@ -1264,6 +1472,7 @@ function AddProviderArea({
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [modelId, setModelId] = useState("");
+  const [list, setList] = useState<ModelListState>(IDLE_MODEL_LIST);
   const [pendingCreate, setPendingCreate] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
@@ -1274,9 +1483,9 @@ function AddProviderArea({
   const chosenPreset = presetName
     ? PRESET_ADAPTERS.find((p) => p.providerName === presetName) ?? null
     : null;
-  const suggestions = mode === "preset" && chosenPreset
-    ? suggestionsFor(capability, chosenPreset.providerName)
-    : [];
+  const catalogue =
+    mode === "preset" && chosenPreset ? suggestionsFor(capability, chosenPreset.providerName) : [];
+  const noteById = new Map(catalogue.map((s) => [s.modelId, s.note] as const));
 
   function reset() {
     setMode("idle");
@@ -1285,7 +1494,46 @@ function AddProviderArea({
     setBaseUrl("");
     setApiKey("");
     setModelId("");
+    setList(IDLE_MODEL_LIST);
     setError(null);
+  }
+
+  /** Any target change invalidates the loaded list — it belongs to the key. */
+  function invalidateList() {
+    setList(IDLE_MODEL_LIST);
+  }
+
+  /**
+   * Owner directive 2026-11-16: once the API key is keyed in, the provider's
+   * model list loads via the transient discovery endpoint and the user picks
+   * from it. Manual entry is only offered for custom endpoints whose gateway
+   * exposes no list and has no catalogue (the honest last resort).
+   */
+  async function loadList(): Promise<ModelListState> {
+    const trimmedKey = apiKey.trim();
+    const isPreset = mode === "preset" && chosenPreset !== null;
+    if (!trimmedKey) return IDLE_MODEL_LIST;
+    if (!isPreset && (!name.trim() || !baseUrl.trim())) return IDLE_MODEL_LIST;
+    setList({ state: "loading", models: [], source: null });
+    const response = await callApi<DiscoveryResult>("/api/v1/providers/discover-models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providerType: isPreset ? "preset" : "custom",
+        providerName: isPreset ? chosenPreset!.providerName : name.trim(),
+        ...(isPreset ? {} : { baseUrl: baseUrl.trim() }),
+        apiKey: trimmedKey,
+      }),
+    });
+    const raw: RowModelList = {
+      state: "done",
+      result: response.ok
+        ? response.data
+        : { ok: false, errorCode: "provider_error", detail: response.error.message },
+    };
+    const resolved = resolveModelList(raw, catalogue);
+    setList(resolved);
+    return resolved;
   }
 
   async function submit() {
@@ -1299,8 +1547,16 @@ function AddProviderArea({
       setError({ code: "missing_credential", message: "An API key is required." });
       return;
     }
-    if (!modelId.trim()) {
-      setError({ code: "invalid_input", message: "Enter the exact provider model ID." });
+    let current = list;
+    if (!modelId && current.state !== "ready") {
+      current = await loadList();
+    }
+    if (!modelId && current.state !== "ready") {
+      setError({ code: "invalid_input", message: "The model list could not be loaded — fix the error below or enter the model ID manually." });
+      return;
+    }
+    if (!modelId) {
+      setError({ code: "invalid_input", message: "Select a model from the list." });
       return;
     }
 
@@ -1325,6 +1581,8 @@ function AddProviderArea({
     reset();
     onCreated(created);
   }
+
+  const allowManual = mode === "custom" && list.state === "failed";
 
   if (mode === "idle") {
     return (
@@ -1389,48 +1647,92 @@ function AddProviderArea({
           <>
             <label className="flex flex-col gap-1.5">
               <span className={LABEL_CLASS}>Configuration name</span>
-              <input value={name} onChange={(e) => setName(e.target.value)} className={FIELD_CLASS} placeholder="e.g. my-self-hosted-gateway" maxLength={120} />
+              <input value={name} onChange={(e) => { setName(e.target.value); invalidateList(); }} onBlur={() => { if (list.state === "idle" || list.state === "failed") void loadList(); }} className={FIELD_CLASS} placeholder="e.g. my-self-hosted-gateway" maxLength={120} />
             </label>
             <label className="flex flex-col gap-1.5">
               <span className={LABEL_CLASS}>Base URL</span>
-              <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className={FIELD_CLASS} placeholder="https://your-endpoint.example.com/v1" inputMode="url" maxLength={2048} />
+              <input value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); invalidateList(); }} onBlur={() => { if (list.state === "idle" || list.state === "failed") void loadList(); }} className={FIELD_CLASS} placeholder="https://your-endpoint.example.com/v1" inputMode="url" maxLength={2048} />
             </label>
           </>
         ) : null}
         <label className="flex flex-col gap-1.5">
           <span className={LABEL_CLASS}>API key</span>
-          <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className={`${FIELD_CLASS} font-mono`} placeholder="Paste the provider API key" autoComplete="off" maxLength={4096} />
-        </label>
-        <label className="flex flex-col gap-1.5">
-          <span className={LABEL_CLASS}>Model ID for {CAPABILITY_LABELS[capability]}</span>
           <input
-            list={suggestions.length > 0 ? "add-model-suggestions" : undefined}
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-            className={FIELD_CLASS}
-            placeholder="Exact provider model ID"
-            maxLength={200}
+            type="password"
+            value={apiKey}
+            onChange={(e) => { setApiKey(e.target.value); invalidateList(); }}
+            onBlur={() => { if (list.state === "idle" || list.state === "failed") void loadList(); }}
+            className={`${FIELD_CLASS} font-mono`}
+            placeholder="Paste the provider API key"
+            autoComplete="off"
+            maxLength={4096}
           />
-          {suggestions.length > 0 ? (
-            <>
-              <datalist id="add-model-suggestions">
-                {suggestions.map((s) => (
-                  <option key={s.modelId} value={s.modelId}>
-                    {s.note ? `${s.modelId} (${s.note})` : s.modelId}
-                  </option>
-                ))}
-              </datalist>
-              <span className="text-xs text-ink-muted">
-                Suggestions come from the approved model catalogue — after saving, run
-                &ldquo;Find models&rdquo; to load the exact IDs your account can use.
-              </span>
-            </>
-          ) : (
-            <span className="text-xs text-ink-muted">
-              Enter the exact model ID your account exposes.
-            </span>
-          )}
+          <span className="text-xs text-ink-muted">
+            The provider&apos;s model list loads automatically once the key is entered.
+          </span>
         </label>
+        <div className="flex flex-col gap-1.5">
+          <span className={LABEL_CLASS}>Model for {CAPABILITY_LABELS[capability]}</span>
+          {list.state === "ready" ? (
+            <select
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+              className={FIELD_CLASS}
+              aria-label={`Model for ${CAPABILITY_LABELS[capability]}`}
+            >
+              <option value="" disabled>
+                Select a model…
+              </option>
+              {list.models.map((id) => (
+                <option key={id} value={id}>
+                  {noteById.get(id) ? `${id} (${noteById.get(id)})` : id}
+                </option>
+              ))}
+            </select>
+          ) : allowManual ? (
+            <input
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+              className={FIELD_CLASS}
+              placeholder="Exact provider model ID"
+              maxLength={200}
+              aria-label={`Model ID for ${CAPABILITY_LABELS[capability]}`}
+            />
+          ) : (
+            <div className="flex h-11 items-center gap-2 rounded-full bg-raised px-5 text-sm text-ink-muted">
+              {list.state === "loading" ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  Loading the model list…
+                </>
+              ) : list.state === "failed" ? (
+                "The model list could not be loaded."
+              ) : (
+                "The provider's model list appears here once the API key is entered."
+              )}
+            </div>
+          )}
+          {list.state === "ready" && list.source === "discovery" ? (
+            <span className="text-xs text-ink-muted">
+              {list.models.length} models loaded from the provider&apos;s list — these are the
+              exact IDs your account can use.
+            </span>
+          ) : null}
+          {list.note ? <span className="text-xs text-amber-300">{list.note}</span> : null}
+          {list.state === "failed" ? (
+            <span>
+              <button
+                type="button"
+                onClick={() => void loadList()}
+                disabled={pendingCreate}
+                className={GHOST_PILL}
+              >
+                <RefreshCw className="h-4 w-4" aria-hidden />
+                Load models
+              </button>
+            </span>
+          ) : null}
+        </div>
         {error ? <p className="text-xs text-red-400">{error.message}</p> : null}
         <div className="flex gap-2">
           <button type="button" onClick={submit} disabled={pendingCreate} className={PRIMARY_PILL}>
@@ -1439,8 +1741,7 @@ function AddProviderArea({
           </button>
         </div>
         <p className="text-xs text-ink-muted">
-          After saving: pick the exact model from discovery, run the capability test, then
-          enable it for interviews.
+          After saving: run the capability test, then enable it for interviews.
         </p>
       </div>
     </div>

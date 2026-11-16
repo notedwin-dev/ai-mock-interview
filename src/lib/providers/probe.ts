@@ -1,8 +1,8 @@
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { capabilitiesJsonSchema, ProviderConfigError } from "./config";
+import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } from "./config";
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
-import type { Capability } from "./registry";
+import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
 import { evaluateBaseUrl } from "./ssrf";
 
 /**
@@ -21,8 +21,12 @@ import { evaluateBaseUrl } from "./ssrf";
  * request header). Native realtime sessions (the `realtime` capability:
  * Gemini Live, OpenAI Realtime) negotiate the provider's own protocol and
  * always report skipped until the realtime runtime lands — they must never
- * reach the wires above. Other presets need their M2 adapters and are
- * reported as skipped, which does not validate the configuration. DNS-rebinding/redirect
+ * reach the wires above. Model-list discovery (FR-PROVIDER-009) lives in the
+ * same module and shares the wire handling: presets without an override use
+ * `GET {base}/models` (Bearer); registry overrides (Google:
+ * `GET /v1beta/models` with `x-goog-api-key`) are honoured by both
+ * stored-row and candidate discovery. Other presets need their M2 adapters
+ * and are reported as skipped, which does not validate the configuration. DNS-rebinding/redirect
  * pinning at connect time lands with the M2 adapter transport (see ssrf.ts
  * notes).
  *
@@ -238,9 +242,7 @@ export async function probeProviderConfiguration(
     // Base URL: custom rows carry their own; presets resolve via the registry.
     let baseUrl: string | null = row.baseUrl;
     if (row.providerType === "preset") {
-      const { getPresetAdapter } = await import("./registry");
-      const preset = getPresetAdapter(row.providerName);
-      baseUrl = preset?.defaultBaseUrl ?? null;
+      baseUrl = getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
       if (!PROBEABLE_PRESETS.has(row.providerName)) {
         results.push({
           capability,
@@ -274,25 +276,19 @@ export async function probeProviderConfiguration(
       const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
       const headers = { authorization: `Bearer ${apiKey}` };
 
-      // Step 1: model-list discovery (when the provider supports it). Auth
-      // and rate-limit rejections are real verification failures; a missing
-      // list endpoint (404/405) is not a capability failure. fish-audio has
-      // no such endpoint, so nothing is requested for it.
+      // Step 1: model-list discovery (when the provider supports it), on the
+      // same wire as model discovery (FR-PROVIDER-009). Auth and rate-limit
+      // rejections are real verification failures; a missing list endpoint
+      // (404/405) returns null and is not a capability failure. fish-audio
+      // has no such endpoint, so nothing is requested for it.
       let modelsDiscovered: string[] | null = null;
       if (!isFishAudioPreset) {
-        const modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, { headers });
-        if (modelsResponse.ok) {
-          const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
-          modelsDiscovered = Array.isArray(modelsBody.data)
-            ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
-            : null;
-        } else if (modelsResponse.status !== 404 && modelsResponse.status !== 405) {
-          throw new ProbeHttpError(
-            modelsResponse.status,
-            "models",
-            (await modelsResponse.text().catch(() => undefined))?.slice(0, 500),
-          );
-        }
+        modelsDiscovered = await fetchModelList(
+          urlDecision.normalizedUrl,
+          apiKey,
+          row.providerType === "preset" ? row.providerName : null,
+          fetchImpl,
+        );
       }
 
       // Step 2: capability-specific ping with no real interview content.
@@ -463,6 +459,77 @@ export type DiscoveryResult =
 /** Process-lifetime cache; entries expire by TTL and stay keyed per config. */
 const MODEL_LIST_CACHE = new Map<string, ModelListCacheEntry>();
 
+/**
+ * Shared list-models wire (FR-PROVIDER-009). Presets with a registered
+ * override (PRESET_MODEL_LIST_WIRES) speak their documented list endpoint
+ * and envelope; everything else speaks the OpenAI shape
+ * (`GET {base}/models`, Bearer credential). Returns the discovered IDs,
+ * `null` when the provider has no list endpoint (404/405 — "when
+ * supported"), and throws ProbeHttpError for any other HTTP failure so the
+ * caller classifies it in the probe error taxonomy.
+ */
+async function fetchModelList(
+  normalizedBaseUrl: string,
+  apiKey: string,
+  presetName: string | null,
+  fetchImpl: typeof fetch,
+): Promise<string[] | null> {
+  const root = stripTrailingSlash(normalizedBaseUrl);
+  const wire = presetName ? PRESET_MODEL_LIST_WIRES[presetName] : undefined;
+
+  if (wire && wire.format === "google-v1beta") {
+    // Google Generative Language API: resource names arrive as
+    // "models/{model_id}" and are stripped to the bare model_id the
+    // catalogue stores. nextPageToken is followed, bounded defensively.
+    const collected: string[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const pageUrl = pageToken
+        ? `${root}${wire.path}?pageToken=${encodeURIComponent(pageToken)}`
+        : `${root}${wire.path}`;
+      const response = await fetchImpl(pageUrl, { headers: { "x-goog-api-key": apiKey } });
+      if (!response.ok) {
+        if (response.status === 404 || response.status === 405) return null;
+        throw new ProbeHttpError(
+          response.status,
+          "models",
+          (await response.text().catch(() => undefined))?.slice(0, 500),
+        );
+      }
+      const body = (await response.json()) as {
+        models?: Array<{ name?: string }>;
+        nextPageToken?: string;
+      };
+      for (const entry of Array.isArray(body.models) ? body.models : []) {
+        const modelId = String(entry.name ?? "").replace(/^models\//, "");
+        if (modelId.length > 0) collected.push(modelId);
+      }
+      pageToken = body.nextPageToken;
+      if (!pageToken) break;
+    }
+    return collected;
+  }
+
+  const response = await fetchImpl(`${root}/models`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  });
+  if (response.ok) {
+    const body = (await response.json()) as { data?: Array<{ id?: string }> };
+    return Array.isArray(body.data)
+      ? body.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
+      : null;
+  }
+  if (response.status === 404 || response.status === 405) {
+    // "When supported": a missing list endpoint is not a failure.
+    return null;
+  }
+  throw new ProbeHttpError(
+    response.status,
+    "models",
+    (await response.text().catch(() => undefined))?.slice(0, 500),
+  );
+}
+
 export async function discoverProviderModels(
   userId: string,
   configurationId: string,
@@ -483,7 +550,6 @@ export async function discoverProviderModels(
   if (row.providerType === "preset") {
     // Preset rows store no Base URL of their own; resolve the registry
     // default exactly like the probe does, so preset rows are discoverable.
-    const { getPresetAdapter } = await import("./registry");
     baseUrl = getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
   }
 
@@ -516,30 +582,71 @@ export async function discoverProviderModels(
     throw error;
   }
 
-  let modelsResponse: Response;
   try {
-    modelsResponse = await fetchImpl(`${stripTrailingSlash(urlDecision.normalizedUrl)}/models`, {
-      headers: { authorization: `Bearer ${apiKey}` },
-    });
+    const models = await fetchModelList(
+      urlDecision.normalizedUrl,
+      apiKey,
+      row.providerType === "preset" ? row.providerName : null,
+      fetchImpl,
+    );
+    cache.set(cacheKey, { models, expiresAt: now() + ttlSeconds * 1000 });
+    return { ok: true, models, source: "provider" };
   } catch (error) {
     // Provider connectivity problems surface in the probe error taxonomy, not
     // as an unhandled exception (FR-PROVIDER-006).
     const failure = await classifyProbeFailure(error, fetchImpl);
     return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
-  if (modelsResponse.ok) {
-    const modelsBody = (await modelsResponse.json()) as { data?: Array<{ id?: string }> };
-    const models = Array.isArray(modelsBody.data)
-      ? modelsBody.data.map((entry) => String(entry.id ?? "")).filter((id) => id.length > 0)
-      : null;
-    cache.set(cacheKey, { models, expiresAt: now() + ttlSeconds * 1000 });
+}
+
+export interface CandidateDiscoveryInput {
+  providerType: "preset" | "custom";
+  providerName: string;
+  /** Required for custom targets; presets always use their registry URL. */
+  baseUrl?: string;
+  apiKey: string;
+}
+
+/**
+ * Transient model discovery for pre-create pickers (FR-PROVIDER-009; owner
+ * directive 2026-11-16: model setup lists models from the provider's
+ * list-models API instead of asking for manual IDs). The target is
+ * validated, but nothing is persisted: the credential from the request body
+ * is used once for this outbound list call and never stored, cached or
+ * logged (write-only credentials, ADR-0005). Target validation failures
+ * throw ProviderConfigError (the route maps them to the error envelope);
+ * wire failures return the probe taxonomy as a DiscoveryResult.
+ */
+export async function discoverCandidateModels(
+  input: CandidateDiscoveryInput,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<DiscoveryResult> {
+  const { normalizedBaseUrl } = validateProviderTarget(input);
+  const baseUrl =
+    input.providerType === "preset"
+      ? getPresetAdapter(input.providerName)?.defaultBaseUrl ?? null
+      : normalizedBaseUrl;
+
+  const urlDecision = evaluateBaseUrl(baseUrl ?? "");
+  if (!urlDecision.ok) {
+    return {
+      ok: false,
+      errorCode: "network_unreachable",
+      detail: "The configured Base URL is not a usable endpoint.",
+    };
+  }
+
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  try {
+    const models = await fetchModelList(
+      urlDecision.normalizedUrl,
+      input.apiKey,
+      input.providerType === "preset" ? input.providerName : null,
+      fetchImpl,
+    );
     return { ok: true, models, source: "provider" };
+  } catch (error) {
+    const failure = await classifyProbeFailure(error, fetchImpl);
+    return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
-  if (modelsResponse.status === 404 || modelsResponse.status === 405) {
-    // "When supported": a missing list endpoint is not a failure.
-    cache.set(cacheKey, { models: null, expiresAt: now() + ttlSeconds * 1000 });
-    return { ok: true, models: null, source: "provider" };
-  }
-  const failure = classifyHttpFailure(modelsResponse.status, "models", undefined);
-  return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
 }
