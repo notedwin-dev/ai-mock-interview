@@ -136,8 +136,8 @@ export function ConsoleBanner({
           </p>
           <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
             {interviewerReady ? (
-              <Link href="/dashboard/interview/new" className={PRIMARY_PILL}>
-                Start a new interview
+              <Link href="/dashboard/interview/agent" className={PRIMARY_PILL}>
+                Launch AI Interview Agent
               </Link>
             ) : (
               <>
@@ -147,7 +147,7 @@ export function ConsoleBanner({
                   aria-disabled
                   className="inline-flex h-11 cursor-not-allowed items-center rounded-full bg-surface px-6 text-sm font-semibold text-ink-muted"
                 >
-                  Start a new interview
+                  Launch AI Interview Agent
                 </button>
                 {!readinessFailed ? (
                   <Link
