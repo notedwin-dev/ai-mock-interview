@@ -59,6 +59,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         messages?: TranscriptEntry[];
         error?: { message: string };
         endCall?: boolean;
+        audioBase64?: string | null;
       };
       if (!response.ok) {
         setError(body.error?.message ?? "The interviewer could not respond.");
@@ -66,6 +67,14 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         return;
       }
       setMessages(body.messages ?? []);
+      // Voice playback is best-effort: the transcript is the source of truth.
+      if (body.audioBase64) {
+        try {
+          void new Audio(`data:audio/mp3;base64,${body.audioBase64}`).play().catch(() => undefined);
+        } catch {
+          // Browser blocked autoplay — the text reply is still visible.
+        }
+      }
       setState(body.endCall ? "listening" : "speaking");
       if (body.endCall) setEnded(true);
     } catch {

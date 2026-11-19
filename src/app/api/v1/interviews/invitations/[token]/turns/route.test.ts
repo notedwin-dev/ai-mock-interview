@@ -28,7 +28,13 @@ describe("token-scoped room turns API", () => {
     const response = await POST(request({ contentText: "my answer", idempotencyKey: "turn-1" }), ctx);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(result);
-    expect(mocks.runRoomTurn).toHaveBeenCalledWith(TOKEN, { contentText: "my answer", idempotencyKey: "turn-1" });
+    expect(mocks.runRoomTurn).toHaveBeenCalledWith(
+      TOKEN,
+      { contentText: "my answer", idempotencyKey: "turn-1" },
+      expect.objectContaining({
+        tts: expect.objectContaining({ synthesize: expect.any(Function), resolveRoute: expect.any(Function) }),
+      }),
+    );
   });
 
   it("GET refuses an invalid or revoked link", async () => {
