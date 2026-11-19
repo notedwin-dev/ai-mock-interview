@@ -7,6 +7,10 @@ import {
 } from "@/lib/providers/config";
 import { ProviderConfigurator } from "@/components/dashboard/ProviderConfigurator";
 
+// Auth uses connection(); the segment must render per request, otherwise the
+// Suspense stream never settles and the browser reloads the page indefinitely.
+export const instant = false;
+
 /**
  * AI configuration page (FR-PROVIDER-001..009; ADR-028/029/030; owner mockup
  * + directive 2026-11-16): the dedicated configuration experience mirroring

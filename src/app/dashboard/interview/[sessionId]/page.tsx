@@ -6,6 +6,10 @@ import {
 } from "@/lib/interview/service";
 import { RoomControls } from "@/components/interview/RoomControls";
 
+// Auth uses connection(); the segment must render per request, otherwise the
+// Suspense stream never settles and the browser reloads the page indefinitely.
+export const instant = false;
+
 /**
  * Meeting-style interview room (FR-INTERVIEW-003), reference-design-adapted: the
  * owner's session snapshot and chronological transcript render as a

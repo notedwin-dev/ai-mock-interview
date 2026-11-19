@@ -11,6 +11,10 @@ import {
 } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
 
+// Auth uses connection(); the segment must render per request, otherwise the
+// Suspense stream never settles and the browser reloads the page indefinitely.
+export const instant = false;
+
 /**
  * Candidate dashboard (TT-6, reference-design-adapted): a hero banner with the
  * primary action over a signal-chain strip, then "Your past interviews" as a
