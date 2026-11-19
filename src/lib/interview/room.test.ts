@@ -126,6 +126,30 @@ describe("runRoomTurn", () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
+  it("attaches interviewer audio and never lets a voice failure break the turn", async () => {
+    const { store } = fakeStore();
+    const base = {
+      store,
+      resolveRoute: async () => llmRoute,
+      generate: async () => ({ interviewerText: "Tell me more.", messageKind: "follow_up_question" as const, endCall: false }),
+    };
+    const ttsRoute = { providerName: "fish-audio", providerType: "preset", baseUrl: "https://api.fish.audio", modelId: "s2.1-pro-free", apiKey: "k" };
+
+    const withAudio = await runRoomTurn(TOKEN, { contentText: "my answer" }, {
+      ...base,
+      tts: { resolveRoute: async () => ttsRoute, synthesize: async () => new Uint8Array([1, 2, 3]) },
+    });
+    expect(withAudio.audioBase64).toBe(Buffer.from([1, 2, 3]).toString("base64"));
+    expect(withAudio.messages).toHaveLength(2);
+
+    const failedVoice = await runRoomTurn(TOKEN, { contentText: "another answer" }, {
+      ...base,
+      tts: { resolveRoute: async () => ttsRoute, synthesize: async () => { throw new Error("voice down"); } },
+    });
+    expect(failedVoice.audioBase64).toBeNull();
+    expect(failedVoice.messages).toHaveLength(4); // turn text still persisted
+  });
+
   it("rejects unknown links and interviews that are not in a joinable state", async () => {
     const { store } = fakeStore();
     const missing = fakeStore({ ...context, status: "completed" });

@@ -1,4 +1,5 @@
 import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib/ai/llm";
+import type { TtsRoute } from "@/lib/ai/tts";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { z } from "zod";
@@ -60,6 +61,8 @@ export interface RoomTurnResult {
   messages: TranscriptEntry[];
   endCall: boolean;
   created: boolean;
+  /** MP3 bytes of the interviewer turn, base64 — null when no voice is configured. */
+  audioBase64: string | null;
 }
 
 export type RoomErrorCode = "invitation_not_found" | "invalid_state" | "invalid_input";
@@ -83,6 +86,12 @@ export const roomLlmOutputSchema = z
   .strict();
 export type RoomLlmOutput = z.infer<typeof roomLlmOutputSchema>;
 
+/** Voice is opt-in at the route boundary: no TTS config means no audio, not a failure. */
+export interface RoomTtsDeps {
+  resolveRoute: (userId: string) => Promise<TtsRoute | null>;
+  synthesize: (route: TtsRoute, text: string) => Promise<Uint8Array>;
+}
+
 export interface RoomDeps {
   store?: RoomStore;
   resolveRoute?: (userId: string) => Promise<LlmRoute>;
@@ -90,6 +99,7 @@ export interface RoomDeps {
     route: LlmRoute,
     options: StructuredOptions<RoomLlmOutput>,
   ) => Promise<RoomLlmOutput>;
+  tts?: RoomTtsDeps;
 }
 
 export const MAX_PRIMARY_QUESTIONS = 6;
@@ -147,7 +157,12 @@ export async function runRoomTurn(
   );
   if (!candidate.created) {
     // A retried finalized submission returns the original transcript unchanged.
-    return { messages: await store.messages(context.sessionId), endCall: false, created: false };
+    return {
+      messages: await store.messages(context.sessionId),
+      endCall: false,
+      created: false,
+      audioBase64: null,
+    };
   }
 
   if (context.status === "scheduled") await store.activate(context.sessionId);
@@ -187,7 +202,27 @@ export async function runRoomTurn(
     unitId,
   );
 
+  // Voice is an enhancement on top of the persisted transcript: a missing or
+  // failing TTS configuration never blocks the conversation (FR-INTERVIEW-003).
+  let audioBase64: string | null = null;
+  if (deps.tts) {
+    try {
+      const ttsRoute = await deps.tts.resolveRoute(context.userId);
+      if (ttsRoute) {
+        const audio = await deps.tts.synthesize(ttsRoute, output.interviewerText);
+        audioBase64 = Buffer.from(audio).toString("base64");
+      }
+    } catch {
+      audioBase64 = null;
+    }
+  }
+
   const endCall = output.endCall || primaryCount + 1 >= MAX_PRIMARY_QUESTIONS + 1;
   if (endCall) await store.complete(context.sessionId);
-  return { messages: await store.messages(context.sessionId), endCall, created: true };
+  return {
+    messages: await store.messages(context.sessionId),
+    endCall,
+    created: true,
+    audioBase64,
+  };
 }

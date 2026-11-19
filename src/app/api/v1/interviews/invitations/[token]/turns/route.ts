@@ -1,5 +1,7 @@
 import { jsonError } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
+import { synthesizeSpeech, type TtsRoute } from "@/lib/ai/tts";
+import { resolveForOutboundCall } from "@/lib/providers/config";
 import { resolveInvitation } from "@/lib/interview/invitations";
 import { RoomError, runRoomTurn } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
@@ -55,7 +57,29 @@ export async function POST(
     } catch {
       return jsonError(400, "invalid_input", "A valid interview turn is required.");
     }
-    return Response.json(await runRoomTurn(token, body));
+    return Response.json(
+      await runRoomTurn(token, body, {
+        // The room engine receives the speaker route only here, at the server
+        // boundary. A missing TTS configuration simply means text-only turns.
+        tts: {
+          resolveRoute: async (userId: string): Promise<TtsRoute | null> => {
+            try {
+              const resolved = await resolveForOutboundCall(userId, "tts");
+              return {
+                providerName: resolved.providerName,
+                providerType: resolved.providerType,
+                baseUrl: resolved.baseUrl,
+                modelId: resolved.modelId,
+                apiKey: resolved.apiKey,
+              };
+            } catch {
+              return null;
+            }
+          },
+          synthesize: synthesizeSpeech,
+        },
+      }),
+    );
   } catch (error) {
     return mapError(error);
   }
