@@ -110,3 +110,29 @@ specified: all-validated → row stored `valid` + enabled; a failed probe
 disables the row (enablement gate `probe_failed` → 409 until a material
 re-save + successful re-probe). Two decisions remain flagged for the owner
 from slice 5: auto-disable-on-failed-probe, and the 60 s discovery cache TTL.
+
+## NVIDIA NIM for LLM testing (2026-11-19, researched — blocked on key)
+
+Owner direction: use free NVIDIA NIM endpoints for LLM testing for now. All
+facts below come from official NVIDIA docs (retrieved via Context7 MCP,
+`/websites/nvidia_nim`) and live checks of the public catalog:
+
+- Hosted catalog base URL: `https://integrate.api.nvidia.com/v1`.
+- Model list: `GET /v1/models` (OpenAI-shaped `{ data: [{ id }] }`, public —
+  verified 2026-11-19). Exact returned IDs include
+  `moonshotai/kimi-k3.1-pro` (catalog metadata:
+  `supports_structured_output: true`, tools, thinking, 1M context),
+  `nvidia/nemotron-3.5-lightning-30b-a3b`, `google/gemma-4-31b-it`,
+  `z-ai/glm-5.3-flash`. Never substitute or construct IDs.
+- Chat: `POST /v1/chat/completions`, OpenAI-compatible wire, Bearer
+  `NVIDIA_API_KEY` — the same shape our probe and AI SDK adapter use.
+- **Anonymous inference returns `401 Unauthorized`** (verified 2026-11-19):
+  the hosted free tier still requires a personal NVIDIA API key from
+  NGC / build.nvidia.com. No NVIDIA key exists in this environment
+  (`.env` has only `FISH_AUDIO_API_KEY`), so live LLM testing is blocked
+  until the owner supplies one.
+
+Next step once a key is available: configure a **custom** OpenAI-compatible
+row (base URL above, key, exact model ID from the live list), run Test LLM
+capability, then exercise the agent flow. Do not add a NIM preset — the
+ADR-030 preset set is owner-controlled — and never store the key in the repo.
