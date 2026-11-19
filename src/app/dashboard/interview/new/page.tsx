@@ -4,6 +4,10 @@ import { listActiveInterviewCategories } from "@/lib/interview/service";
 import { listProviderConfigurations } from "@/lib/providers/config";
 import { SetupForm } from "@/components/interview/SetupForm";
 
+// Auth uses connection(); the segment must render per request, otherwise the
+// Suspense stream never settles and the browser reloads the page indefinitely.
+export const instant = false;
+
 /**
  * Interview setup (FR-SETUP-001..005, FR-INTERVIEW-001), reference-design-adapted:
  * one centred card, plain question-style labels, select controls where a
