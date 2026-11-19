@@ -32,10 +32,13 @@
 
 ## Git
 
-- **Branches**: `main` is the integration branch. Short-lived feature branches:
-  `feat/<task>-<slug>`, `fix/<task>-<slug>`, `chore/<slug>`, `docs/<slug>`
-  (e.g. `feat/tt10-provider-config-service`). Keep a branch scoped to one Task Tracker
-  task where practical.
+- **Branches**: never commit directly to `main`. Short-lived branches use the
+  prefixes `feature/*` (new features), `bugfix/*` (fixes) and `refactor/*` (minor
+  patches, package updates, codebase refactoring, feature updates), e.g.
+  `feature/tt10-provider-config-service`. One branch per feature, or one per set of
+  closely related features when they belong in the same PR.
+- **PR flow**: feature branch → `staging` → `main`. Target `staging` for PRs; a
+  separate reviewed PR promotes `staging` to `main`.
 - **Commits**: Conventional Commits — `type(scope): summary`. Scope is a module or task
   (`feat(interview): …`, `fix(eval): …`). Reference requirement/task UIDs in the body
   when applicable. Example:

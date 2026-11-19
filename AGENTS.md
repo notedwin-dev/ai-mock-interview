@@ -125,7 +125,22 @@ Refer to Notion for complete implementation requirements.
 - Report tests that were not run.
 - Keep implementation progress and outstanding issues documented.
 
-## 9. Completion Report
+## 9. Git Branching and Pull Requests
+
+- **Never commit directly to `main`.** Create a branch before committing; if work
+  has already started on `main`, branch from it before the first commit.
+- Branch prefixes (all changes, including small ones):
+  - `feature/*` — new features. One branch for a single feature, or one branch for
+    a small set of closely related features when they belong in the same PR.
+  - `bugfix/*` — bug fixes.
+  - `refactor/*` — minor patches and major refactors, including package updates,
+    codebase refactoring and updates to existing features.
+- **PR flow: feature branch → `staging` → `main`.** Open feature/bugfix/refactor PRs
+  against `staging`; promotion from `staging` to `main` is a separate reviewed PR.
+- Run `pnpm verify` before opening any PR (see §7); merge gates and owner review
+  rules in `docs/CONVENTIONS.md` still apply.
+
+## 10. Completion Report
 
 At the end of each task, report:
 
