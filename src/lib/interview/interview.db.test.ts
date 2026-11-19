@@ -3,6 +3,8 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@/generated/prisma/client";
 import { createProviderConfiguration } from "@/lib/providers/config";
+import { hashInvitationToken } from "./invitation-token";
+import { resolveInvitation } from "./invitations";
 import {
   createInterviewSession,
   endInterviewSession,
@@ -129,7 +131,13 @@ d("interview session service (integration)", () => {
     const categoryId = await createCategory();
 
     const session = await createInterviewSession(userId, setupInput(categoryId));
-    expect(session.status).toBe("created");
+    expect(session.status).toBe("scheduled");
+    // Each scheduled interview carries a ready-to-share, working invitation.
+    expect(session.invitation.path).toBe(`/i/${session.invitation.token}`);
+    const resolved = await resolveInvitation(session.invitation.token);
+    expect(resolved).toMatchObject({ sessionId: session.sessionId, status: "scheduled" });
+    const storedRow = await db.interviewSession.findUniqueOrThrow({ where: { sessionId: session.sessionId } });
+    expect(storedRow.invitationTokenHash).toBe(hashInvitationToken(session.invitation.token));
     expect(session.startedAt).toBeNull();
     expect(session.categoryCodeSnapshot).toBe("general");
     expect(session.categoryNameSnapshot).toBe("General");
@@ -176,7 +184,7 @@ d("interview session service (integration)", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
-  it("runs the lifecycle created → active → completed with timestamps", async () => {
+  it("runs the lifecycle scheduled → active → completed with timestamps", async () => {
     const userId = await createUser();
     await createLlmConfig(userId);
     const categoryId = await createCategory();

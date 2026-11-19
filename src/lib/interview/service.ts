@@ -8,6 +8,12 @@ import {
 import { db } from "@/lib/db";
 import { ProviderConfigError, resolveForOutboundCall } from "@/lib/providers/config";
 import {
+  createInvitationToken,
+  hashInvitationToken,
+  invitationPath,
+} from "./invitation-token";
+import type { IssuedInvitation } from "./invitations";
+import {
   interviewSetupSchema,
   typedTurnSchema,
   type InterviewSetupInput,
@@ -62,6 +68,9 @@ export interface ProviderRouteSnapshot {
   baseUrl: string;
   modelId: string;
 }
+
+/** Creation returns the one-time shareable link alongside the key-free summary. */
+export type CreatedInterview = SessionSummary & { invitation: IssuedInvitation };
 
 export interface SessionSummary {
   sessionId: string;
@@ -201,7 +210,7 @@ async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot>
 export async function createInterviewSession(
   userId: string,
   input: unknown,
-): Promise<SessionSummary> {
+): Promise<CreatedInterview> {
   if (!/^[0-9a-f-]{36}$/i.test(userId)) {
     throw new InterviewError("invalid_input", "Invalid user id.");
   }
@@ -225,6 +234,9 @@ export async function createInterviewSession(
 
   const providerRouteSnapshot = await loadRouteSnapshot(userId);
 
+  // FR-SETUP-007/008: the interview is born scheduled/ready, with a
+  // revocable link whose raw capability is never stored (only its hash).
+  const invitationToken = createInvitationToken();
   const session = await db.interviewSession.create({
     data: {
       userId,
@@ -238,9 +250,14 @@ export async function createInterviewSession(
       providerRouteSnapshot:
         providerRouteSnapshot as unknown as Prisma.InputJsonValue,
       interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,
+      status: "scheduled",
+      invitationTokenHash: hashInvitationToken(invitationToken),
     },
   });
-  return toSessionSummary(session, providerRouteSnapshot);
+  return {
+    ...toSessionSummary(session, providerRouteSnapshot),
+    invitation: { token: invitationToken, path: invitationPath(invitationToken) },
+  };
 }
 
 /**
@@ -253,8 +270,10 @@ export async function startInterviewSession(
   sessionId: string,
 ): Promise<SessionSummary> {
   const session = await loadOwnedSession(userId, sessionId);
-  if (session.status !== "created") {
-    throw new InterviewError("invalid_state", "Only a created interview can be started.");
+  // 'created' is retained for sessions made before the scheduled-state
+  // migration; newly created interviews start as 'scheduled'.
+  if (session.status !== "scheduled" && session.status !== "created") {
+    throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
   }
   const started = await db.interviewSession.update({
     where: { sessionId: session.sessionId },
