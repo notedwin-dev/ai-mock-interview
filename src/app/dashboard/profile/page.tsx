@@ -2,6 +2,10 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
 
+// Auth uses connection(); the segment must render per request, otherwise the
+// Suspense stream never settles and the browser reloads the page indefinitely.
+export const instant = false;
+
 /**
  * Profile page (round 5): identity now, with provider management moved to the
  * dedicated AI configuration experience (/dashboard/configuration) — the
