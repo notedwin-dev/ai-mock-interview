@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
-import { Loader2, RotateCcw, Send } from "lucide-react";
+import Link from "next/link";
+import { Check, Copy, Loader2, RotateCcw, Send } from "lucide-react";
 import type { AgentConfig } from "@/lib/interview/agent";
 
 /**
@@ -66,12 +66,13 @@ async function postAgent(body: unknown): Promise<{ ok: true; data: unknown } | {
 }
 
 export function InterviewAgent() {
-  const router = useRouter();
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
   const [draft, setDraft] = useState("");
   const [result, setResult] = useState<AgentResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<"turn" | "create" | null>(null);
+  const [created, setCreated] = useState<{ sessionId: string; path: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -111,8 +112,23 @@ export function InterviewAgent() {
       setError(response.message);
       return;
     }
-    const data = response.data as { session: { sessionId: string } };
-    router.push(`/dashboard/interview/${data.session.sessionId}`);
+    const data = response.data as {
+      session: { sessionId: string; invitation: { token: string; path: string } };
+    };
+    setCreated({
+      sessionId: data.session.sessionId,
+      path: data.session.invitation.path,
+    });
+  }
+
+  async function copyLink() {
+    if (!created) return;
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}${created.path}`);
+      setCopied(true);
+    } catch {
+      setError("Copy failed — select the link above and copy it manually.");
+    }
   }
 
   function startOver() {
@@ -176,9 +192,36 @@ export function InterviewAgent() {
         </section>
       ) : null}
 
+      {created ? (
+        <section aria-label="Invitation link" className="rounded-2xl border border-emerald-400/40 bg-surface p-4 sm:p-5">
+          <h2 className="text-sm font-semibold text-ink">Interview created — ready to share</h2>
+          <p className="mt-1 text-xs text-ink-muted">
+            The interview is scheduled and will not start automatically. Share this link
+            with your interviewee; you can revoke or replace it from your room.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-full bg-raised px-4 py-2 text-xs text-ink">
+              {created.path}
+            </code>
+            <button type="button" onClick={() => void copyLink()} className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400">
+              {copied ? <Check className="h-4 w-4" aria-hidden /> : <Copy className="h-4 w-4" aria-hidden />}
+              {copied ? "Copied" : "Copy link"}
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Link href={created.path} className="text-sm font-medium text-emerald-400 underline decoration-emerald-400/40 underline-offset-4">
+              Preview confirmation page
+            </Link>
+            <Link href={`/dashboard/interview/${created.sessionId}`} className="text-sm text-ink-soft underline decoration-line underline-offset-4">
+              Open owner room
+            </Link>
+          </div>
+        </section>
+      ) : null}
+
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
-      {!result?.ready ? (
+      {!result?.ready && !created ? (
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-3">
           <label className="flex flex-col gap-1.5">
             <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">Your reply</span>

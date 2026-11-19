@@ -186,8 +186,11 @@ model InterviewSession {
   runtimeMode             String    @map("runtime_mode") @db.VarChar(30)
   providerRouteSnapshot   Json      @map("provider_route_snapshot") @db.JsonB
   interviewerPromptVersion String   @map("interviewer_prompt_version") @db.VarChar(50)
-  status                  String    @default("created") @map("status") @db.VarChar(20)
+  status                  String    @default("scheduled") @map("status") @db.VarChar(20)
   failureCode             String?   @map("failure_code") @db.VarChar(60)
+  /// SHA-256 of the invitation capability; the raw token exists only in the shared link.
+  invitationTokenHash     String?   @unique @map("invitation_token_hash") @db.VarChar(64)
+  invitationRevokedAt     DateTime? @map("invitation_revoked_at") @db.Timestamptz(6)
   createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   startedAt               DateTime? @map("started_at") @db.Timestamptz(6)
   completedAt             DateTime? @map("completed_at") @db.Timestamptz(6)

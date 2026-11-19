@@ -93,3 +93,16 @@ text/status remain authoritative in Notion — this map is an index, not a regis
    design is public-profile discovery only — documented in Notion as a post-IR
    refinement; implement the *current* design and describe it as a refinement (never
    quote it as IR content).
+
+## Implementation note — scheduling and token-scoped entry (2026-11-19)
+
+FR-SETUP-007/008 and the M2 room re-layer are implemented on the M2 feature
+branch: `interview_session.status` gained `scheduled` (new interviews are born
+scheduled and never auto-start), `invitation_token_hash`/`invitation_revoked_at`
+carry a SHA-256-hashed 32-byte capability with revoke/reissue endpoints, and
+`/i/[token]` → `/i/[token]/waiting` → `/i/[token]/room` give the interviewee a
+token-scoped confirmation, local-only device preview and live room. The room
+engine persists chronological speaker-attributed turns and groups them into
+assessment units (primary opens a unit, follow-up joins it). Hermetic unit tests
+plus TEST_DATABASE_URL integration tests cover tokens, revocation, creation and
+turn persistence.

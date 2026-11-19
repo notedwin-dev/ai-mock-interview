@@ -1,0 +1,138 @@
+import { describe, expect, it, vi } from "vitest";
+import { RoomError, runRoomTurn, type RoomContext, type RoomStore, type TranscriptEntry } from "./room";
+
+/**
+ * Hermetic tests for the token-scoped interview room (FR-INTERVIEW-002/004,
+ * FR-SETUP-008). The persistence seam and the LLM are faked; no network or
+ * database is involved. The default store has separate DB-backed tests.
+ */
+const TOKEN = "t".repeat(43);
+const context: RoomContext = {
+  sessionId: "session-1",
+  userId: "owner-1",
+  jobRole: "Backend Engineer",
+  jobDescription: "Design APIs",
+  evaluationMode: "balanced",
+  status: "scheduled",
+};
+
+function fakeStore(initial: RoomContext = context) {
+  const current = { ...initial };
+  let seq = 0;
+  let unitSeq = 0;
+  const messages: TranscriptEntry[] = [];
+  const units: Array<{ id: string; status: string }> = [];
+  const store: RoomStore = {
+    async context() { return { ...current }; },
+    async messages() { return [...messages]; },
+    async activate() { current.status = "active"; },
+    async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
+      if (idempotencyKey) {
+        const found = messages.find((m) => m.contentText === contentText);
+        if (found) return { entry: found, created: false };
+      }
+      const entry = {
+        sequenceNumber: ++seq,
+        speakerType: "candidate",
+        messageKind: "candidate_response",
+        contentText,
+        assessmentUnitId,
+      };
+      messages.push(entry);
+      return { entry, created: true };
+    },
+    async appendInterviewer(_sessionId, contentText, messageKind, assessmentUnitId) {
+      const entry = {
+        sequenceNumber: ++seq,
+        speakerType: "interviewer",
+        messageKind,
+        contentText,
+        assessmentUnitId,
+      };
+      messages.push(entry);
+      return entry;
+    },
+    async activeUnit() { return units.find((u) => u.status === "open")?.id ?? null; },
+    async openUnit() { const id = `unit-${++unitSeq}`; units.push({ id, status: "open" }); return id; },
+    async closeUnit(id) { const unit = units.find((u) => u.id === id); if (unit) unit.status = "closed"; },
+    async complete() { current.status = "completed"; },
+  };
+  return { store, messages, units, state: () => current };
+}
+
+const llmRoute = {
+  providerName: "openai", providerType: "preset", baseUrl: "https://x/v1", modelId: "m", apiKey: "k",
+};
+
+describe("runRoomTurn", () => {
+  it("activates on first turn and persists candidate then interviewer in one unit", async () => {
+    const { store, messages, units, state } = fakeStore();
+    const generate = vi.fn(async () => ({
+      interviewerText: "Tell me about a hard bug you fixed.",
+      messageKind: "primary_question" as const,
+      endCall: false,
+    }));
+
+    const result = await runRoomTurn(
+      TOKEN,
+      { contentText: "I am ready" },
+      { store, resolveRoute: async () => llmRoute, generate },
+    );
+
+    expect(state().status).toBe("active");
+    expect(result.created).toBe(true);
+    expect(result.messages.map((m) => `${m.speakerType}:${m.messageKind}`)).toEqual([
+      "candidate:candidate_response",
+      "interviewer:primary_question",
+    ]);
+    // The first candidate message precedes any question and is deliberately
+    // outside an assessment unit; the interviewer's primary question opens one.
+    expect(messages[0]?.assessmentUnitId).toBeNull();
+    expect(messages[1]?.assessmentUnitId).toBe("unit-1");
+    expect(units).toHaveLength(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a follow-up in the active unit and closes it for a new primary question", async () => {
+    const { store, units, messages } = fakeStore();
+    const outputs = [
+      { interviewerText: "Q1?", messageKind: "primary_question" as const, endCall: false },
+      { interviewerText: "Why?", messageKind: "follow_up_question" as const, endCall: false },
+      { interviewerText: "Q2?", messageKind: "primary_question" as const, endCall: false },
+    ];
+    let call = 0;
+    const deps = { store, resolveRoute: async () => llmRoute, generate: async () => outputs[call++]! };
+
+    await runRoomTurn(TOKEN, { contentText: "a1" }, deps);
+    await runRoomTurn(TOKEN, { contentText: "a2" }, deps);
+    await runRoomTurn(TOKEN, { contentText: "a3" }, deps);
+
+    expect(units.map((u) => u.status)).toEqual(["closed", "open"]);
+    expect(messages.filter((m) => m.messageKind === "follow_up_question")[0]?.assessmentUnitId).toBe("unit-1");
+    expect(messages.filter((m) => m.messageKind === "primary_question").map((m) => m.assessmentUnitId)).toEqual(["unit-1", "unit-2"]);
+  });
+
+  it("is idempotent on the candidate key: no duplicate reply or extra generation", async () => {
+    const { store } = fakeStore();
+    const generate = vi.fn(async () => ({
+      interviewerText: "Q1?", messageKind: "primary_question" as const, endCall: false,
+    }));
+    const deps = { store, resolveRoute: async () => llmRoute, generate };
+    const first = await runRoomTurn(TOKEN, { contentText: "hello", idempotencyKey: "turn-1" }, deps);
+    const retry = await runRoomTurn(TOKEN, { contentText: "hello", idempotencyKey: "turn-1" }, deps);
+
+    expect(retry.created).toBe(false);
+    expect(retry.messages).toEqual(first.messages);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unknown links and interviews that are not in a joinable state", async () => {
+    const { store } = fakeStore();
+    const missing = fakeStore({ ...context, status: "completed" });
+    const deps = { resolveRoute: async () => llmRoute, generate: async () => ({ interviewerText: "x", messageKind: "transition" as const, endCall: true }) };
+
+    await expect(runRoomTurn("bad", { contentText: "hi" }, { ...deps, store: { ...store, context: async () => null } })).rejects.toMatchObject({ code: "invitation_not_found" });
+    await expect(runRoomTurn(TOKEN, { contentText: "hi" }, { ...deps, store: missing.store })).rejects.toMatchObject({ code: "invalid_state" });
+    await expect(runRoomTurn(TOKEN, { contentText: "" }, { ...deps, store })).rejects.toBeInstanceOf(RoomError);
+  });
+});
