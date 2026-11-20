@@ -111,14 +111,21 @@ const UNKNOWN_STATE = {
 interface CapabilityStripProps {
   configurations: ProviderConfigSummary[];
   readinessFailed: boolean;
+  /** Selected runtime from ADR-006 — realtime OR custom, not both. */
+  runtimeReady?: boolean;
+  runtimeMode?: "realtime" | "custom" | "none";
+  runtimeProvider?: string | null;
 }
 
 export function ConsoleBanner({
   configurations,
   readinessFailed,
+  runtimeReady,
+  runtimeMode,
+  runtimeProvider,
 }: CapabilityStripProps) {
   const interviewerReady =
-    !readinessFailed && servingRow(configurations, "llm") !== null;
+    runtimeReady ?? (!readinessFailed && servingRow(configurations, "llm") !== null);
 
   return (
     <section className="rounded-3xl border border-line bg-raised p-8 sm:p-10 lg:p-12">
@@ -131,8 +138,8 @@ export function ConsoleBanner({
             {readinessFailed
               ? "Capability status could not be loaded. Check back shortly."
               : interviewerReady
-                ? "Your interviewer connection is set up. Create an interview and step into the room."
-                : "The interviewer needs a configured connection before a session can start."}
+                ? `Your ${runtimeMode === "realtime" ? "realtime agent" : "interviewer"} connection${runtimeProvider ? ` (${runtimeProvider})` : ""} is set up. Launch an interview and step into the room.`
+                : "Configure either a pre-configured realtime agent or a custom interviewer connection before starting a session."}
           </p>
           <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
             {interviewerReady ? (

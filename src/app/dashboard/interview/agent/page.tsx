@@ -1,5 +1,8 @@
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
+import { listProviderConfigurations } from "@/lib/providers/config";
+import { listActiveInterviewCategories } from "@/lib/interview/service";
+import { selectRuntime } from "@/lib/interview/runtime";
 import { InterviewAgent } from "@/components/interview/InterviewAgent";
 
 // requireAccount() uses connection(), which hangs during prerendering. Opting
@@ -18,7 +21,9 @@ export const instant = false;
  * a perpetual loading state that the browser keeps retrying.
  */
 export default async function AgentPage() {
-  await requireAccount({ role: "candidate" });
+  const { account } = await requireAccount({ role: "candidate" });
+  const runtime = selectRuntime(await listProviderConfigurations(account.userId));
+  const categories = await listActiveInterviewCategories();
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
@@ -34,7 +39,10 @@ export default async function AgentPage() {
         configuration before creating a ready interview.
       </p>
       <div className="mt-6">
-        <InterviewAgent />
+        <InterviewAgent
+          runtimeMode={runtime.mode}
+          categoryId={categories.find((category) => category.categoryCode === "general")?.categoryId}
+        />
       </div>
     </main>
   );

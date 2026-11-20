@@ -160,6 +160,24 @@ d("interview session service (integration)", () => {
     expect(row?.providerRouteSnapshot).toBeTruthy();
   });
 
+  it("creates a realtime session with only a realtime agent configured", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-plaintext-secret",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    const categoryId = await createCategory();
+
+    const session = await createInterviewSession(userId, setupInput(categoryId));
+    expect(session.runtimeMode).toBe("preset_realtime");
+    expect(session.providerRouteSnapshot).toMatchObject({
+      capability: "realtime",
+      modelId: "gemini-3.8-live-extended-thinking",
+    });
+  });
+
   it("fails session creation when no enabled LLM-capable provider exists", async () => {
     const userId = await createUser();
     const categoryId = await createCategory();

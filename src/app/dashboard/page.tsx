@@ -10,6 +10,7 @@ import {
   ConsoleBanner,
 } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
+import { selectRuntime } from "@/lib/interview/runtime";
 
 // Auth uses connection(); the segment must render per request, otherwise the
 // Suspense stream never settles and the browser reloads the page indefinitely.
@@ -70,11 +71,18 @@ async function DashboardContent() {
     sessionsFailed = true;
   }
 
+  // A candidate needs ONE runtime: a native realtime agent or the custom LLM
+  // pipeline. The scorer is independent and never gates launching (ADR-006).
+  const runtime = selectRuntime(configurations);
+
   return (
     <div className="flex flex-col gap-8 lg:gap-10">
       <ConsoleBanner
         configurations={configurations}
         readinessFailed={readinessFailed}
+        runtimeReady={!readinessFailed && runtime.ready}
+        runtimeMode={runtime.mode}
+        runtimeProvider={runtime.servingProvider}
       />
       <CapabilityStrip
         configurations={configurations}
