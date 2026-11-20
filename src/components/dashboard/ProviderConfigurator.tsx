@@ -1307,7 +1307,7 @@ function ConfigurationRowCard({
         <span className={LABEL_CLASS}>API key</span>
         {!editingKey ? (
           <div className="mt-1.5 flex items-center gap-3">
-            <span className="text-sm text-ink-soft">Stored — write-only, never shown again (ADR-0005).</span>
+            <span className="text-sm text-ink-soft">Stored — write-only, never shown again.</span>
             <button type="button" onClick={() => { setKeyDraft(""); setEditingKey(true); }} className={GHOST_PILL}>
               Replace key
             </button>

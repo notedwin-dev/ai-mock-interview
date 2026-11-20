@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { probeProviderConfiguration, discoverProviderModels, discoverCandidateModels, type ProbeDeps } from "./probe";
 import { encryptApiKey } from "./encryption";
@@ -154,19 +154,37 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("unvalidated");
   });
 
-  it("reports the realtime capability skipped and never touches any wire (native realtime protocol)", async () => {
+  it("validates realtime by minting a short-lived native session without touching chat wires", async () => {
+    const realtimeToken = vi.fn(async () => ({ token: "auth_short", url: "wss://live.example" }));
     const result = await runProbe(
-      configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
-      jsonFetch([]), // must not be called at all — realtime never hits these wires
+      configRow({ capabilitiesJson: { realtime: { modelId: "gemini-3.1-flash-live-preview" } } }),
+      jsonFetch([]), // must not be called — realtime uses its own native wire
+      { realtimeToken },
     );
     expect(result.capabilities[0]).toMatchObject({
       capability: "realtime",
-      status: "skipped",
-      endpointReachable: false,
-      credentialValid: false,
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
     });
-    // Skipped ≠ validated: the configuration stays unvalidated, never "valid".
-    expect(result.credentialStatus).toBe("unvalidated");
+    expect(realtimeToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelId: "gemini-3.1-flash-live-preview",
+        apiKey: "sk-plaintext-secret",
+      }),
+    );
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("fails realtime when the provider rejects the native session, without leaking the key", async () => {
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "bad-model" } } }),
+      jsonFetch([]),
+      { realtimeToken: async () => { throw new Error("provider refused sk-plaintext-secret"); } },
+    );
+    expect(result.capabilities[0]).toMatchObject({ status: "failed", credentialValid: false });
+    expect(JSON.stringify(result)).not.toContain("sk-plaintext-secret");
+    expect(result.credentialStatus).toBe("invalid");
   });
 
   it("skips realtime even on a probeable preset while still validating the row's other capabilities", async () => {
@@ -175,18 +193,18 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
         providerType: "preset",
         providerName: "openai",
         baseUrl: null,
-        capabilitiesJson: { llm: { modelId: "test-model" }, realtime: { modelId: "realtime-model" } },
+        capabilitiesJson: { llm: { modelId: "test-model" }, realtime: { modelId: "gemini-3.1-flash-live-preview" } },
       }),
       jsonFetch([
         { match: /\/models$/, status: 200, body: { data: [{ id: "test-model" }] } },
         { match: /\/chat\/completions$/, status: 200, body: { id: "chatcmpl-ping" } },
       ]),
+      { realtimeToken: async () => ({ token: "auth_short", url: "wss://live.example" }) },
     );
     const byCapability = new Map(result.capabilities.map((r) => [r.capability, r]));
     expect(byCapability.get("llm")).toMatchObject({ status: "validated" });
-    expect(byCapability.get("realtime")).toMatchObject({ status: "skipped" });
-    // A skipped capability keeps the whole row unvalidated (status-neutral).
-    expect(result.credentialStatus).toBe("unvalidated");
+    expect(byCapability.get("realtime")).toMatchObject({ status: "validated" });
+    expect(result.credentialStatus).toBe("valid");
   });
 
   it("probes every enabled capability and validates only when all pass", async () => {
