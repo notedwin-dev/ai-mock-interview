@@ -264,6 +264,34 @@ d("provider configuration service (integration)", () => {
     expect(resolved.apiKey).toBe("sk-plaintext-secret");
   });
 
+  it("locks realtime model IDs to the admin-fixed value and enforces one runtime", async () => {
+    const userId = await createUser();
+    const realtime = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-plaintext-secret",
+      capabilities: { realtime: { modelId: "user-invented-model" } },
+    });
+    expect(realtime.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
+
+    await expect(
+      createProviderConfiguration(userId, customInput),
+    ).rejects.toMatchObject({ code: "runtime_conflict" });
+  });
+
+  it("refuses a realtime row when custom capability rows already exist", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, customInput);
+    await expect(
+      createProviderConfiguration(userId, {
+        providerType: "preset",
+        providerName: "google",
+        apiKey: "sk-plaintext-secret",
+        capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+      }),
+    ).rejects.toMatchObject({ code: "runtime_conflict" });
+  });
+
   it("prefers a validated route over an older unvalidated row for outbound calls", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, {

@@ -5,10 +5,7 @@ import {
   listProviderConfigurations,
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
-import {
-  CapabilityStrip,
-  ConsoleBanner,
-} from "@/components/dashboard/CapabilityStrip";
+import { ConsoleBanner } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
 import { selectRuntime } from "@/lib/interview/runtime";
 
@@ -83,10 +80,6 @@ async function DashboardContent() {
         runtimeReady={!readinessFailed && runtime.ready}
         runtimeMode={runtime.mode}
         runtimeProvider={runtime.servingProvider}
-      />
-      <CapabilityStrip
-        configurations={configurations}
-        readinessFailed={readinessFailed}
       />
 
       <section aria-labelledby="recent-sessions-heading">
