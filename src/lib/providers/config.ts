@@ -89,7 +89,6 @@ export type ProviderConfigErrorCode =
   | "unknown_preset"
   | "reserved_preset_name"
   | "probe_failed"
-  | "runtime_conflict"
   | "invalid_input";
 
 export class ProviderConfigError extends Error {
@@ -298,36 +297,45 @@ export async function findOwnedConfigRow(
   return findOwnedConfig(userId, providerName, configId);
 }
 
-/**
- * A candidate uses exactly ONE runtime: a realtime agent OR the composed
- * custom pipeline (ADR-006). Mixing capability rows is rejected at the
- * service boundary, not just hidden in the UI.
- */
-async function assertRuntimeExclusive(
-  userId: string,
-  capabilities: ProviderConfigInput["capabilities"],
-): Promise<void> {
-  const rows = await db.userProviderConfiguration.findMany({
-    where: { userId },
-    select: { capabilitiesJson: true },
+/* --------------------------- runtime mode ----------------------------------- */
+
+export const RUNTIME_MODES = ["realtime", "custom"] as const;
+export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+
+/** The explicitly chosen runtime; null means a legacy account with no choice yet. */
+export async function getActiveRuntimeMode(userId: string): Promise<RuntimeMode | null> {
+  const parsedUser = parseUserId(userId);
+  const account = await db.userAccount.findUnique({
+    where: { userId: parsedUser },
+    select: { activeRuntimeMode: true },
   });
-  const isRealtime = Boolean(capabilities.realtime);
-  const hasCustom = Boolean(
-    capabilities.llm || capabilities.asr || capabilities.tts || capabilities.scorer,
-  );
-  for (const row of rows) {
-    const existing = capabilitiesJsonSchema.parse(row.capabilitiesJson);
-    const existingRealtime = Boolean(existing.realtime);
-    const existingCustom = Boolean(
-      existing.llm || existing.asr || existing.tts || existing.scorer,
-    );
-    if ((isRealtime && existingCustom) || (hasCustom && existingRealtime)) {
-      throw new ProviderConfigError(
-        "runtime_conflict",
-        "Choose one runtime: a realtime agent or custom providers — not both.",
-      );
-    }
-  }
+  const mode = account?.activeRuntimeMode;
+  return mode === "realtime" || mode === "custom" ? mode : null;
+}
+
+/**
+ * Switching modes never deletes or rewrites saved configurations: it only
+ * records which runtime is active. Rows of the other mode stay in the
+ * database and are simply ignored for the duration of that mode.
+ */
+export async function setActiveRuntimeMode(
+  userId: string,
+  mode: RuntimeMode,
+): Promise<void> {
+  const parsedUser = parseUserId(userId);
+  await db.userAccount.update({
+    where: { userId: parsedUser },
+    data: { activeRuntimeMode: mode },
+  });
+}
+
+/** A realtime row is one carrying the realtime capability; everything else is custom. */
+export function rowsForRuntime<T extends { capabilities: CapabilitiesJson }>(
+  rows: T[],
+  mode: RuntimeMode | null,
+): T[] {
+  if (!mode) return rows;
+  return rows.filter((row) => Boolean(row.capabilities.realtime) === (mode === "realtime"));
 }
 
 /**
@@ -363,13 +371,17 @@ export async function createProviderConfiguration(
       "This realtime provider is not available for configuration.",
     );
   }
-  await assertRuntimeExclusive(parsedUser, capabilities);
-
   if (!parsed.apiKey) {
     throw new ProviderConfigError(
       "missing_credential",
       "An API key is required when creating a provider configuration.",
     );
+  }
+
+  // Legacy accounts get their first runtime inferred from the row they add.
+  // An explicit choice is never overwritten — configs of either mode coexist.
+  if ((await getActiveRuntimeMode(parsedUser)) === null) {
+    await setActiveRuntimeMode(parsedUser, capabilities.realtime ? "realtime" : "custom");
   }
 
   // Runtime exclusivity is high-level only (realtime vs custom). The same
@@ -529,7 +541,9 @@ export async function listProviderConfigurations(
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser },
     select: CONFIG_SELECT,
-    orderBy: { providerName: "asc" },
+    // Most recently changed first: after a mode switch the newest matching
+    // configuration is the one the runtime should prefer.
+    orderBy: { updatedAt: "desc" },
   });
   return rows.map(toSummary);
 }
@@ -557,15 +571,21 @@ export async function resolveForOutboundCall(
 
   // Deterministic when several enabled configurations serve the same
   // capability: a validated connection wins over an unvalidated/dummy row,
-  // then the oldest wins within the same status. An unvalidated row must not
-  // shadow a connection the candidate has actually proved.
+  // then the most recently updated wins within the same status, so switching
+  // modes picks up the latest configuration the candidate saved.
+  const activeMode = await getActiveRuntimeMode(parsedUser);
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser, isEnabled: true },
-    orderBy: { createdAt: "asc" },
+    // Latest configuration first; a validated connection still wins below.
+    orderBy: { updatedAt: "desc" },
   });
-  const serving = rows.filter(
-    (candidate) => capability in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
-  );
+  const serving = rows.filter((candidate) => {
+    const caps = capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
+    if (!(capability in caps)) return false;
+    if (activeMode === "realtime") return Boolean(caps.realtime);
+    if (activeMode === "custom") return !caps.realtime;
+    return true;
+  });
   const row =
     serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0];
   if (!row) {

@@ -48,6 +48,9 @@ model UserAccount {
   email               String    @unique @db.VarChar(255)
   passwordHash        String    @map("password_hash") @db.VarChar(255)
   accountRole         String    @map("account_role") @db.VarChar(20)
+  /// Explicitly selected interview runtime ("realtime" | "custom"). Null means
+  /// legacy accounts, where the runtime is inferred from the saved rows.
+  activeRuntimeMode   String?   @map("active_runtime_mode") @db.VarChar(20)
   accountStatus       String    @default("active") @map("account_status") @db.VarChar(20)
   emailVerifiedAt     DateTime? @map("email_verified_at") @db.Timestamptz(6)
   deletionRequestedAt DateTime? @map("deletion_requested_at") @db.Timestamptz(6)

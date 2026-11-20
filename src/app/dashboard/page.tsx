@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { requireAccount } from "@/lib/auth/guard";
 import { db } from "@/lib/db";
 import {
+  getActiveRuntimeMode,
   listProviderConfigurations,
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
@@ -70,7 +71,7 @@ async function DashboardContent() {
 
   // A candidate needs ONE runtime: a native realtime agent or the custom LLM
   // pipeline. The scorer is independent and never gates launching (ADR-006).
-  const runtime = selectRuntime(configurations);
+  const runtime = selectRuntime(configurations, await getActiveRuntimeMode(account.userId));
 
   return (
     <div className="flex flex-col gap-8 lg:gap-10">

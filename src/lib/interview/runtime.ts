@@ -1,4 +1,8 @@
-import type { ProviderConfigSummary } from "@/lib/providers/config";
+import {
+  rowsForRuntime,
+  type ProviderConfigSummary,
+  type RuntimeMode,
+} from "@/lib/providers/config";
 import type { InterviewSetupInput } from "./validation";
 
 /**
@@ -51,8 +55,14 @@ export function buildRealtimeLaunchInput(
   };
 }
 
-export function selectRuntime(rows: ProviderConfigSummary[]): RuntimeSelection {
-  const realtime = bestServingRow(rows, "realtime");
+export function selectRuntime(
+  rows: ProviderConfigSummary[],
+  activeMode: RuntimeMode | null = null,
+): RuntimeSelection {
+  // Only the selected runtime is considered. Rows saved under the other
+  // runtime stay in the database but are inactive for this interview.
+  const scoped = rowsForRuntime(rows, activeMode);
+  const realtime = bestServingRow(scoped, "realtime");
   if (realtime) {
     return {
       mode: "realtime",
@@ -63,8 +73,8 @@ export function selectRuntime(rows: ProviderConfigSummary[]): RuntimeSelection {
     };
   }
 
-  const llm = bestServingRow(rows, "llm");
-  const hasCustomRows = rows.some(
+  const llm = bestServingRow(scoped, "llm");
+  const hasCustomRows = scoped.some(
     (row) => row.capabilities.llm || row.capabilities.asr || row.capabilities.tts,
   );
   return {

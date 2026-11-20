@@ -71,6 +71,26 @@ describe("selectRuntime (ADR-006 mutually exclusive runtimes)", () => {
   it("reports no runtime when nothing is configured", () => {
     expect(selectRuntime([])).toMatchObject({ mode: "none", ready: false });
   });
+
+  it("honours the explicitly active mode when both runtimes have saved rows", () => {
+    const rows = [
+      row("google", { realtime: { modelId: "gemini-3.8-live-extended-thinking" } }),
+      row("OpenRouter Free", { llm: { modelId: "free-llm" } }),
+    ];
+    expect(selectRuntime(rows, "custom")).toMatchObject({
+      mode: "custom",
+      servingProvider: "OpenRouter Free",
+    });
+    expect(selectRuntime(rows, "realtime")).toMatchObject({
+      mode: "realtime",
+      servingProvider: "google",
+    });
+  });
+
+  it("reports no runtime when the active mode has no configuration", () => {
+    const rows = [row("google", { realtime: { modelId: "gemini-3.8-live-extended-thinking" } })];
+    expect(selectRuntime(rows, "custom")).toMatchObject({ mode: "none", ready: false });
+  });
 });
 
 describe("buildRealtimeLaunchInput", () => {

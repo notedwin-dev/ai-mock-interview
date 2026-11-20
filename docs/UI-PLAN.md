@@ -313,11 +313,12 @@ now **mode-first**: step 1 is a split container — left
 `Pre-configured Mode (Fixed Providers)` (fixed native realtime agents, their
 provider monograms and honest "Unavailable" markers), right
 `Advanced Mode (Custom Providers)` (independent ASR/LLM/TTS/scorer providers).
-Credentials are shown only after a mode is chosen. A saved configuration fixes
-the mode; "Change mode" is disabled until that configuration is deleted, so the
-two runtimes can never be mixed (ADR-006). The runtime is also enforced at the
-service boundary: `createProviderConfiguration` rejects a realtime row when
-custom capability rows exist and vice versa (`runtime_conflict`, HTTP 409).
+Credentials are shown only after a mode is chosen. The choice is persisted as
+`user_account.active_runtime_mode` and can be changed at any time from the
+"Change mode" control — nothing has to be deleted. Rows saved under the other
+mode stay in the database and are simply ignored while that mode is inactive;
+`selectRuntime()` and `resolveForOutboundCall()` scope resolution to the active
+mode. With several matching rows, the most recently updated one wins.
 
 - **Fixed realtime models.** In pre-configured mode the candidate supplies only
   a credential; the model ID is admin-fixed in `src/lib/providers/realtime-models.ts`.
