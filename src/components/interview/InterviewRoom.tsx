@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -24,6 +24,11 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -83,6 +88,67 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  async function submitAudio(blob: Blob, recorderMime: string) {
+    try {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      const response = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/transcribe`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audioBase64: btoa(binary),
+            mimeType: (recorderMime || blob.type || "audio/webm").split(";")[0],
+          }),
+        },
+      );
+      const body = (await response.json()) as { text?: string; error?: { message: string } };
+      if (!response.ok) {
+        setVoiceNotice(body.error?.message ?? "The recording could not be transcribed.");
+        return;
+      }
+      // The transcript goes into the input for review — nothing is sent until
+      // the candidate explicitly presses Send.
+      setDraft(body.text ?? "");
+      setVoiceNotice("Voice transcribed — review the text, then press Send.");
+    } catch {
+      setVoiceNotice("The recording could not be transcribed.");
+    }
+  }
+
+  async function startRecording() {
+    setVoiceNotice(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onstop = () => {
+        void submitAudio(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), recorder.mimeType);
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        recorderRef.current = null;
+        setRecording(false);
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch {
+      setVoiceNotice("Microphone access was not granted. You can type your answer instead.");
+    }
+  }
+
   const lastInterviewer = [...messages].reverse().find((m) => m.speakerType === "interviewer");
 
   return (
@@ -139,12 +205,25 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             aria-label="Your interview answer"
             disabled={state === "thinking"}
           />
+          <button
+            type="button"
+            onClick={() => (recording ? recorderRef.current?.stop() : void startRecording())}
+            className={GHOST}
+            aria-label={recording ? "Stop recording" : "Record answer"}
+          >
+            {recording ? (
+              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop recording</>
+            ) : (
+              <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
+            )}
+          </button>
           <button type="submit" disabled={!draft.trim() || state === "thinking"} className={PRIMARY}>
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
           </button>
         </form>
       )}
+      {voiceNotice ? <p className="text-sm text-amber-300" role="status">{voiceNotice}</p> : null}
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (
