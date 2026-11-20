@@ -1,4 +1,4 @@
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, TrackSource } from "livekit-server-sdk";
 
 /**
  * Short-lived LiveKit participant credentials for the token-scoped WebRTC
@@ -29,7 +29,7 @@ interface TokenBuilder {
     room: string;
     canPublish: boolean;
     canSubscribe: boolean;
-    canPublishSources: string[];
+    canPublishSources: TrackSource[];
   }): void;
   toJwt(): Promise<string>;
 }
@@ -64,7 +64,7 @@ export async function mintParticipantToken(
     room: input.room,
     canPublish: true,
     canSubscribe: true,
-    canPublishSources: ["microphone"],
+    canPublishSources: [TrackSource.MICROPHONE],
   });
   return { url: input.url, token: await token.toJwt() };
 }
