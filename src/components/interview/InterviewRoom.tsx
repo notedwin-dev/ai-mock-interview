@@ -28,7 +28,6 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     let active = true;

@@ -75,6 +75,18 @@ audio. Verified end-to-end via the app API (transcript 200, turn 200, MP3
 ~308 KB) and `pnpm verify` (314/314). Notion tracker statuses for TT-8/9/21
 were left unchanged — updating the register needs owner authorisation.
 
+**Realtime transport note (2026-11-20, owner direction: Gemini only):** the
+room now supports a native Gemini Live **WebSocket** realtime session (ADR-006
+Option A) via AI SDK `experimental_useRealtime`; ephemeral credentials come
+from `/realtime/token`, finalized transcript events from `/realtime/transcript`.
+Next.js route handlers cannot host WebSocket upgrades, so an app-owned relay
+is not used — the SDK connects the browser directly to Gemini with the
+short-lived token. **WebRTC is not available with Gemini**: official Gemini
+Live docs specify a stateful WSS protocol and the installed SDK declares
+`transports: ["websocket"]` (no WebRTC); Google lists third-party gateways
+(LiveKit, Pipecat, Fishjam, Agora) for WebRTC. Implementing a WebRTC room needs
+a gateway/credential decision from the owner — it is not invented here.
+
 Dependencies that gate M1: 1 → 2/3/4 → 7; 5 gates M2's 9; 21 gates 8's UI detail.
 Dependencies added 2026-11-16: 24 → 25 (the creation agent needs a configured,
 validated LLM); 25 → 27 (scheduled state + link target the generated interview);
