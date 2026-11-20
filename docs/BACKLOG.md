@@ -48,8 +48,8 @@ the core workflow — approved rule.
 | 7 | Typed vertical slice: minimal interview session + transcript persistence | TT-8/TT-10 | Critical | M1 |
 | 8 | Meeting-style room UI + mic controls + local camera preview | TT-8, TT-2 | Critical | M2 |
 | 9 | ASR + TTS adapters wired to validated capability configs ✅ (Gemini `gemini-3.5-transcribe` free tier + Fish `s2.1-pro-free`; free-tier end-to-end loop verified) | TT-9 | Critical | M2 |
-| 10 | Interview orchestrator: turns, follow-ups, acknowledgement, end_call (idempotent) | TT-8 | Critical | M2 |
-| 11 | Assessment-unit grouping service | TT-8/TT-15 | Critical | M2 |
+| 10 | Interview orchestrator: turns, follow-ups, acknowledgement, end_call (idempotent) ✅ (token-scoped turn engine; LLM-driven primary/follow-up/transition; endCall) | TT-8 | Critical | M2 |
+| 11 | Assessment-unit grouping service ✅ (primary opens a unit, follow-ups join, retry idempotent on candidate key) | TT-8/TT-15 | Critical | M2 |
 | 12 | Rubric engine (weights, anchors, category adaptation) + scorer adapter | TT-15 | Critical | M3 |
 | 13 | Evaluation worker (claim/retry/idempotent writes) + status polling + report UI | TT-17 | Critical | M3 |
 | 14 | History, report retrieval, progress analytics with mode context | TT-6 | Critical | M3 |
@@ -66,6 +66,14 @@ the core workflow — approved rule.
 | 25 | Agent-led interview creation: conversational agent → structured configuration → auto-create ready interview ✅ `577fbb0` (feature branch; PR to staging pending) | TT-8 | Critical | M2 |
 | 26 | Interview entry re-layer: confirmation screen → waiting room (device checks, local-only camera) → live room with overlay conversation ✅ (token-scoped entry, local preview, overlay room) | TT-8, TT-2 | Critical | M2 |
 | 27 | Scheduling + invitation links: schema migration (scheduled state, token + revocation), token-scoped `/i/[token]` entry, server-side authorization ✅ (hash-at-rest token, revoke/reissue, DB-backed tests) | TT-10 (new tracker task) | Critical | M2 |
+
+**M2 exit evidence (2026-11-20):** a complete free-tier custom interview runs
+agent creation → scheduled interview + invitation → token-scoped confirmation
+and waiting room → live room with push-to-talk Gemini ASR, Gemini LLM
+primary/follow-up turns with assessment-unit grouping, and Fish free TTS
+audio. Verified end-to-end via the app API (transcript 200, turn 200, MP3
+~308 KB) and `pnpm verify` (314/314). Notion tracker statuses for TT-8/9/21
+were left unchanged — updating the register needs owner authorisation.
 
 Dependencies that gate M1: 1 → 2/3/4 → 7; 5 gates M2's 9; 21 gates 8's UI detail.
 Dependencies added 2026-11-16: 24 → 25 (the creation agent needs a configured,
