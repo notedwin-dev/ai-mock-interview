@@ -1,5 +1,6 @@
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
+import { createRealtimeToken } from "@/lib/interview/realtime-token";
 import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } from "./config";
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
 import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
@@ -72,6 +73,14 @@ export interface ProbeDeps {
     configurationId: string,
   ) => Promise<UserProviderConfiguration | null>;
   fetchImpl?: typeof fetch;
+  /** Native realtime session setup (injectable so probes stay hermetic). */
+  realtimeToken?: (route: {
+    providerName: string;
+    providerType: string;
+    baseUrl: string;
+    modelId: string;
+    apiKey: string;
+  }) => Promise<{ token: string; url: string }>;
   /**
    * Persists the post-probe credential status (default: the database).
    * `disable` is true exactly when the probe failed — a failed test must
@@ -220,22 +229,60 @@ export async function probeProviderConfiguration(
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
 
-    // Native realtime sessions (Gemini Live, OpenAI Realtime) negotiate the
-    // provider's own realtime protocol — they must never be driven over the
-    // OpenAI-compatible wires below. Native realtime verification lands with
-    // the realtime interview runtime (register Option A, built after the
-    // custom pipeline is stable), so realtime reports skipped: status-neutral,
-    // exactly like the not-yet-adaptered presets.
+    // Native realtime sessions are verified on their own wire: a short-lived
+    // Gemini Live session token proves the key and exact model without ever
+    // sending interview content. The token itself is never stored or returned.
     if (capability === "realtime") {
-      results.push({
-        capability,
-        status: "skipped",
-        endpointReachable: false,
-        credentialValid: false,
-        modelsDiscovered: null,
-        selectedModelAccepted: null,
-        detail: "Native realtime sessions are verified with the realtime interview runtime; this test does not contact the provider yet.",
-      });
+      const presetBase =
+        row.providerType === "preset" ? getPresetAdapter(row.providerName)?.defaultBaseUrl : null;
+      const realtimeBase = presetBase ?? row.baseUrl ?? "";
+      const isGemini =
+        Boolean(deps.realtimeToken) ||
+        row.providerName === "google" ||
+        realtimeBase.includes("generativelanguage.googleapis.com");
+      if (!isGemini) {
+        results.push({
+          capability,
+          status: "skipped",
+          endpointReachable: false,
+          credentialValid: false,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          detail: "Realtime verification is available for Gemini Live configurations only.",
+        });
+        continue;
+      }
+      try {
+        const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
+        const session = await (deps.realtimeToken ?? createRealtimeToken)({
+          providerName: row.providerName,
+          providerType: row.providerType,
+          baseUrl: realtimeBase,
+          modelId: settings.modelId,
+          apiKey,
+        });
+        if (!session.token || !session.url) throw new Error("empty realtime session");
+        results.push({
+          capability,
+          status: "validated",
+          endpointReachable: true,
+          credentialValid: true,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          detail: "Realtime session token accepted; no interview audio was sent.",
+        });
+      } catch {
+        results.push({
+          capability,
+          status: "failed",
+          endpointReachable: false,
+          credentialValid: false,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          errorCode: "provider_error",
+          detail: "The configured provider rejected the realtime session setup.",
+        });
+      }
       continue;
     }
 
