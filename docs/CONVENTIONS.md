@@ -51,8 +51,8 @@
   ```
 
 - **Do not commit**: `.env` (gitignored), generated Prisma client, `storage/*` media,
-  build output. `.env.example` is the full env template; `.env.sample` documents the
-  optional NVIDIA NIM key format only. Never put a real key in either file.
+  build output. `.env.example` is the only environment template and IS tracked
+  (`.gitignore` uses `!.env.example`). Never put a real key in it.
 - The `AGENTS.md` next-dev block at the top of the file is managed by Next.js — commit
   it, never strip it from a diff.
 - **Human review gates** (approved working rule): authentication, authorization,
