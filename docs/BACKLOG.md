@@ -81,11 +81,16 @@ Option A) via AI SDK `experimental_useRealtime`; ephemeral credentials come
 from `/realtime/token`, finalized transcript events from `/realtime/transcript`.
 Next.js route handlers cannot host WebSocket upgrades, so an app-owned relay
 is not used — the SDK connects the browser directly to Gemini with the
-short-lived token. **WebRTC is not available with Gemini**: official Gemini
-Live docs specify a stateful WSS protocol and the installed SDK declares
-`transports: ["websocket"]` (no WebRTC); Google lists third-party gateways
-(LiveKit, Pipecat, Fishjam, Agora) for WebRTC. Implementing a WebRTC room needs
-a gateway/credential decision from the owner — it is not invented here.
+short-lived token. **WebRTC (owner decision 2026-11-20): LiveKit.** Gemini Live is WSS-only by
+itself, so the room uses LiveKit Cloud's free Build plan as the WebRTC media
+gateway with `@livekit/agents` + `@livekit/agents-plugin-google`
+(`gemini-3.1-flash-live-preview`, owner-supplied free Gemini key). The app
+mints mic-only participant tokens per invitation, creates one named agent
+dispatch per room, and the worker persists final transcript events into the
+chronological record. Camera publishing is never granted (ADR-005). Live check:
+token 200 with `publishSources: ["microphone"]`, dispatch with interview
+metadata + 1 job, worker registered as `aimis-interviewer`, and the browser
+showed "Connected · 1 other participant(s)" with the agent present.
 
 Dependencies that gate M1: 1 → 2/3/4 → 7; 5 gates M2's 9; 21 gates 8's UI detail.
 Dependencies added 2026-11-16: 24 → 25 (the creation agent needs a configured,

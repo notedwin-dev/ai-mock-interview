@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ context: vi.fn(), mint: vi.fn() }));
+const mocks = vi.hoisted(() => ({ context: vi.fn(), mint: vi.fn(), dispatch: vi.fn(async () => true) }));
 vi.mock("@/lib/interview/room-store", () => ({ createDefaultRoomStore: () => ({ context: mocks.context }) }));
 vi.mock("@/lib/interview/livekit-token", () => ({ mintParticipantToken: mocks.mint }));
+vi.mock("@/lib/interview/livekit-dispatch", () => ({ dispatchInterviewerAgent: mocks.dispatch }));
 vi.mock("@/lib/livekit/env", () => ({
   getLiveKitConfig: vi.fn(() => ({ url: "wss://project.livekit.cloud", apiKey: "key", apiSecret: "secret" })),
   participantIdentity: vi.fn(() => "candidate-abc123"),
@@ -29,6 +30,10 @@ describe("POST .../webrtc/token", () => {
     expect(mocks.mint).toHaveBeenCalledWith(
       expect.objectContaining({ room: "session-1" }),
       expect.objectContaining({ apiKey: "key", apiSecret: "secret" }),
+    );
+    expect(mocks.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ room: "session-1", inviteToken: TOKEN }),
+      expect.objectContaining({ apiKey: "key" }),
     );
   });
 

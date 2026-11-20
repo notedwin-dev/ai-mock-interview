@@ -1,5 +1,6 @@
 import { jsonError } from "@/lib/api/respond";
 import { getLiveKitConfig, participantIdentity } from "@/lib/livekit/env";
+import { dispatchInterviewerAgent } from "@/lib/interview/livekit-dispatch";
 import { mintParticipantToken } from "@/lib/interview/livekit-token";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 
@@ -35,6 +36,21 @@ export async function POST(
       },
       { apiKey: config.apiKey, apiSecret: config.apiSecret },
     );
+    // The agent dispatch is best-effort: a worker outage must not prevent the
+    // candidate from joining their room.
+    try {
+      await dispatchInterviewerAgent(
+        {
+          room: interview.sessionId,
+          inviteToken: token,
+          jobRole: interview.jobRole,
+          jobDescription: interview.jobDescription,
+        },
+        config,
+      );
+    } catch {
+      // reported by the worker logs, not to the candidate
+    }
     return Response.json(session);
   } catch {
     return jsonError(502, "webrtc_setup_failed", "The live room could not be created.");

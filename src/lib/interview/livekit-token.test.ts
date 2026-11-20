@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { TrackSource } from "livekit-server-sdk";
 import { mintParticipantToken } from "./livekit-token";
 
 /** Hermetic tests for LiveKit participant credentials (WebRTC room). */
@@ -27,7 +28,7 @@ describe("mintParticipantToken", () => {
       room: "session-1",
       canPublish: true,
       canSubscribe: true,
-      canPublishSources: ["microphone"],
+      canPublishSources: [TrackSource.MICROPHONE],
     });
   });
 

@@ -15,6 +15,7 @@ export function WebRTCRoom({ token }: { token: string }) {
   const [participants, setParticipants] = useState<string[]>([]);
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => () => {
     void roomRef.current?.disconnect();
@@ -54,7 +55,12 @@ export function WebRTCRoom({ token }: { token: string }) {
         }
       });
       await room.connect(body.url, body.token);
-      await room.localParticipant.setMicrophoneEnabled(true);
+      try {
+        await room.localParticipant.setMicrophoneEnabled(true);
+      } catch {
+        // A browser without microphone permission can still listen.
+        setNotice("Microphone unavailable — you can listen to the interviewer.");
+      }
       refreshParticipants(room);
       setStatus("connected");
     } catch {
@@ -116,6 +122,7 @@ export function WebRTCRoom({ token }: { token: string }) {
           {participants.map((identity) => <li key={identity}>{identity}</li>)}
         </ul>
       ) : null}
+      {notice ? <p className="text-xs text-amber-300" role="status">{notice}</p> : null}
       {error ? <p className="text-xs text-red-400" role="alert">{error}</p> : null}
     </section>
   );
