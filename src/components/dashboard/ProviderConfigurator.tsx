@@ -442,11 +442,10 @@ export function ProviderConfigurator({
   }
 
   /**
-   * Option 1 add flow (one row per provider): without an existing row the
-   * provider configuration is created with only the realtime capability;
-   * with one, the realtime capability is PATCHed onto the stored row and the
-   * existing credential stays untouched. Realtime models are admin-fixed:
-   * the candidate only supplies a credential, never a model ID.
+   * Realtime rows are created on their own, one per provider, carrying only
+   * the realtime capability. The same provider's LLM/ASR/TTS rows are never
+   * patched here — each capability keeps its own credential and test result.
+   * Realtime models are admin-fixed: only a credential is requested.
    */
   async function addRealtime(
     providerName: string,
@@ -464,33 +463,7 @@ export function ProviderConfigurator({
       return false;
     }
     const key = `realtime:${providerName}`;
-    const existing = rows.find(
-      (row) => row.providerType === "preset" && row.providerName === providerName,
-    );
     const error = await runAction(key, async () => {
-      if (existing) {
-        if (existing.capabilities.realtime) return null;
-        const result = await callApi<{ configuration: ProviderConfigSummary }>(
-          `/api/v1/providers/configurations/${encodeURIComponent(providerName)}${rowQuery(existing)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              capabilities: { ...existing.capabilities, realtime: { modelId } },
-            }),
-          },
-        );
-        if (!result.ok) return result.error;
-        setRows((current) =>
-          current.map((candidate) =>
-            candidate.userProviderConfigurationId ===
-            result.data.configuration.userProviderConfigurationId
-              ? result.data.configuration
-              : candidate,
-          ),
-        );
-        return null;
-      }
       const result = await callApi<{ configuration: ProviderConfigSummary }>(
         "/api/v1/providers/configurations",
         {
@@ -738,8 +711,14 @@ function PreconfiguredModePanel(props: PreconfiguredModePanelProps) {
       </p>
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         {REALTIME_PROVIDERS.map((spec) => {
+          // Only a row that actually serves `realtime` is a configured agent:
+          // the same provider may also have LLM/ASR/TTS rows, which must not
+          // be shown here (their probe result has no realtime capability).
           const configured = props.rows.find(
-            (row) => row.providerType === "preset" && row.providerName === spec.providerName,
+            (row) =>
+              row.providerType === "preset" &&
+              row.providerName === spec.providerName &&
+              Boolean(row.capabilities.realtime),
           );
           const available = Boolean(spec.modelId);
           return (
@@ -837,11 +816,7 @@ function ConfiguredRealtimeRow({
       {fullProbe ? (
         <div className="rounded-xl border border-line bg-surface p-3">
           <span className={LABEL_CLASS}>Last test result</span>
-          <ProbeResultView
-            result={probe}
-            fullResult={fullProbe}
-            capability="realtime"
-          />
+          <ProbeResultView result={probe} capability="realtime" />
         </div>
       ) : null}
       {actionError[`${row.userProviderConfigurationId}:probe`] ? (
@@ -1327,7 +1302,7 @@ function ConfigurationRowCard({
       {probe ? (
         <div className="mt-4 rounded-xl border border-line bg-surface p-3">
           <span className={LABEL_CLASS}>Last test result</span>
-          <ProbeResultView result={probeForCapability ?? null} fullResult={probe} capability={capability} />
+          <ProbeResultView result={probeForCapability ?? null} capability={capability} />
         </div>
       ) : null}
 
@@ -1391,21 +1366,15 @@ const PROBE_STATUS_WORDS: Record<CapabilityProbeResult["status"], { word: string
 
 function ProbeResultView({
   result,
-  fullResult,
   capability,
 }: {
   result: CapabilityProbeResult | null;
-  fullResult: ConfigurationProbeResult;
   capability: Capability;
 }) {
   if (!result) {
-    return (
-      <p className="mt-1 text-xs text-ink-muted">
-        The stored test covered other capabilities of this configuration
-        ({fullResult.capabilities.map((r) => CAPABILITY_LABELS[r.capability]).join(", ")}); run the
-        test again to verify this one.
-      </p>
-    );
+    // Only reachable for a row that does not serve this capability — which the
+    // capability filters now prevent. Keep the copy neutral if it ever shows.
+    return <p className="mt-1 text-xs text-ink-muted">Run the test to verify this capability.</p>;
   }
   const status = PROBE_STATUS_WORDS[result.status];
   return (
