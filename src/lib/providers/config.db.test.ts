@@ -105,12 +105,64 @@ d("provider configuration service (integration)", () => {
     expect(Object.keys(summary.capabilities).sort()).toEqual(["asr", "llm"]);
   });
 
-  it("rejects a duplicate (user, providerName) pair", async () => {
+  it("rejects the same provider configured twice for the same capability", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);
     await expect(
       createProviderConfiguration(userId, { ...customInput, apiKey: "sk-other" }),
     ).rejects.toMatchObject({ code: "config_exists" });
+  });
+
+  it("allows the same provider for different capabilities (no per-capability exclusivity)", async () => {
+    const userId = await createUser();
+    const asr = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-asr",
+      capabilities: { asr: { modelId: "asr-model" } },
+    });
+    const llm = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-llm",
+      capabilities: { llm: { modelId: "llm-model" } },
+    });
+    expect(asr.userProviderConfigurationId).not.toBe(llm.userProviderConfigurationId);
+    const rows = await listProviderConfigurations(userId);
+    expect(rows.filter((row) => row.providerName === "google")).toHaveLength(2);
+  });
+
+  it("targets the exact row when several configurations share a provider name", async () => {
+    const userId = await createUser();
+    const asr = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-asr",
+      capabilities: { asr: { modelId: "asr-model" } },
+    });
+    const llm = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-llm",
+      capabilities: { llm: { modelId: "llm-model" } },
+    });
+
+    const patched = await updateProviderConfiguration(
+      userId,
+      "google",
+      { isEnabled: false },
+      llm.userProviderConfigurationId,
+    );
+    expect(patched.userProviderConfigurationId).toBe(llm.userProviderConfigurationId);
+    expect(patched.isEnabled).toBe(false);
+    const rowsAfterPatch = await listProviderConfigurations(userId);
+    expect(rowsAfterPatch.find((row) => row.userProviderConfigurationId === asr.userProviderConfigurationId)?.isEnabled).toBe(true);
+
+    await deleteProviderConfiguration(userId, "google", llm.userProviderConfigurationId);
+    const rowsAfterDelete = await listProviderConfigurations(userId);
+    expect(rowsAfterDelete.map((row) => row.userProviderConfigurationId)).toEqual([
+      asr.userProviderConfigurationId,
+    ]);
   });
 
   it("rejects a preset used for a capability it does not declare", async () => {

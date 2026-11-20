@@ -8,10 +8,12 @@ import { evaluateBaseUrl } from "./ssrf";
 
 /**
  * Provider configuration service (approved component → module home,
- * docs/ARCHITECTURE.md §3). One row per (user, providerName); the JSONB
- * `capabilities_json` maps each served capability to its own settings, so
- * ASR/LLM/TTS stay independently configurable (AIMIS rule) even when one
- * provider serves several capabilities.
+ * docs/ARCHITECTURE.md §3). A row holds one provider's credentials plus the
+ * JSONB `capabilities_json` map of the capabilities it serves. The same
+ * provider may have one row per capability (e.g. Google for ASR and Google
+ * for LLM); a duplicate is only rejected when the SAME capability would be
+ * served twice. Runtime exclusivity (realtime vs custom) is high-level only.
+ * When names repeat, callers pin the exact row with its configuration id.
  *
  * Write-only credentials (FR-PROVIDER, ADR-0005): the API key is encrypted on
  * save and never read back through this module's output types. The ONLY
@@ -267,9 +269,18 @@ function toSummary(row: SelectedConfig): ProviderConfigSummary {
   };
 }
 
-async function findOwnedConfig(userId: string, providerName: string) {
+/**
+ * Looks up a row by provider name. When several rows share a name (the same
+ * provider may serve several capabilities), configId pins the exact row;
+ * otherwise the first row is used for backwards-compatible callers.
+ */
+async function findOwnedConfig(userId: string, providerName: string, configId?: string) {
   return db.userProviderConfiguration.findFirst({
-    where: { userId, providerName },
+    where: {
+      userId,
+      providerName,
+      ...(configId ? { userProviderConfigurationId: configId } : {}),
+    },
   });
 }
 
@@ -279,8 +290,12 @@ async function findOwnedConfig(userId: string, providerName: string) {
  * return type carries write-only credential material: it must never be
  * serialised into a client response or a log.
  */
-export async function findOwnedConfigRow(userId: string, providerName: string) {
-  return findOwnedConfig(userId, providerName);
+export async function findOwnedConfigRow(
+  userId: string,
+  providerName: string,
+  configId?: string,
+) {
+  return findOwnedConfig(userId, providerName, configId);
 }
 
 /**
@@ -357,11 +372,21 @@ export async function createProviderConfiguration(
     );
   }
 
-  const existing = await findOwnedConfig(parsedUser, parsed.providerName);
-  if (existing) {
+  // Runtime exclusivity is high-level only (realtime vs custom). The same
+  // provider may be configured again for a DIFFERENT capability; only a row
+  // already serving one of the requested capabilities is a duplicate.
+  const existingRows = await db.userProviderConfiguration.findMany({
+    where: { userId: parsedUser, providerName: parsed.providerName },
+    select: { capabilitiesJson: true },
+  });
+  const duplicate = existingRows.some((row) => {
+    const served = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+    return Object.keys(capabilities).some((capability) => capability in served);
+  });
+  if (duplicate) {
     throw new ProviderConfigError(
       "config_exists",
-      `A configuration named "${parsed.providerName}" already exists. Update it instead.`,
+      `"${parsed.providerName}" is already configured for this capability. Update that configuration instead.`,
     );
   }
 
@@ -395,6 +420,7 @@ export async function updateProviderConfiguration(
   userId: string,
   providerName: string,
   patch: unknown,
+  configId?: string,
 ): Promise<ProviderConfigSummary> {
   const parsedUser = parseUserId(userId);
 
@@ -408,7 +434,7 @@ export async function updateProviderConfiguration(
     );
   }
 
-  const row = await findOwnedConfig(parsedUser, providerName);
+  const row = await findOwnedConfig(parsedUser, providerName, configId);
   if (!row) {
     throw new ProviderConfigError("not_found", "Provider configuration not found.");
   }
@@ -600,10 +626,15 @@ export async function resolveForOutboundCall(
 export async function deleteProviderConfiguration(
   userId: string,
   providerName: string,
+  configId?: string,
 ): Promise<void> {
   const parsedUser = parseUserId(userId);
   const result = await db.userProviderConfiguration.deleteMany({
-    where: { userId: parsedUser, providerName },
+    where: {
+      userId: parsedUser,
+      providerName,
+      ...(configId ? { userProviderConfigurationId: configId } : {}),
+    },
   });
   if (result.count === 0) {
     throw new ProviderConfigError("not_found", "Provider configuration not found.");

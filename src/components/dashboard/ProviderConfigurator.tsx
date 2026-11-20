@@ -238,6 +238,11 @@ function friendlyProviderName(row: ProviderConfigSummary): string {
   return row.providerName;
 }
 
+/** Pin row-scoped calls to the exact config when a provider serves several capabilities. */
+function rowQuery(row: ProviderConfigSummary): string {
+  return `?configId=${encodeURIComponent(row.userProviderConfigurationId)}`;
+}
+
 interface ProviderConfiguratorProps {
   initialConfigurations: ProviderConfigSummary[];
 }
@@ -321,7 +326,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     }));
     await runAction(`${rowId}:models`, async () => {
       const response = await callApi<DiscoveryResult>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/models`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/models${rowQuery(row)}`,
         { cache: "no-store" },
       );
       const result: DiscoveryResult = response.ok
@@ -339,7 +344,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     const key = `${row.userProviderConfigurationId}:probe`;
     await runAction(key, async () => {
       const result = await callApi<ConfigurationProbeResult>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/probe`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/probe${rowQuery(row)}`,
         { method: "POST" },
       );
       if (!result.ok) return result.error;
@@ -361,7 +366,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
   ): Promise<boolean> {
     const error = await runAction(key, async () => {
       const result = await callApi<{ configuration: ProviderConfigSummary }>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}${rowQuery(row)}`,
         { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) },
       );
       if (!result.ok) return result.error;
@@ -382,7 +387,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     const key = `${row.userProviderConfigurationId}:delete`;
     const error = await runAction(key, async () => {
       const response = await fetch(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}${rowQuery(row)}`,
         { method: "DELETE" },
       );
       if (!response.ok && response.status !== 204) {
@@ -431,7 +436,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
       if (existing) {
         if (existing.capabilities.realtime) return null;
         const result = await callApi<{ configuration: ProviderConfigSummary }>(
-          `/api/v1/providers/configurations/${encodeURIComponent(providerName)}`,
+          `/api/v1/providers/configurations/${encodeURIComponent(providerName)}${rowQuery(existing)}`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
