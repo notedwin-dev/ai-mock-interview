@@ -26,6 +26,10 @@ missing.
 | `PROVIDER_ENCRYPTION_LEGACY_KEYS` | server (provider config, rotation only) | Comma-separated retired keys as `<version>=<base64 32-byte key>` pairs, kept decryptable during rotation until no stored row references their version. Omitting a version that rows still reference **fails decryption closed** (repo extension of ADR-0005, flagged for owner review) |
 | `STORAGE_LOCAL_ROOT` | server (resume storage) | Local volume root for private resume files (default `./storage`, gitignored; mount a Docker volume at this path in deployment). Keys are built server-side only; files are served exclusively through authenticated route handlers that re-check ownership (recruiter consent re-check lands with FR-RECRUITER-004, M4) |
 
+| `LIVEKIT_URL` | WebRTC room (server) | `wss://…` URL of the LiveKit Cloud project (free Build plan, no card) or self-hosted server. Server-side only |
+| `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | WebRTC room (server) | LiveKit project credentials used to mint short-lived participant tokens. **Never** send the secret to the browser or put it in a `NEXT_PUBLIC_` variable |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | LiveKit agent / free-tier smokes | Owner-supplied Gemini key (free tier). Used by the LiveKit Agents Gemini Live realtime model and by the one-off free-tier evidence scripts; never printed |
+
 ## Planned (add with their milestone — do not enable early)
 
 | Variable | Planned | Purpose |
