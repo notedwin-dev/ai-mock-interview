@@ -140,5 +140,25 @@ export function createDefaultRoomStore(): RoomStore {
         data: { status: "completed", completedAt: new Date() },
       });
     },
+
+    async appendRealtimeMessage(sessionId, speaker, contentText, clientId) {
+      const existing = await db.conversationMessage.findFirst({
+        where: { sessionId, idempotencyKey: clientId },
+      });
+      if (existing) return toEntry(existing);
+      const message = await db.conversationMessage.create({
+        data: {
+          sessionId,
+          sequenceNumber: await nextSequence(sessionId),
+          speakerType: speaker,
+          // The schema's message_kind domain allows these four values only;
+          // a native-realtime interviewer utterance is a primary question.
+          messageKind: speaker === "candidate" ? "candidate_response" : "primary_question",
+          contentText,
+          idempotencyKey: clientId,
+        },
+      });
+      return toEntry(message);
+    },
   };
 }

@@ -50,6 +50,13 @@ export interface RoomStore {
   openUnit(sessionId: string, unitNumber: number): Promise<string>;
   closeUnit(unitId: string): Promise<void>;
   complete(sessionId: string): Promise<void>;
+  /** Appends one finalized Gemini Live message (idempotent on clientId). */
+  appendRealtimeMessage(
+    sessionId: string,
+    speaker: "candidate" | "interviewer",
+    contentText: string,
+    clientId: string,
+  ): Promise<TranscriptEntry>;
 }
 
 export interface RoomTurnInput {
