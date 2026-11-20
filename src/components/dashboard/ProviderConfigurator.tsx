@@ -283,11 +283,13 @@ export function ProviderConfigurator({
       "/api/v1/providers/configurations",
       { cache: "no-store" },
     );
-    if (result.ok) {
-      setRows(result.data.configurations);
-      return result.data.configurations;
+    if (!result.ok) {
+      // Keep what is on screen: wiping the rows here makes the Test/Enable
+      // controls appear to do nothing for a transient reload failure.
+      return rows;
     }
-    return [];
+    setRows(result.data.configurations);
+    return result.data.configurations;
   }
 
   /** Switch the active runtime; saved rows of both modes are kept untouched. */
@@ -316,8 +318,18 @@ export function ProviderConfigurator({
       delete next[key];
       return next;
     });
-    const error = await action();
-    setPending(null);
+    let error: ApiError | null;
+    try {
+      error = await action();
+    } catch (cause) {
+      // Never leave the button stuck on "pending" after an unexpected throw.
+      error = {
+        code: "internal_error",
+        message: cause instanceof Error ? cause.message : "The action failed. Try again.",
+      };
+    } finally {
+      setPending(null);
+    }
     if (error) setActionError((current) => ({ ...current, [key]: error }));
     return error;
   }
@@ -799,9 +811,8 @@ function ConfiguredRealtimeRow({
   onDelete: (row: ProviderConfigSummary) => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const probe = probeByRow[row.userProviderConfigurationId]?.capabilities.find(
-    (result) => result.capability === "realtime",
-  );
+  const fullProbe = probeByRow[row.userProviderConfigurationId];
+  const probe = fullProbe?.capabilities.find((result) => result.capability === "realtime") ?? null;
   return (
     <div className="mt-3 flex flex-col gap-2 border-t border-line pt-3">
       <div className="flex flex-wrap gap-2">
@@ -823,7 +834,21 @@ function ConfiguredRealtimeRow({
           </>
         )}
       </div>
-      {probe ? <p className="text-xs text-ink-muted">Last test: {probe.status}</p> : null}
+      {fullProbe ? (
+        <div className="rounded-xl border border-line bg-surface p-3">
+          <span className={LABEL_CLASS}>Last test result</span>
+          <ProbeResultView
+            result={probe}
+            fullResult={fullProbe}
+            capability="realtime"
+          />
+        </div>
+      ) : null}
+      {actionError[`${row.userProviderConfigurationId}:probe`] ? (
+        <p className="text-xs text-red-400">
+          {actionError[`${row.userProviderConfigurationId}:probe`]!.message}
+        </p>
+      ) : null}
       {actionError[`${row.userProviderConfigurationId}:enable`] ? (
         <p className="text-xs text-red-400">{actionError[`${row.userProviderConfigurationId}:enable`]!.message}</p>
       ) : null}
