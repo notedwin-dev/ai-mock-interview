@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
-import { generateStructured, LlmError, type LlmRoute } from "./llm";
+
+const compatMock = vi.hoisted(() => ({ createOpenAICompatible: vi.fn() }));
+vi.mock("@ai-sdk/openai-compatible", () => ({ createOpenAICompatible: compatMock.createOpenAICompatible }));
+import { generateStructured, GENERATION_TIMEOUT_MS, LlmError, type LlmRoute } from "./llm";
 
 /**
  * Hermetic tests for the LLM adapter (backlog slice 25). The external
@@ -19,6 +22,28 @@ const route: LlmRoute = {
 const schema = z.object({ topic: z.string() });
 
 describe("generateStructured", () => {
+  it("declares structured-output support so the SDK sends a full json_schema", async () => {
+    const { createRouteModel } = await import("./llm");
+    compatMock.createOpenAICompatible.mockReturnValue({ chatModel: vi.fn(() => ({})) });
+
+    createRouteModel(route);
+
+    expect(compatMock.createOpenAICompatible).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseURL: route.baseUrl,
+        apiKey: route.apiKey,
+        name: route.providerName,
+        supportsStructuredOutputs: true,
+      }),
+    );
+  });
+
+  it("keeps provider generation bounded but long enough for reasoning models", () => {
+    // A 30 s bound cut off a real free-tier reasoning model mid-response.
+    expect(GENERATION_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
+    expect(GENERATION_TIMEOUT_MS).toBeLessThanOrEqual(120_000);
+  });
+
   it("uses the exact configured route/model and returns schema-validated output", async () => {
     const seen: string[] = [];
     const model = new MockLanguageModelV4({

@@ -47,7 +47,7 @@ the core workflow — approved rule.
 | 6 | Provider/voice-pipeline feasibility matrix (live evidence, no CI) | TT-16 | Critical | M1→M2 |
 | 7 | Typed vertical slice: minimal interview session + transcript persistence | TT-8/TT-10 | Critical | M1 |
 | 8 | Meeting-style room UI + mic controls + local camera preview | TT-8, TT-2 | Critical | M2 |
-| 9 | ASR + TTS adapters wired to validated capability configs | TT-9 | Critical | M2 |
+| 9 | ASR + TTS adapters wired to validated capability configs ✅ (Gemini `gemini-3.5-transcribe` free tier + Fish `s2.1-pro-free`; free-tier end-to-end loop verified) | TT-9 | Critical | M2 |
 | 10 | Interview orchestrator: turns, follow-ups, acknowledgement, end_call (idempotent) | TT-8 | Critical | M2 |
 | 11 | Assessment-unit grouping service | TT-8/TT-15 | Critical | M2 |
 | 12 | Rubric engine (weights, anchors, category adaptation) + scorer adapter | TT-15 | Critical | M3 |

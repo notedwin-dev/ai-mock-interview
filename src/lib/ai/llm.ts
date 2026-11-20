@@ -36,6 +36,9 @@ export function createRouteModel(route: LlmRoute): LanguageModel {
     name: route.providerName,
     baseURL: route.baseUrl,
     apiKey: route.apiKey,
+    // Approved runtime models must support structured output (ADR-006); this
+    // makes the SDK send a full json_schema instead of loose json_object.
+    supportsStructuredOutputs: true,
   }).chatModel(route.modelId);
 }
 
@@ -49,8 +52,12 @@ export interface StructuredDeps {
   createModel?: (route: LlmRoute) => LanguageModel;
 }
 
-/** Maximum wall-clock time for one generation (no unbounded provider calls). */
-const GENERATION_TIMEOUT_MS = 30_000;
+/**
+ * Maximum wall-clock time for one generation (still bounded). 30 s cut off a
+ * real free-tier reasoning model mid-response; 90 s leaves room for thinking
+ * tokens without allowing an unbounded provider call.
+ */
+export const GENERATION_TIMEOUT_MS = 90_000;
 
 export async function generateStructured<T>(
   route: LlmRoute,

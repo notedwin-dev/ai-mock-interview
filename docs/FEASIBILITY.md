@@ -136,3 +136,26 @@ Next step once a key is available: configure a **custom** OpenAI-compatible
 row (base URL above, key, exact model ID from the live list), run Test LLM
 capability, then exercise the agent flow. Do not add a NIM preset — the
 ADR-030 preset set is owner-controlled — and never store the key in the repo.
+
+## Free-tier voice loop (2026-11-20, verified)
+
+Owner constraint: free-tier models only (no billing account). All three
+adapters were verified live with the smoke account's free keys:
+
+- **ASR**: Gemini `gemini-3.5-transcribe` via `POST /v1beta/interactions`
+  (official pricing page: Free tier input/output "Free of charge"). Exact ID
+  matches the owner register. Transcribed a real WAV successfully.
+- **LLM**: Gemini `gemini-3.6-flash` via Google's documented OpenAI-compatible
+  base `https://generativelanguage.googleapis.com/v1beta/openai` (free tier).
+  The SDK adapter must set `supportsStructuredOutputs: true` so it sends a
+  full `json_schema` instead of loose `json_object`.
+- **TTS**: Fish `s2.1-pro-free` (free developer model, exact model header).
+
+End-to-end smoke: interview created (201) → token-scoped `/transcribe` returned
+a real transcript → token-scoped `/turns` returned a persisted
+candidate/interviewer transcript and ~308 KB of MP3 audio. All temporary
+provider rows were deleted and the pre-existing smoke LLM row re-enabled.
+
+NIM's free reasoning model was tried for the LLM role but was too slow/flaky
+(>90 s or malformed structured output) — not used. NVIDIA's hosted Whisper
+endpoint returned 404, so no hosted NIM ASR exists for AIMIS.
