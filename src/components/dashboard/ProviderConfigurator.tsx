@@ -16,7 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import type { Capability, ModelSuggestion } from "@/lib/providers/registry";
 import { REALTIME_PROVIDERS, realtimeModelFor } from "@/lib/providers/realtime-models";
 import { PRESET_ADAPTERS, PRESET_MODEL_SUGGESTIONS } from "@/lib/providers/registry";
-import type { ProviderConfigSummary } from "@/lib/providers/config";
+import type { ProviderConfigSummary, RuntimeMode } from "@/lib/providers/config";
 import type {
   CapabilityProbeResult,
   ConfigurationProbeResult,
@@ -245,12 +245,18 @@ function rowQuery(row: ProviderConfigSummary): string {
 
 interface ProviderConfiguratorProps {
   initialConfigurations: ProviderConfigSummary[];
+  initialActiveMode: RuntimeMode | null;
 }
 
-export function ProviderConfigurator({ initialConfigurations }: ProviderConfiguratorProps) {
+export function ProviderConfigurator({
+  initialConfigurations,
+  initialActiveMode,
+}: ProviderConfiguratorProps) {
   const [rows, setRows] = useState<ProviderConfigSummary[]>(initialConfigurations);
-  // ADR-006: pick ONE runtime before any credential is entered.
+  // The saved choice wins; legacy accounts with no explicit choice infer it
+  // from the rows on first visit. Modes stay switchable — no deletion needed.
   const [mode, setMode] = useState<"realtime" | "custom" | null>(() => {
+    if (initialActiveMode) return initialActiveMode;
     if (initialConfigurations.some((row) => row.capabilities.realtime)) return "realtime";
     if (
       initialConfigurations.some(
@@ -259,6 +265,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     ) return "custom";
     return null;
   });
+  const [switching, setSwitching] = useState(false);
   const [modelsByRow, setModelsByRow] = useState<Record<string, RowModelList>>({});
   const [probeByRow, setProbeByRow] = useState<Record<string, ConfigurationProbeResult>>({});
   const [pending, setPending] = useState<string | null>(null);
@@ -281,6 +288,22 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
       return result.data.configurations;
     }
     return [];
+  }
+
+  /** Switch the active runtime; saved rows of both modes are kept untouched. */
+  async function switchMode(next: RuntimeMode) {
+    setSwitching(true);
+    const result = await callApi<{ mode: RuntimeMode }>("/api/v1/providers/runtime-mode", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: next }),
+    });
+    setSwitching(false);
+    if (result.ok) {
+      setMode(next);
+    } else {
+      setActionError((current) => ({ ...current, "mode:switch": result.error }));
+    }
   }
 
   async function runAction(
@@ -476,11 +499,17 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     return error === null;
   }
 
+  const inactiveCount = rows.filter((row) =>
+    mode === "realtime" ? !row.capabilities.realtime : Boolean(row.capabilities.realtime),
+  ).length;
+
   if (mode === null) {
     return (
       <ModeSelector
-        onSelect={(selected) => setMode(selected)}
+        onSelect={(selected) => void switchMode(selected)}
         configured={rows.length > 0}
+        switching={switching}
+        error={actionError["mode:switch"]}
       />
     );
   }
@@ -497,16 +526,21 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
         <button
           type="button"
           onClick={() => setMode(null)}
-          disabled={rows.length > 0}
           className={GHOST_PILL}
         >
           Change mode
         </button>
       </div>
-      {rows.length > 0 ? (
+      {inactiveCount > 0 ? (
         <p className="text-xs text-ink-muted" role="status">
-          A runtime with saved credentials is fixed — delete its configuration before
-          changing modes.
+          {inactiveCount} saved configuration{inactiveCount === 1 ? "" : "s"} from the other
+          mode {" "} kept and inactive — switch modes to use {" "}
+          {inactiveCount === 1 ? "it" : "them"} again.
+        </p>
+      ) : null}
+      {actionError["mode:switch"] ? (
+        <p className="text-xs text-red-400" role="alert">
+          {actionError["mode:switch"]!.message}
         </p>
       ) : null}
 
@@ -588,9 +622,13 @@ function readinessFor(rows: ProviderConfigSummary[], capability: Capability) {
 function ModeSelector({
   onSelect,
   configured,
+  switching,
+  error,
 }: {
-  onSelect: (mode: "realtime" | "custom") => void;
+  onSelect: (mode: RuntimeMode) => void;
   configured: boolean;
+  switching: boolean;
+  error?: ApiError;
 }) {
   return (
     <div className="flex flex-col gap-6">
@@ -627,9 +665,10 @@ function ModeSelector({
           <button
             type="button"
             onClick={() => onSelect("realtime")}
+            disabled={switching}
             className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
           >
-            Choose pre-configured
+            {switching ? "Switching…" : "Choose pre-configured"}
           </button>
         </section>
         <section className="rounded-3xl border border-line bg-surface p-6">
@@ -642,16 +681,21 @@ function ModeSelector({
           <button
             type="button"
             onClick={() => onSelect("custom")}
+            disabled={switching}
             className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
           >
-            Choose advanced
+            {switching ? "Switching…" : "Choose advanced"}
           </button>
         </section>
       </div>
       {configured ? (
         <p className="text-center text-xs text-ink-muted" role="status">
-          A runtime is already configured — delete its saved configuration first to
-          switch modes.
+          Saved configurations are kept — switching modes never deletes them.
+        </p>
+      ) : null}
+      {error ? (
+        <p className="text-center text-xs text-red-400" role="alert">
+          {error.message}
         </p>
       ) : null}
     </div>

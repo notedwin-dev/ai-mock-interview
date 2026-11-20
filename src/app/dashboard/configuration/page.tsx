@@ -2,8 +2,10 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
 import {
+  getActiveRuntimeMode,
   listProviderConfigurations,
   type ProviderConfigSummary,
+  type RuntimeMode,
 } from "@/lib/providers/config";
 import { ProviderConfigurator } from "@/components/dashboard/ProviderConfigurator";
 
@@ -29,9 +31,13 @@ async function ConfigurationContent() {
   const { account } = await requireAccount({ role: "candidate" });
 
   let configurations: ProviderConfigSummary[] = [];
+  let activeMode: RuntimeMode | null = null;
   let loadFailed = false;
   try {
-    configurations = await listProviderConfigurations(account.userId);
+    [configurations, activeMode] = await Promise.all([
+      listProviderConfigurations(account.userId),
+      getActiveRuntimeMode(account.userId),
+    ]);
   } catch {
     loadFailed = true;
   }
@@ -41,7 +47,10 @@ async function ConfigurationContent() {
       Configurations could not be loaded. Try again in a moment.
     </p>
   ) : (
-    <ProviderConfigurator initialConfigurations={configurations} />
+    <ProviderConfigurator
+      initialConfigurations={configurations}
+      initialActiveMode={activeMode}
+    />
   );
 }
 

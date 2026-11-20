@@ -6,7 +6,10 @@ import {
   type InterviewSession,
 } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { listProviderConfigurations } from "@/lib/providers/config";
+import {
+  getActiveRuntimeMode,
+  listProviderConfigurations,
+} from "@/lib/providers/config";
 import { getPresetAdapter } from "@/lib/providers/registry";
 import { selectRuntime } from "./runtime";
 import {
@@ -186,7 +189,10 @@ async function loadOwnedSession(
 async function selectRouteSnapshot(
   userId: string,
 ): Promise<{ snapshot: ProviderRouteSnapshot; runtimeMode: RuntimeMode }> {
-  const runtime = selectRuntime(await listProviderConfigurations(userId));
+  const runtime = selectRuntime(
+    await listProviderConfigurations(userId),
+    await getActiveRuntimeMode(userId),
+  );
   if (!runtime.ready || !runtime.row) {
     throw new InterviewError(
       "provider_route_missing",
