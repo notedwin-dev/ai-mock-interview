@@ -62,7 +62,7 @@ the core workflow — approved rule.
 | 21 | Wireframe pass for runtime cards + capability rows + report states | TT-2 | High | Before M2 UI |
 | 22 | Diagram completion pass (architecture, use case, DFD, activity) | TT-14, TT-3/4/5 | High | M0→M4 |
 | 23 | Landing page | TT-1 | Low | M4 |
-| 24 | AI configuration experience `/dashboard/configuration` + registry presets completed (DeepSeek, Z.ai GLM, Qwen; distinct preset/Custom modes, per-capability sections, discovery + probe + readiness, independent scorer) | TT-20 | Critical | M2 |
+| 24 | AI configuration experience `/dashboard/configuration` + registry presets completed (DeepSeek, Z.ai GLM, Qwen; mode-first split: fixed pre-configured realtime vs advanced custom providers, fixed realtime model IDs, provider tags with monograms + `Custom`, saved providers collapsed, discovery + probe, independent scorer) | TT-20 | Critical | M2 |
 | 25 | Agent-led interview creation: conversational agent → structured configuration → auto-create ready interview ✅ `577fbb0` (feature branch; PR to staging pending) | TT-8 | Critical | M2 |
 | 26 | Interview entry re-layer: confirmation screen → waiting room (device checks, local-only camera) → live room with overlay conversation ✅ (token-scoped entry, local preview, overlay room) | TT-8, TT-2 | Critical | M2 |
 | 27 | Scheduling + invitation links: schema migration (scheduled state, token + revocation), token-scoped `/i/[token]` entry, server-side authorization ✅ (hash-at-rest token, revoke/reissue, DB-backed tests) | TT-10 (new tracker task) | Critical | M2 |

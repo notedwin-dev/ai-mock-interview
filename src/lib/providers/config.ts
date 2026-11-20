@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { decryptApiKey, encryptApiKey } from "./encryption";
+import { applyRealtimeModelRules } from "./realtime-models";
 import { CAPABILITIES, getPresetAdapter, type Capability } from "./registry";
 import { evaluateBaseUrl } from "./ssrf";
 
@@ -86,6 +87,7 @@ export type ProviderConfigErrorCode =
   | "unknown_preset"
   | "reserved_preset_name"
   | "probe_failed"
+  | "runtime_conflict"
   | "invalid_input";
 
 export class ProviderConfigError extends Error {
@@ -282,6 +284,38 @@ export async function findOwnedConfigRow(userId: string, providerName: string) {
 }
 
 /**
+ * A candidate uses exactly ONE runtime: a realtime agent OR the composed
+ * custom pipeline (ADR-006). Mixing capability rows is rejected at the
+ * service boundary, not just hidden in the UI.
+ */
+async function assertRuntimeExclusive(
+  userId: string,
+  capabilities: ProviderConfigInput["capabilities"],
+): Promise<void> {
+  const rows = await db.userProviderConfiguration.findMany({
+    where: { userId },
+    select: { capabilitiesJson: true },
+  });
+  const isRealtime = Boolean(capabilities.realtime);
+  const hasCustom = Boolean(
+    capabilities.llm || capabilities.asr || capabilities.tts || capabilities.scorer,
+  );
+  for (const row of rows) {
+    const existing = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+    const existingRealtime = Boolean(existing.realtime);
+    const existingCustom = Boolean(
+      existing.llm || existing.asr || existing.tts || existing.scorer,
+    );
+    if ((isRealtime && existingCustom) || (hasCustom && existingRealtime)) {
+      throw new ProviderConfigError(
+        "runtime_conflict",
+        "Choose one runtime: a realtime agent or custom providers — not both.",
+      );
+    }
+  }
+}
+
+/**
  * Creates a configuration row for the caller. An API key is mandatory on
  * create (BYOK everywhere, preset or custom); the credential starts
  * `unvalidated` and is proven by the capability probe (TT-20 probing half).
@@ -302,6 +336,19 @@ export async function createProviderConfiguration(
     );
   }
   const { normalizedBaseUrl } = validateProviderRules(parsed);
+
+  // Realtime models are admin-fixed: ignore any user-supplied model_id and
+  // reject providers without a verified model (FR-SETUP, ADR-006).
+  let capabilities;
+  try {
+    capabilities = applyRealtimeModelRules(parsed.capabilities, parsed.providerName);
+  } catch {
+    throw new ProviderConfigError(
+      "invalid_input",
+      "This realtime provider is not available for configuration.",
+    );
+  }
+  await assertRuntimeExclusive(parsedUser, capabilities);
 
   if (!parsed.apiKey) {
     throw new ProviderConfigError(
@@ -330,7 +377,7 @@ export async function createProviderConfiguration(
       // Uint8Array, and driver adapters deliver/expect raw byte views.
       encryptedApiKey: new TextEncoder().encode(envelope),
       encryptionKeyVersion,
-      capabilitiesJson: parsed.capabilities,
+      capabilitiesJson: capabilities,
       credentialStatus: "unvalidated",
     },
   });

@@ -235,7 +235,7 @@ is mandatory and the manual setup form is retired as the creation path.
 | `/dashboard/interview/agent` | **Implemented (2026-11-19, `577fbb0`).** Conversational agent → generated configuration review → auto-create; `POST /api/v1/interviews/agent` (`turn`/`create`) runs generation and session creation server-side with the configured LLM. Dashboard primary CTA now launches the agent. Runtime-aware (2026-11-20): with only a native realtime agent configured there is no pre-chat LLM — launch goes directly to the waiting room and the realtime agent gathers details live; with a custom LLM the text-agent flow runs; with neither, the page links to configuration. Scorer never gates launching | FR-SETUP-006, ADR-006 |
 | `/dashboard/interview/[sessionId]` | Re-layered: confirmation → waiting room → live room states; conversation becomes an overlay panel | FR-INTERVIEW-003/010, FR-SETUP-007 |
 | `/i/[token]` | **Implemented.** Invitation-link confirmation (token → one interview only), then `/i/[token]/waiting` (explicit device checks, local-only preview, explicit Join Call) and `/i/[token]/room` (two participant panels, AI states, independently openable conversation overlay). Owner receives the copyable link at creation; revoke/reissue via `POST /api/v1/interviews/[sessionId]/invitation`. When a `realtime` capability row exists, the room also offers a Gemini Live **WebSocket** session. A LiveKit **WebRTC** room (owner decision: LiveKit, free Build plan) is always available: token-scoped participant JWT (mic-only), explicit `aimis-interviewer` dispatch, Node agent worker with Gemini Live, and finalized transcripts persisted to the chronological record | FR-SETUP-006/007/008, FR-INTERVIEW-003 |
-| `/dashboard/configuration` | **New.** Dedicated AI configuration experience (distinct preset vs Custom modes; per-capability expandable sections ASR/LLM/TTS with provider chips; per-capability Custom OpenAI-compatible URL/key/model; model discovery + probe + readiness; independent scorer section) | FR-PROVIDER-001..009, ADR-028/029/030 |
+| `/dashboard/configuration` | **New.** Mode-first dedicated AI configuration: step 1 split container (fixed pre-configured realtime agents vs advanced custom providers); credentials only after a mode is chosen. Advanced mode has per-capability expandable sections with provider tags (monogram + name + `Custom`), saved providers collapsed, independent scorer section, model discovery + probe. Fixed realtime model IDs are admin-owned (§10.6) | FR-PROVIDER-001..009, ADR-028/029/030 |
 | `/dashboard/interview/new` | Retired as creation path (SetupForm superseded; may remain as a direct-create fallback only if the owner asks) | FR-SETUP-006 supersedes |
 | `/dashboard/history` | Unchanged plan; fills out with reports in M3 | FR-HISTORY |
 
@@ -288,7 +288,8 @@ at interview creation, not on this page.
   Option 2 per FR-PROVIDER-003 (the mockup crop does not show it; the approved
   requirement does).
 - The capability readiness strip (ASR/LLM/TTS/Scorer, honest per-capability
-  states) stays at the top of the page above both option cards.
+  states) originally stayed at the top of the page above both option cards;
+  it was removed in the 2026-11-20 rework (see 10.6).
 - Registry: `CAPABILITIES` gained `realtime`; the `openai` and `google` presets
   declare it (Gemini Live / OpenAI Realtime on their documented base URLs).
   `probe.ts` guards realtime per capability so native realtime rows never hit
@@ -304,3 +305,34 @@ at interview creation, not on this page.
   shape. Fallback order: live discovery → approved catalogue (pick list, never
   typing) → manual entry only for a custom endpoint with neither. Realtime
   cards are strict pick-only (both target providers expose list endpoints).
+
+### 10.6 Mode-first configuration rework (2026-11-20 owner mockup, implemented)
+
+The owner supplied a second mockup replacing 10.5. The configuration page is
+now **mode-first**: step 1 is a split container — left
+`Pre-configured Mode (Fixed Providers)` (fixed native realtime agents, their
+provider monograms and honest "Unavailable" markers), right
+`Advanced Mode (Custom Providers)` (independent ASR/LLM/TTS/scorer providers).
+Credentials are shown only after a mode is chosen. A saved configuration fixes
+the mode; "Change mode" is disabled until that configuration is deleted, so the
+two runtimes can never be mixed (ADR-006). The runtime is also enforced at the
+service boundary: `createProviderConfiguration` rejects a realtime row when
+custom capability rows exist and vice versa (`runtime_conflict`, HTTP 409).
+
+- **Fixed realtime models.** In pre-configured mode the candidate supplies only
+  a credential; the model ID is admin-fixed in `src/lib/providers/realtime-models.ts`.
+  Google uses `gemini-3.8-live-extended-thinking` (free tier, live-validated);
+  OpenAI uses `gpt-realtime` (documented, paid). ElevenLabs realtime is not
+  verified and Fish Audio realtime is paid-only, so both render as unavailable
+  rather than with invented IDs. `applyRealtimeModelRules()` overwrites any
+  user-supplied realtime model before persistence.
+- **Advanced mode provider tags.** Each capability's add-area shows a tag per
+  preset with its monogram at the left of the name, plus a `Custom` tag.
+  Selecting one greys out the remaining tags (`disabled`, 40% opacity); the
+  tags are independent per capability. A preset that already serves the
+  capability is filtered out of the tag list (saved providers collapse and are
+  never listed again). The phrase "Pre-configured provider" was removed from
+  row cards in favour of `Preset` / `Custom endpoint`.
+- **Removed chrome.** The dashboard capability-strip box and the configuration
+  page readiness-strip box are gone; configuration is only entered from the
+  Configuration page. Internal IDs (ADR/FR/TT) remain out of user-facing text.
