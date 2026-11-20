@@ -483,15 +483,18 @@ export async function resolveForOutboundCall(
   }
 
   // Deterministic when several enabled configurations serve the same
-  // capability: the oldest configuration wins (flagged for owner review —
-  // per-capability priority is not an approved requirement yet).
+  // capability: a validated connection wins over an unvalidated/dummy row,
+  // then the oldest wins within the same status. An unvalidated row must not
+  // shadow a connection the candidate has actually proved.
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser, isEnabled: true },
     orderBy: { createdAt: "asc" },
   });
-  const row = rows.find(
+  const serving = rows.filter(
     (candidate) => capability in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
   );
+  const row =
+    serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0];
   if (!row) {
     throw new ProviderConfigError(
       "not_found",

@@ -6,7 +6,9 @@ import {
   type InterviewSession,
 } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { ProviderConfigError, resolveForOutboundCall } from "@/lib/providers/config";
+import { listProviderConfigurations } from "@/lib/providers/config";
+import { getPresetAdapter } from "@/lib/providers/registry";
+import { selectRuntime } from "./runtime";
 import {
   createInvitationToken,
   hashInvitationToken,
@@ -62,7 +64,7 @@ export const INTERVIEWER_PROMPT_VERSION = "v0-typed-slice";
  * before an outbound call (ADR-0005, NFR-SEC-003).
  */
 export interface ProviderRouteSnapshot {
-  capability: "llm";
+  capability: "llm" | "realtime";
   providerName: string;
   providerType: string;
   baseUrl: string;
@@ -176,28 +178,45 @@ async function loadOwnedSession(
   return session;
 }
 
-async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot> {
-  try {
-    // The interviewer/question-generation capability (FR-INTERVIEW-002) —
-    // resolved at creation so a session always knows which route it was
-    // built against; the decrypted key never leaves resolveForOutboundCall.
-    const route = await resolveForOutboundCall(userId, "llm");
-    return {
-      capability: "llm",
-      providerName: route.providerName,
-      providerType: route.providerType,
-      baseUrl: route.baseUrl,
-      modelId: route.modelId,
-    };
-  } catch (error) {
-    if (error instanceof ProviderConfigError && error.code === "not_found") {
-      throw new InterviewError(
-        "provider_route_missing",
-        "Configure a provider with an LLM capability before starting an interview.",
-      );
-    }
-    throw error;
+/**
+ * Snapshots the ONE selected runtime (ADR-006): a native realtime agent or
+ * the custom LLM pipeline. No credential is decrypted here — the snapshot is
+ * display/identity only (ADR-0005).
+ */
+async function selectRouteSnapshot(
+  userId: string,
+): Promise<{ snapshot: ProviderRouteSnapshot; runtimeMode: RuntimeMode }> {
+  const runtime = selectRuntime(await listProviderConfigurations(userId));
+  if (!runtime.ready || !runtime.row) {
+    throw new InterviewError(
+      "provider_route_missing",
+      runtime.mode === "realtime"
+        ? "The realtime agent configuration is not usable yet."
+        : "Configure a realtime agent or an LLM provider before starting an interview.",
+    );
   }
+  const row = runtime.row;
+  const capability = runtime.mode === "realtime" ? "realtime" : "llm";
+  const baseUrl =
+    row.providerType === "custom"
+      ? row.baseUrl
+      : getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
+  if (!baseUrl) {
+    throw new InterviewError(
+      "provider_route_missing",
+      "The selected provider has no usable endpoint.",
+    );
+  }
+  return {
+    snapshot: {
+      capability,
+      providerName: row.providerName,
+      providerType: row.providerType,
+      baseUrl,
+      modelId: row.capabilities[capability]?.modelId ?? "",
+    },
+    runtimeMode: runtime.mode === "realtime" ? "preset_realtime" : "custom",
+  };
 }
 
 /**
@@ -232,7 +251,7 @@ export async function createInterviewSession(
     throw new InterviewError("invalid_input", "Select an active interview category.");
   }
 
-  const providerRouteSnapshot = await loadRouteSnapshot(userId);
+  const { snapshot: providerRouteSnapshot, runtimeMode } = await selectRouteSnapshot(userId);
 
   // FR-SETUP-007/008: the interview is born scheduled/ready, with a
   // revocable link whose raw capability is never stored (only its hash).
@@ -246,7 +265,7 @@ export async function createInterviewSession(
       categoryCodeSnapshot: category.categoryCode,
       categoryNameSnapshot: category.categoryName,
       evaluationMode: parsed.evaluationMode,
-      runtimeMode: parsed.runtimeMode,
+      runtimeMode,
       providerRouteSnapshot:
         providerRouteSnapshot as unknown as Prisma.InputJsonValue,
       interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,

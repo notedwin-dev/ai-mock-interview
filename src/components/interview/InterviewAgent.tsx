@@ -2,6 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { buildRealtimeLaunchInput } from "@/lib/interview/runtime";
 import { Check, Copy, Loader2, RotateCcw, Send } from "lucide-react";
 import type { AgentConfig } from "@/lib/interview/agent";
 
@@ -65,7 +67,14 @@ async function postAgent(body: unknown): Promise<{ ok: true; data: unknown } | {
   }
 }
 
-export function InterviewAgent() {
+interface InterviewAgentProps {
+  runtimeMode?: "realtime" | "custom" | "none";
+  categoryId?: string;
+}
+
+export function InterviewAgent({ runtimeMode, categoryId }: InterviewAgentProps) {
+  const router = useRouter();
+  const [strictness, setStrictness] = useState<"supportive" | "balanced" | "rigorous">("balanced");
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
   const [draft, setDraft] = useState("");
   const [result, setResult] = useState<AgentResult | null>(null);
@@ -131,6 +140,27 @@ export function InterviewAgent() {
     }
   }
 
+  async function launchRealtime() {
+    if (!categoryId || pending !== null) return;
+    setError(null);
+    setPending("create");
+    const response = await fetch("/api/v1/interviews", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildRealtimeLaunchInput(categoryId, strictness)),
+    });
+    setPending(null);
+    const body = (await response.json().catch(() => null)) as {
+      session?: { invitation?: { token?: string } };
+      error?: { message: string };
+    } | null;
+    if (!response.ok || !body?.session?.invitation?.token) {
+      setError(body?.error?.message ?? "The realtime interview could not be launched.");
+      return;
+    }
+    router.push(`/i/${body.session.invitation.token}/waiting`);
+  }
+
   function startOver() {
     setMessages([WELCOME]);
     setDraft("");
@@ -140,6 +170,61 @@ export function InterviewAgent() {
   }
 
   const atLimit = messages.length >= MAX_MESSAGES;
+
+  // ADR-006: one runtime per interview. With only a native realtime agent
+  // configured there is no pre-chat LLM to converse with — the agent gathers
+  // the requirements live in the room, so launch directly into the waiting
+  // room. No ASR/LLM/TTS rows are required for this path.
+  if (runtimeMode === "realtime") {
+    return (
+      <div className="flex flex-col gap-4">
+        <section className="rounded-2xl border border-line bg-surface p-5">
+          <h2 className="font-display text-lg font-semibold text-ink">Realtime interview agent</h2>
+          <p className="mt-2 text-sm text-ink-muted">
+            Your native realtime agent gathers the purpose, role and job description
+            conversationally in the room. No separate ASR, LLM or TTS setup is needed.
+          </p>
+          <label className="mt-4 flex flex-col gap-1.5">
+            <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">Evaluation strictness</span>
+            <select
+              value={strictness}
+              onChange={(event) => setStrictness(event.target.value as typeof strictness)}
+              className={FIELD_CLASS}
+              aria-label="Evaluation strictness"
+            >
+              <option value="supportive">Supportive</option>
+              <option value="balanced">Balanced</option>
+              <option value="rigorous">Rigorous</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => void launchRealtime()}
+            disabled={pending !== null || !categoryId}
+            className={PRIMARY_PILL}
+          >
+            {pending !== null ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+            Launch realtime interview
+          </button>
+          {!categoryId ? <p className="mt-2 text-xs text-amber-300">No active interview category is available.</p> : null}
+          {error ? <p className="mt-2 text-sm text-red-400" role="alert">{error}</p> : null}
+        </section>
+      </div>
+    );
+  }
+
+  if (runtimeMode === "none") {
+    return (
+      <section className="rounded-2xl border border-line bg-surface p-5 text-sm text-ink-muted">
+        No interview runtime is configured. Set up a pre-configured realtime agent
+        or a custom LLM provider in{" "}
+        <Link href="/dashboard/configuration" className="text-emerald-400 underline underline-offset-4">
+          AI configuration
+        </Link>
+        .
+      </section>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-5">

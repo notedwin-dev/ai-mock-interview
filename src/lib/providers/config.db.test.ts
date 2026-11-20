@@ -264,6 +264,28 @@ d("provider configuration service (integration)", () => {
     expect(resolved.apiKey).toBe("sk-plaintext-secret");
   });
 
+  it("prefers a validated route over an older unvalidated row for outbound calls", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      ...customInput,
+      providerName: "old-dummy",
+      capabilities: { llm: { modelId: "dummy-model" } },
+    });
+    const validated = await createProviderConfiguration(userId, {
+      ...customInput,
+      providerName: "valid-provider",
+      capabilities: { llm: { modelId: "free-model" } },
+    });
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: validated.userProviderConfigurationId },
+      data: { credentialStatus: "valid" },
+    });
+
+    const resolved = await resolveForOutboundCall(userId, "llm");
+    expect(resolved.providerName).toBe("valid-provider");
+    expect(resolved.modelId).toBe("free-model");
+  });
+
   it("refuses to re-enable a configuration whose probe marked it invalid", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);
