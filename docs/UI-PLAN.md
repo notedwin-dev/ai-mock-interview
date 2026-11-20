@@ -330,9 +330,14 @@ custom capability rows exist and vice versa (`runtime_conflict`, HTTP 409).
   preset with its monogram at the left of the name, plus a `Custom` tag.
   Selecting one greys out the remaining tags (`disabled`, 40% opacity); the
   tags are independent per capability. A preset that already serves the
-  capability is filtered out of the tag list (saved providers collapse and are
-  never listed again). The phrase "Pre-configured provider" was removed from
-  row cards in favour of `Preset` / `Custom endpoint`.
+  capability is filtered out of that capability's tag list (saved providers
+  collapse per capability). The phrase "Pre-configured provider" was removed
+  from row cards in favour of `Preset` / `Custom endpoint`.
+- **Exclusivity is runtime-level only.** The same provider may be configured
+  more than once for DIFFERENT capabilities (e.g. Google for ASR and Google
+  for LLM), each with its own credential, model and status. Only a duplicate
+  for the *same* capability is rejected (`config_exists`, HTTP 409). Row
+  operations are pinned with `?configId=<row id>` so namesakes never collide.
 - **Removed chrome.** The dashboard capability-strip box and the configuration
   page readiness-strip box are gone; configuration is only entered from the
   Configuration page. Internal IDs (ADR/FR/TT) remain out of user-facing text.
