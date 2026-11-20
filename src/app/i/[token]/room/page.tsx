@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { InterviewRoom } from "@/components/interview/InterviewRoom";
 import { LiveVoice } from "@/components/interview/LiveVoice";
+import { WebRTCRoom } from "@/components/interview/WebRTCRoom";
 import { resolveInvitation } from "@/lib/interview/invitations";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
@@ -29,6 +30,7 @@ export default async function RoomPage(
 
   return (
     <main className="mx-auto w-full max-w-[72rem] flex-1 px-4 py-4 lg:px-8">
+      <WebRTCRoom token={token} />
       {realtimeModelId ? <LiveVoice token={token} modelId={realtimeModelId} /> : null}
       <InterviewRoom token={token} interview={interview} />
     </main>

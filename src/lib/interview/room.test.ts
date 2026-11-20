@@ -56,6 +56,17 @@ function fakeStore(initial: RoomContext = context) {
     async openUnit() { const id = `unit-${++unitSeq}`; units.push({ id, status: "open" }); return id; },
     async closeUnit(id) { const unit = units.find((u) => u.id === id); if (unit) unit.status = "closed"; },
     async complete() { current.status = "completed"; },
+    async appendRealtimeMessage(sessionId, speaker, contentText, clientId) {
+      const entry = {
+        sequenceNumber: ++seq,
+        speakerType: speaker,
+        messageKind: speaker === "candidate" ? "candidate_response" : "primary_question",
+        contentText: `${clientId}:${contentText}`,
+        assessmentUnitId: null,
+      };
+      messages.push(entry);
+      return entry;
+    },
   };
   return { store, messages, units, state: () => current };
 }
