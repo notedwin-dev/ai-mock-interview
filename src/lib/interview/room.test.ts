@@ -52,6 +52,20 @@ function fakeStore(initial: RoomContext = context) {
       messages.push(entry);
       return entry;
     },
+    async appendInterviewerWithNewUnit(_sessionId, contentText) {
+      units.filter((u) => u.status === "open").forEach((u) => { u.status = "closed"; });
+      const id = `unit-${++unitSeq}`;
+      units.push({ id, status: "open" });
+      const entry = {
+        sequenceNumber: ++seq,
+        speakerType: "interviewer",
+        messageKind: "primary_question",
+        contentText,
+        assessmentUnitId: id,
+      };
+      messages.push(entry);
+      return entry;
+    },
     async activeUnit() { return units.find((u) => u.status === "open")?.id ?? null; },
     async openUnit() {
       units.filter((u) => u.status === "open").forEach((u) => { u.status = "closed"; });

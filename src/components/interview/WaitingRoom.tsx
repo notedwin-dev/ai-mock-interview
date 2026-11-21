@@ -24,6 +24,8 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraRequestRef = useRef(0);
+  const mountedRef = useRef(true);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -52,6 +54,8 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   }, [loadDevices]);
 
   useEffect(() => () => {
+    mountedRef.current = false;
+    cameraRequestRef.current += 1;
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
@@ -63,6 +67,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   }
 
   async function startCamera(deviceId = cameraId) {
+    const request = ++cameraRequestRef.current;
     setBusy(true);
     setNotice(null);
     try {
@@ -70,14 +75,22 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
       const stream = await navigator.mediaDevices.getUserMedia({
         video: deviceId ? { deviceId: { exact: deviceId } } : true,
       });
+      // A newer request or an unmount superseded this one: stop its tracks so
+      // the camera light does not stay on after navigating away.
+      if (request !== cameraRequestRef.current || !mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       cameraStreamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
       setCameraOn(true);
       loadDevices();
     } catch {
-      setNotice("Camera access was not granted. You can still join without a preview.");
+      if (request === cameraRequestRef.current && mountedRef.current) {
+        setNotice("Camera access was not granted. You can still join without a preview.");
+      }
     } finally {
-      setBusy(false);
+      if (request === cameraRequestRef.current && mountedRef.current) setBusy(false);
     }
   }
 
@@ -94,7 +107,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
 
   function changeCamera(deviceId: string) {
     setCameraId(deviceId);
-    if (cameraOn) void startCamera(deviceId);
+    if (cameraOn && !busy) void startCamera(deviceId);
   }
 
   function join() {
@@ -146,7 +159,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 type="button"
                 onClick={toggleMute}
                 title={muted ? "Unmute" : "Mute"}
-                aria-label={muted ? "Unmute" : "Mute"}
+                aria-label="Microphone"
                 aria-pressed={muted}
                 className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors ${
                   muted ? "bg-rose-200 text-rose-900" : "bg-white/90 text-neutral-900 hover:bg-white"
@@ -158,7 +171,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 onClick={toggleCamera}
                 disabled={busy}
                 title={cameraOn ? "Turn camera off" : "Turn camera on"}
-                aria-label={cameraOn ? "Turn camera off" : "Turn camera on"}
+                aria-label="Camera"
                 aria-pressed={cameraOn}
                 className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:opacity-50 ${
                   cameraOn ? "bg-white/90 text-neutral-900 hover:bg-white" : "bg-rose-200 text-rose-900"
@@ -242,7 +255,11 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             Your interview begins when you join. Introduce yourself in the room
             to start the conversation.
           </p>
-          <button type="button" onClick={join} className={`${PRIMARY} w-full justify-center`}>
+          <button
+            type="button"
+            onClick={join}
+            disabled={busy}
+            className={`${PRIMARY} w-full justify-center`}>
             Join now
           </button>
           <Link

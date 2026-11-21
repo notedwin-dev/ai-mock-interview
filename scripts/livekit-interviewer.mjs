@@ -68,6 +68,7 @@ export default defineAgent({
       const base = process.env.APP_URL || "http://localhost:3000";
       const url = `${base}/api/v1/interviews/invitations/${encodeURIComponent(meta.inviteToken)}/realtime/transcript`;
       queue = queue.then(async () => {
+        let status = "network_error";
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const response = await fetch(url, {
@@ -75,11 +76,15 @@ export default defineAgent({
               headers: { "content-type": "application/json" },
               body: JSON.stringify(body),
             });
+            status = String(response.status);
             if (response.ok) return;
           } catch {
             // Network blip: retry once with the same client id.
           }
         }
+        // Never log transcript text (NFR-PRIV-006): the id and status are enough
+        // to identify a line that the server did not persist.
+        console.error(`transcript persist failed clientId=${clientId} status=${status}`);
       });
       return queue;
     };
