@@ -5,7 +5,10 @@ import { getLiveKitConfig } from "@/lib/livekit/env";
 import { mintParticipantToken } from "./livekit-token";
 import { dispatchGeneratorAgent } from "./livekit-dispatch";
 import { createInterviewFromAgentConfig } from "./agent";
-import { mapAnswersToConfig } from "./generation-contract.mjs";
+import {
+  mapAnswersToConfig,
+  type MappedGenerationConfig,
+} from "./generation-contract.mjs";
 
 /**
  * Voice-driven interview generation. The browser talks to a LiveKit room
@@ -37,6 +40,7 @@ export const generationAnswersSchema = z
     level: z.string().trim().min(1).max(120),
     techstack: z.string().trim().min(1).max(1000),
     amount: z.string().trim().min(1).max(40),
+    strictness: z.string().trim().min(1).max(20),
   })
   .strict();
 
@@ -116,6 +120,7 @@ export async function getGeneration(userId: string, id: string) {
     id: record.id,
     status: record.status,
     caption: (record.captionJson as unknown as Caption | null) ?? null,
+    config: (record.configJson as unknown as MappedGenerationConfig | null) ?? null,
     invitationPath: record.invitationPath,
   };
 }
@@ -140,7 +145,47 @@ export async function completeGeneration(id: string, workerToken: string, input:
   });
   await db.interviewGeneration.update({
     where: { id },
-    data: { status: "completed", configJson: config as unknown as never, invitationPath: session.invitation.path },
+    data: {
+      status: "completed",
+      configJson: config as unknown as never,
+      sessionId: session.sessionId,
+      invitationPath: session.invitation.path,
+    },
   });
   return { invitationPath: session.invitation.path };
+}
+
+/**
+ * Applies the candidate's confirmed, structured configuration to the session
+ * created by the planner. The model produces a zod-validated object; the UI
+ * never posts free text.
+ */
+export async function confirmGeneration(
+  userId: string,
+  id: string,
+  input: unknown,
+): Promise<{ invitationPath: string }> {
+  const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
+  if (!record) throw new GenerationError("not_found", "Generation session not found.");
+  if (record.status !== "completed" || !record.sessionId) {
+    throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
+  }
+  const { agentConfigSchema } = await import("./agent");
+  const config = agentConfigSchema.parse(input);
+  await db.interviewSession.update({
+    where: { sessionId: record.sessionId },
+    data: {
+      jobRole: config.jobRole,
+      jobDescription: config.jobDescription || null,
+      experienceLevel: config.experienceLevel ?? null,
+      techStack: config.techStack ? (config.techStack as unknown as never) : undefined,
+      questionCount: config.questionCount ?? null,
+      evaluationMode: config.strictness,
+    },
+  });
+  await db.interviewGeneration.update({
+    where: { id },
+    data: { configJson: config as unknown as never, status: "confirmed" },
+  });
+  return { invitationPath: record.invitationPath! };
 }

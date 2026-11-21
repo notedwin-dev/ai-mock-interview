@@ -17,9 +17,9 @@ const REQUEST_TIME_PAGES = [
   "src/app/dashboard/interview/new/page.tsx",
   "src/app/dashboard/interview/[sessionId]/page.tsx",
   "src/app/dashboard/interview/agent/page.tsx",
-  "src/app/i/[token]/page.tsx",
-  "src/app/i/[token]/waiting/page.tsx",
-  "src/app/i/[token]/room/page.tsx",
+  "src/app/interview/[token]/page.tsx",
+  "src/app/interview/[token]/waiting/page.tsx",
+  "src/app/interview/[token]/room/page.tsx",
 ];
 
 describe("request-time rendering contract", () => {

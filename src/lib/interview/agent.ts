@@ -26,6 +26,9 @@ export const agentConfigSchema = z
     purpose: z.string().trim().min(1).max(500),
     jobRole: z.string().trim().min(1).max(150),
     jobDescription: z.string().trim().max(8000).default(""),
+    experienceLevel: z.string().trim().max(120).optional(),
+    techStack: z.array(z.string().trim().min(1).max(80)).max(40).optional(),
+    questionCount: z.number().int().min(1).max(50).optional(),
     strictness: z.enum(AGENT_STRICTNESS),
     category: z.enum(AGENT_CATEGORIES),
   })
@@ -212,7 +215,10 @@ export async function createInterviewFromAgentConfig(
   // runtime uses the custom pipeline (native realtime remains a later path).
   return createSession(userId, {
     jobRole: parsed.config.jobRole,
-    jobDescription: parsed.config.jobDescription,
+    jobDescription: parsed.config.jobDescription || undefined,
+    experienceLevel: parsed.config.experienceLevel,
+    techStack: parsed.config.techStack,
+    questionCount: parsed.config.questionCount,
     categoryId: category.categoryId,
     evaluationMode: parsed.config.strictness,
     runtimeMode: "custom",

@@ -2,8 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Mic, MicOff, PhoneOff, RotateCcw } from "lucide-react";
+import { Loader2, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
+import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
+import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 
 /**
@@ -13,15 +15,25 @@ import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
  */
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
 
-// One generation per page load, even across React Strict Mode's double-invoked
-// effects in development. A ref would be reset by the remount; a module flag is
-// the reliable one-shot guard here.
+// One generation per page load, including Strict Mode's double effect. Reset
+// shortly after a real unmount so revisiting the page starts a fresh session.
 let generationStartedThisLoad = false;
+
+interface GenerationConfig {
+  jobRole: string;
+  jobDescription: string;
+  experienceLevel?: string;
+  techStack?: string[];
+  questionCount?: number;
+  strictness: "supportive" | "balanced" | "rigorous";
+  category: "general" | "technical" | "behavioral";
+}
 
 interface GenerationState {
   id: string;
   status: string;
   caption: { speaker: "agent" | "candidate"; text: string } | null;
+  config: GenerationConfig | null;
   invitationPath: string | null;
 }
 
@@ -125,6 +137,13 @@ export function VoiceGenerationRoom() {
       }
     }
     queueMicrotask(() => void start());
+    return () => {
+      void roomRef.current?.disconnect();
+      roomRef.current = null;
+      // Strict Mode's immediate remount happens well within 250ms; a genuine
+      // navigation then clears the guard for the next planning session.
+      setTimeout(() => { generationStartedThisLoad = false; }, 250);
+    };
   }, []);
 
   useEffect(() => {
@@ -152,7 +171,6 @@ export function VoiceGenerationRoom() {
         if (data.status === "completed" && data.invitationPath) {
           setStatus("completed");
           void roomRef.current?.disconnect();
-          router.push(`${data.invitationPath}/waiting`);
         }
       } catch {
         // Transient poll failure: the next tick retries.
@@ -176,6 +194,26 @@ export function VoiceGenerationRoom() {
     } catch {
       setMuted(true);
     }
+  }
+
+  async function confirm(config: ConfirmableConfig) {
+    if (!generationId) return;
+    const response = await fetch(
+      `/api/v1/interviews/generation/${encodeURIComponent(generationId)}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      },
+    );
+    const body = (await response.json().catch(() => null)) as
+      | { invitationPath?: string; error?: { message?: string } }
+      | null;
+    if (!response.ok || !body?.invitationPath) {
+      throw new Error(body?.error?.message ?? "Could not confirm the interview.");
+    }
+    generationStartedThisLoad = false;
+    router.push(`${body.invitationPath}/waiting`);
   }
 
   function repeatLast() {
@@ -220,54 +258,27 @@ export function VoiceGenerationRoom() {
         </button>
       </section>
 
-      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
-        <section aria-label="AI planner" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span className="relative flex h-20 w-20 items-center justify-center">
-            {isAgentSpeaking ? (
-              <span aria-hidden className="absolute inset-0 animate-ping rounded-full border-2 border-emerald-400/70" />
-            ) : null}
-            <span
-              aria-hidden
-              className={`relative flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isAgentSpeaking ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
-              AI
-            </span>
-          </span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
-          <p className="mt-1 text-xs text-ink-muted">
-            {isAgentSpeaking ? "Speaking" : status === "connected" ? "Listening" : "Not connected"}
-          </p>
-        </section>
-        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span className="relative flex h-20 w-20 items-center justify-center">
-            {isUserSpeaking && !muted ? (
-              <span aria-hidden className="absolute inset-0 animate-ping rounded-full border-2 border-emerald-400/70" />
-            ) : null}
-            <span
-              aria-hidden
-              className={`relative flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isUserSpeaking && !muted ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
-              Y
-            </span>
-          </span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">
-            {muted ? "Microphone muted" : isUserSpeaking ? "Speaking" : "Microphone ready"}
-          </p>
-          <button type="button" onClick={() => void toggleMute()} aria-label="Microphone" aria-pressed={muted} className="mt-4 inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft">
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute" : "Mute"}
-          </button>
-        </section>
-      </div>
-
-      <div className="rounded-2xl border border-line bg-surface px-5 py-4 text-center text-sm text-ink-soft" aria-live="polite">
-        {caption}
-      </div>
-      <div className="flex justify-center gap-2">
-        <button type="button" onClick={repeatLast} className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-5 text-sm text-ink-soft">
-          {status === "starting" || status === "connecting" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RotateCcw className="h-4 w-4" aria-hidden />}
-          Repeat
-        </button>
-      </div>
+      {status === "completed" && generation?.config ? (
+        <GenerationConfirmation config={generation.config} onConfirm={confirm} />
+      ) : (
+        <>
+          <VoiceRoomPanels
+            isAgentSpeaking={isAgentSpeaking}
+            isUserSpeaking={isUserSpeaking}
+            muted={muted}
+            caption={caption}
+            onToggleMute={() => void toggleMute()}
+            agentTitle="AI Interviewer"
+            agentState={isAgentSpeaking ? "Speaking" : status === "connected" ? "Listening" : "Not connected"}
+          />
+          <div className="flex justify-center gap-2">
+            <button type="button" onClick={repeatLast} className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-5 text-sm text-ink-soft">
+              {status === "starting" || status === "connecting" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RotateCcw className="h-4 w-4" aria-hidden />}
+              Repeat
+            </button>
+          </div>
+        </>
+      )}
       <div ref={audioRef} aria-hidden />
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
     </div>

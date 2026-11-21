@@ -148,7 +148,7 @@ export function createDefaultRoomStore(): RoomStore {
   return {
     async context(token): Promise<RoomContext | null> {
       if (!isInvitationToken(token)) return null;
-      return db.interviewSession.findFirst({
+      const session = await db.interviewSession.findFirst({
         where: {
           invitationTokenHash: hashInvitationToken(token),
           invitationRevokedAt: null,
@@ -158,10 +158,20 @@ export function createDefaultRoomStore(): RoomStore {
           userId: true,
           jobRole: true,
           jobDescription: true,
+          experienceLevel: true,
+          techStack: true,
+          questionCount: true,
           evaluationMode: true,
           status: true,
         },
       });
+      if (!session) return null;
+      return {
+        ...session,
+        techStack: Array.isArray(session.techStack)
+          ? session.techStack.filter((value): value is string => typeof value === "string")
+          : [],
+      };
     },
 
     async messages(sessionId) {

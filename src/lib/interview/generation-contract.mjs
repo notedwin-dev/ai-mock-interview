@@ -28,6 +28,11 @@ export const GENERATION_FIELDS = [
     description: "How many questions would you like me to prepare for you?",
     required: true,
   },
+  {
+    name: "strictness",
+    description: "How strict should the feedback be: Supportive, Balanced or Rigorous?",
+    required: true,
+  },
 ];
 
 /** JSON schema for the realtime model's submit tool — generated from the fields. */
@@ -62,12 +67,13 @@ export function buildInstructions(userName) {
   return [
     `You are the AIMIS voice interview planner speaking with ${userName || "the candidate"}.`,
     `Start the call by saying exactly: ${greeting(userName)}`,
-    "Your ONLY job is to collect five details and generate an interview. You are NOT conducting the interview itself. Do not ask interview questions, do not test the candidate, and do not give feedback.",
-    "Ask the following five questions IN ORDER, exactly one question at a time. Wait for the candidate's answer before asking the next one. Never skip a question, never reorder them, and never ask extra questions.",
+    "Your ONLY job is to collect six details and generate an interview. You are NOT conducting the interview itself. Do not ask interview questions, do not test the candidate, and do not give feedback.",
+    "Ask the following six questions IN ORDER, exactly one question at a time. Wait for the candidate's answer before asking the next one. Never skip a question, never reorder them, and never ask extra questions.",
     questions,
     "For the type, accept technical, behavioral or mixed. For the amount, accept a number.",
+    "For strictness, accept exactly one of Supportive, Balanced or Rigorous.",
     "Briefly acknowledge each answer, then ask the next question on the list.",
-    "When all five answers are known, call the submit_interview_config tool with the values you collected. Do not ask anything else.",
+    "When all six answers are known, call the submit_interview_config tool with the values you collected. Do not ask anything else.",
     `After the tool succeeds, say exactly: ${closingLine()}`,
     "Keep every response short and natural for voice. Never repeat the candidate's answer back to them.",
   ].join(" ");
@@ -87,15 +93,19 @@ export function mapAnswersToConfig(answers) {
   const level = String(answers.level ?? "").trim();
   const techstack = String(answers.techstack ?? "").trim();
   const amount = String(answers.amount ?? "").trim();
+  const requestedStrictness = String(answers.strictness ?? "").trim().toLowerCase();
+  const strictness = ["supportive", "balanced", "rigorous"].includes(requestedStrictness)
+    ? requestedStrictness
+    : "balanced";
+  const count = Number.parseInt(amount, 10);
   return {
     purpose: `Prepare a ${type || "mixed"} interview for ${role}.`,
     jobRole: role,
-    jobDescription: [
-      `Experience level: ${level}.`,
-      `Tech stack: ${techstack}.`,
-      `Number of questions: ${amount}.`,
-    ].join(" "),
-    strictness: "balanced",
+    jobDescription: "",
+    experienceLevel: level,
+    techStack: techstack.split(/[,\n]+/).map((part) => part.trim()).filter(Boolean),
+    questionCount: Number.isFinite(count) && count > 0 ? count : undefined,
+    strictness,
     category: CATEGORY_BY_TYPE[type] ?? "general",
   };
 }

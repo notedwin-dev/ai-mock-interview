@@ -133,7 +133,7 @@ d("interview session service (integration)", () => {
     const session = await createInterviewSession(userId, setupInput(categoryId));
     expect(session.status).toBe("scheduled");
     // Each scheduled interview carries a ready-to-share, working invitation.
-    expect(session.invitation.path).toBe(`/i/${session.invitation.token}`);
+    expect(session.invitation.path).toBe(`/interview/${session.invitation.token}`);
     const resolved = await resolveInvitation(session.invitation.token);
     expect(resolved).toMatchObject({ sessionId: session.sessionId, status: "scheduled" });
     const storedRow = await db.interviewSession.findUniqueOrThrow({ where: { sessionId: session.sessionId } });

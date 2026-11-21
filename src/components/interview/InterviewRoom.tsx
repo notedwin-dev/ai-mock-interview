@@ -295,6 +295,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         <div className="flex justify-center">
           <EndInterviewButton
             token={token}
+            feedbackHref={`/dashboard/interview/${interview.sessionId}/feedback`}
             onEnded={() => {
               setEnded(true);
               setOverlayOpen(false);
