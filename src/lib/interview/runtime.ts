@@ -73,7 +73,9 @@ export function selectRuntime(
   if (realtime) {
     return {
       mode: "realtime",
-      ready: realtime.credentialStatus !== "invalid",
+      // Owner decision: a realtime interview only launches on a credential
+      // that has actually passed its capability probe.
+      ready: realtime.credentialStatus === "valid",
       servingProvider: realtime.providerName,
       requiredCapabilities: [],
       row: realtime,

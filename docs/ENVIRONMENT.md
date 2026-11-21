@@ -30,6 +30,13 @@ missing.
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | WebRTC room (server) | LiveKit project credentials used to mint short-lived participant tokens. **Never** send the secret to the browser or put it in a `NEXT_PUBLIC_` variable |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | LiveKit agent / free-tier smokes | Owner-supplied Gemini key (free tier). Used by the LiveKit Agents Gemini Live realtime model and by the one-off free-tier evidence scripts; never printed |
 
+For the LiveKit interview runtime, configure a webhook in the LiveKit project
+pointing at `https://<your-host>/api/v1/webhooks/livekit` for `room_started` and
+`room_finished`. The endpoint verifies signatures with `WebhookReceiver` using
+the same `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`; no extra secret is needed. The
+room name is the interview session id, so these events drive the
+`scheduled → active → completed` lifecycle with no client-side calls.
+
 ## Planned (add with their milestone — do not enable early)
 
 | Variable | Planned | Purpose |

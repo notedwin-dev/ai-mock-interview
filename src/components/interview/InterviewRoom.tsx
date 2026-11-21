@@ -3,13 +3,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
+import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
 /**
  * Live interview room (FR-INTERVIEW-003/004, TT-8 re-layer): two participant
  * panels with AI states and a chronological transcript in an independently
  * openable OVERLAY (never a sidebar). All turns go through the token-scoped
- * API; the camera is never an AI input (ADR-005).
+ * API; the camera is never an AI input (ADR-005). Microphone audio is sent to
+ * the configured ASR provider only after the candidate presses Record answer.
  */
 const PRIMARY =
   "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
@@ -72,14 +74,18 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       }
       setMessages(body.messages ?? []);
       // Voice playback is best-effort: the transcript is the source of truth.
+      let audioPlaying = false;
       if (body.audioBase64) {
         try {
-          void new Audio(`data:audio/mp3;base64,${body.audioBase64}`).play().catch(() => undefined);
+          const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
+          audio.onended = () => setState("listening");
+          void audio.play().catch(() => undefined);
+          audioPlaying = true;
         } catch {
           // Browser blocked autoplay — the text reply is still visible.
         }
       }
-      setState(body.endCall ? "listening" : "speaking");
+      setState(body.endCall || !audioPlaying ? "listening" : "speaking");
       if (body.endCall) setEnded(true);
     } catch {
       setError("The request could not reach the server.");
@@ -123,10 +129,17 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
+  function toggleMute() {
+    const next = !muted;
+    setMuted(next);
+    streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
+  }
+
   async function startRecording() {
     setVoiceNotice(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
       const chunks: Blob[] = [];
@@ -155,7 +168,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface px-5 py-3">
         <div>
           <h1 className="font-display text-lg font-semibold text-ink">Mock interview · {interview.jobRole}</h1>
-          <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {interview.evaluationMode} mode</p>
+          <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {evaluationModeLabel(interview.evaluationMode)} mode</p>
         </div>
         <button type="button" onClick={() => setOverlayOpen((open) => !open)} className={GHOST}>
           {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
@@ -180,18 +193,24 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
           <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "microphone muted" : "microphone ready"}</p>
-          <button type="button" onClick={() => setMuted((value) => !value)} className={`${GHOST} mt-4`}>
+          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
+          <button
+            type="button"
+            onClick={toggleMute}
+            aria-pressed={muted}
+            className={`${GHOST} mt-4`}>
             {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
             {muted ? "Unmute" : "Mute"}
           </button>
-          <p className="mt-3 text-xs text-ink-muted">Camera and microphone are never used as AI input.</p>
+          <p className="mt-3 max-w-xs text-xs text-ink-muted">
+            Your camera is never used as AI input. Microphone audio is transcribed only when you press Record answer.
+          </p>
         </section>
       </div>
 
       {ended ? (
         <div className="rounded-2xl border border-emerald-400/40 bg-surface p-5 text-sm text-ink">
-          The interview has ended. Your transcript and report will be available in your history.
+          The interview has ended. Your transcript has been saved.
         </div>
       ) : (
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">

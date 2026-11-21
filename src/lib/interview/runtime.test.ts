@@ -87,6 +87,15 @@ describe("selectRuntime (ADR-006 mutually exclusive runtimes)", () => {
     });
   });
 
+  it("does not launch a realtime session on an unvalidated credential", () => {
+    const result = selectRuntime([
+      row("google", { realtime: { modelId: "gemini-3.8-live-extended-thinking" } }, {
+        credentialStatus: "unvalidated",
+      }),
+    ]);
+    expect(result).toMatchObject({ mode: "realtime", ready: false });
+  });
+
   it("reports no runtime when the active mode has no configuration", () => {
     const rows = [row("google", { realtime: { modelId: "gemini-3.8-live-extended-thinking" } })];
     expect(selectRuntime(rows, "custom")).toMatchObject({ mode: "none", ready: false });

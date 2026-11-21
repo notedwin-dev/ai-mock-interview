@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2, Mic, MicOff, Video, VideoOff } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
+import { evaluationModeLabel } from "@/lib/interview/labels";
 
 /**
  * Pre-call waiting room (FR-SETUP-007; TT-8 re-layer). Camera and microphone
@@ -91,7 +92,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
         </h1>
         <p className="mt-2 text-sm text-ink-muted">
           {interview.jobRole} · {interview.categoryNameSnapshot} ·{' '}
-          {interview.evaluationMode} mode
+          {evaluationModeLabel(interview.evaluationMode)} mode
         </p>
       </div>
 
@@ -212,8 +213,8 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             Ready to join?
           </h2>
           <p className="text-sm text-ink-muted">
-            Your interview begins when you join. The AI will greet you and
-            guide the session from there.
+            Your interview begins when you join. Introduce yourself in the room
+            to start the conversation.
           </p>
           <button
             type="button"

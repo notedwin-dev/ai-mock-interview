@@ -1,15 +1,17 @@
 import { notFound } from "next/navigation";
 import { InterviewRoom } from "@/components/interview/InterviewRoom";
-import { LiveVoice } from "@/components/interview/LiveVoice";
 import { WebRTCRoom } from "@/components/interview/WebRTCRoom";
 import { resolveInvitation } from "@/lib/interview/invitations";
-import { createDefaultRoomStore } from "@/lib/interview/room-store";
-import { resolveForOutboundCall } from "@/lib/providers/config";
 
 // Token lookup is request-specific; render per request so the stream settles.
 export const instant = false;
 
-/** Live interview room entered only through a valid invitation link. */
+/**
+ * Live interview room entered only through a valid invitation link.
+ * ADR-006: a session runs on exactly ONE runtime, so exactly one room UI is
+ * rendered — the LiveKit WebRTC room for a realtime session, the typed agent
+ * room for a custom-pipeline session. Never stack competing mic/transport UIs.
+ */
 export default async function RoomPage(
   props: PageProps<"/i/[token]/room">,
 ) {
@@ -17,22 +19,15 @@ export default async function RoomPage(
   const interview = await resolveInvitation(token);
   if (!interview || (interview.status !== "scheduled" && interview.status !== "active")) notFound();
 
-  let realtimeModelId: string | null = null;
-  try {
-    const context = await createDefaultRoomStore().context(token);
-    if (context) {
-      const route = await resolveForOutboundCall(context.userId, "realtime");
-      realtimeModelId = route.modelId;
-    }
-  } catch {
-    // Optional runtime: typed/voice turns remain available without realtime.
-  }
+  const isRealtime = interview.runtimeMode === "preset_realtime";
 
   return (
     <main className="mx-auto w-full max-w-[72rem] flex-1 px-4 py-4 lg:px-8">
-      <WebRTCRoom token={token} />
-      {realtimeModelId ? <LiveVoice token={token} modelId={realtimeModelId} /> : null}
-      <InterviewRoom token={token} interview={interview} />
+      {isRealtime ? (
+        <WebRTCRoom token={token} />
+      ) : (
+        <InterviewRoom token={token} interview={interview} />
+      )}
     </main>
   );
 }

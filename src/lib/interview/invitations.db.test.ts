@@ -85,6 +85,7 @@ d("invitation links (TT-21)", () => {
       jobDescription: "Design APIs",
       categoryNameSnapshot: "General",
       evaluationMode: "balanced",
+      runtimeMode: "custom",
       status: "scheduled",
     });
     expect(await resolveInvitation(createToken())).toBeNull(); // unknown link

@@ -460,17 +460,31 @@ export async function updateProviderConfiguration(
 
   if (parsed.capabilities !== undefined) {
     const nextType = row.providerType as ProviderType;
+    // Admin-fixed realtime models apply on EVERY write, not just create:
+    // a PATCH must not be able to smuggle in an arbitrary model_id.
+    let capabilities: CapabilitiesJson;
+    try {
+      capabilities = applyRealtimeModelRules(
+        parsed.capabilities,
+        row.providerName,
+      ) as CapabilitiesJson;
+    } catch {
+      throw new ProviderConfigError(
+        "invalid_input",
+        "This realtime provider is not available for configuration.",
+      );
+    }
     const rules = validateProviderRules({
       providerType: nextType,
       providerName: row.providerName,
       baseUrl: nextType === "custom" ? (parsed.baseUrl ?? row.baseUrl ?? undefined) : undefined,
-      capabilities: parsed.capabilities,
+      capabilities,
     });
     if (nextType === "custom" && parsed.baseUrl !== undefined) {
       data.baseUrl = rules.normalizedBaseUrl;
     }
-    if (stableStringify(currentCapabilities) !== stableStringify(parsed.capabilities)) {
-      data.capabilitiesJson = parsed.capabilities;
+    if (stableStringify(currentCapabilities) !== stableStringify(capabilities)) {
+      data.capabilitiesJson = capabilities;
       materialChange = true;
     }
   } else if (parsed.baseUrl !== undefined) {
@@ -577,8 +591,11 @@ export async function resolveForOutboundCall(
     if (activeMode === "custom") return !caps.realtime;
     return true;
   });
+  // Owner decision: realtime never falls back to an unvalidated credential.
   const row =
-    serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0];
+    capability === "realtime"
+      ? (serving.find((candidate) => candidate.credentialStatus === "valid") ?? null)
+      : (serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0]);
   if (!row) {
     throw new ProviderConfigError(
       "not_found",

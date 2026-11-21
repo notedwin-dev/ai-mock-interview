@@ -19,6 +19,7 @@ describe("GET /api/v1/interviews/invitations/[token]", () => {
       jobDescription: "APIs",
       categoryNameSnapshot: "General",
       evaluationMode: "balanced",
+      runtimeMode: "custom",
       status: "scheduled",
     };
     mocks.resolveInvitation.mockResolvedValue(view);
@@ -26,7 +27,7 @@ describe("GET /api/v1/interviews/invitations/[token]", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ interview: view });
     expect(Object.keys(view).sort()).toEqual([
-      "categoryNameSnapshot", "evaluationMode", "jobDescription", "jobRole", "sessionId", "status",
+      "categoryNameSnapshot", "evaluationMode", "jobDescription", "jobRole", "runtimeMode", "sessionId", "status",
     ]);
   });
 

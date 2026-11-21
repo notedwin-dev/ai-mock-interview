@@ -31,6 +31,8 @@ export interface InvitationView {
   jobDescription: string | null;
   categoryNameSnapshot: string;
   evaluationMode: string;
+  /** The one runtime this session runs (ADR-006): exactly one room UI is shown. */
+  runtimeMode: string;
   status: string;
 }
 
@@ -86,6 +88,7 @@ export async function resolveInvitation(token: string): Promise<InvitationView |
       jobDescription: true,
       categoryNameSnapshot: true,
       evaluationMode: true,
+      runtimeMode: true,
       status: true,
     },
   });
