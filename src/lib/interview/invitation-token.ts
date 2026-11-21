@@ -7,6 +7,16 @@ import { createHash, randomBytes } from "node:crypto";
  */
 const TOKEN_BYTES = 32;
 
+/**
+ * Shape of a raw token: 32 bytes of base64url. Shared by every token-scoped
+ * entry point so a malformed link is rejected before it reaches the database.
+ */
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+export function isInvitationToken(token: string): boolean {
+  return TOKEN_PATTERN.test(token);
+}
+
 export function createInvitationToken(): string {
   return randomBytes(TOKEN_BYTES).toString("base64url");
 }

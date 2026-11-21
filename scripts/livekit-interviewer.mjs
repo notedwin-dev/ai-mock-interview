@@ -53,20 +53,35 @@ export default defineAgent({
       }),
     });
 
+    /**
+     * Finalized lines are persisted one at a time, in the order they were
+     * spoken, so transcript sequence numbers follow the conversation
+     * (FR-TRANSCRIPT-003). Each line carries a unique client id, so a bounded
+     * retry of the same line is deduplicated instead of duplicated.
+     */
+    let queue = Promise.resolve();
+    let lineCounter = 0;
     const persist = (speaker, text, createdAt) => {
-      if (!meta.inviteToken || !text) return;
-      const body = {
-        messages: [{
-          speaker,
-          content: text,
-          clientId: `lk-${createdAt || Date.now()}-${speaker}`,
-        }],
-      };
+      if (!meta.inviteToken || !text) return queue;
+      const clientId = `lk-${createdAt || Date.now()}-${speaker}-${++lineCounter}`;
+      const body = { messages: [{ speaker, content: text, clientId }] };
       const base = process.env.APP_URL || "http://localhost:3000";
-      void fetch(
-        `${base}/api/v1/interviews/invitations/${encodeURIComponent(meta.inviteToken)}/realtime/transcript`,
-        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
-      ).catch(() => undefined);
+      const url = `${base}/api/v1/interviews/invitations/${encodeURIComponent(meta.inviteToken)}/realtime/transcript`;
+      queue = queue.then(async () => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await fetch(url, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (response.ok) return;
+          } catch {
+            // Network blip: retry once with the same client id.
+          }
+        }
+      });
+      return queue;
     };
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {

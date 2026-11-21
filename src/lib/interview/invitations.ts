@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { createInvitationToken, hashInvitationToken, invitationPath } from "./invitation-token";
+import {
+  createInvitationToken,
+  hashInvitationToken,
+  invitationPath,
+  isInvitationToken,
+} from "./invitation-token";
 
 /**
  * Revocable invitation links (TT-21; FR-SETUP-008). The raw capability travels
@@ -35,8 +40,6 @@ export interface InvitationView {
   runtimeMode: string;
   status: string;
 }
-
-const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 function parseSessionId(sessionId: string): string {
   const parsed = z.uuid().safeParse(sessionId);
@@ -76,7 +79,7 @@ export async function issueInvitation(
 
 /** Resolves a link to one interview's confirmation details — no auth, no privileges. */
 export async function resolveInvitation(token: string): Promise<InvitationView | null> {
-  if (!TOKEN_PATTERN.test(token)) return null;
+  if (!isInvitationToken(token)) return null;
   const session = await db.interviewSession.findFirst({
     where: {
       invitationTokenHash: hashInvitationToken(token),
@@ -102,4 +105,47 @@ export async function revokeInvitation(userId: string, sessionId: string): Promi
     where: { sessionId: session.sessionId },
     data: { invitationTokenHash: null, invitationRevokedAt: new Date() },
   });
+}
+
+export interface EndedInterview {
+  sessionId: string;
+  status: string;
+  completedAt: string | null;
+  /** True when the interview was already completed before this request. */
+  alreadyEnded: boolean;
+}
+
+/**
+ * Ends the interview behind an invitation link (FR-INTERVIEW-011). The link is
+ * the only capability: no account session is involved and nothing but this
+ * interview's completion state is returned.
+ *
+ * Repeat requests are idempotent — a completed interview returns its existing
+ * state instead of creating a second completion event. An interview that never
+ * started is rejected, mirroring the DB rule that `completed_at` implies
+ * `started_at`.
+ */
+export async function endInvitationInterview(token: string): Promise<EndedInterview> {
+  const session = await resolveInvitation(token);
+  if (!session) {
+    throw new InvitationError("not_found", "This invitation link is not available.");
+  }
+
+  const ended = await db.interviewSession.updateMany({
+    where: { sessionId: session.sessionId, status: "active" },
+    data: { status: "completed", completedAt: new Date() },
+  });
+  const current = await db.interviewSession.findUniqueOrThrow({
+    where: { sessionId: session.sessionId },
+    select: { sessionId: true, status: true, completedAt: true },
+  });
+  if (ended.count === 0 && current.status !== "completed") {
+    throw new InvitationError("invalid_state", "This interview is not running.");
+  }
+  return {
+    sessionId: current.sessionId,
+    status: current.status,
+    completedAt: current.completedAt?.toISOString() ?? null,
+    alreadyEnded: ended.count === 0,
+  };
 }

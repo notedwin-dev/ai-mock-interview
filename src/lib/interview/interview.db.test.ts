@@ -221,6 +221,12 @@ d("interview session service (integration)", () => {
     const ended = await endInterviewSession(userId, session.sessionId);
     expect(ended.status).toBe("completed");
     expect(ended.completedAt).not.toBeNull();
+
+    // FR-INTERVIEW-011: a repeated end request is idempotent — it returns the
+    // stored completion instead of creating a second completion event.
+    const repeated = await endInterviewSession(userId, session.sessionId);
+    expect(repeated.status).toBe("completed");
+    expect(repeated.completedAt).toBe(ended.completedAt);
   });
 
   it("enforces the state machine: no double start, no end before start", async () => {

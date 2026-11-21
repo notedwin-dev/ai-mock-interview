@@ -320,6 +320,15 @@ export async function endInterviewSession(
   sessionId: string,
 ): Promise<SessionSummary> {
   const session = await loadOwnedSession(userId, sessionId);
+  // FR-INTERVIEW-011: a repeated end request is idempotent — an already
+  // completed interview returns its stored state instead of a second
+  // completion event or an error.
+  if (session.status === "completed") {
+    return toSessionSummary(
+      session,
+      session.providerRouteSnapshot as unknown as ProviderRouteSnapshot,
+    );
+  }
   if (session.status !== "active") {
     throw new InterviewError("invalid_state", "Only an active interview can be ended.");
   }

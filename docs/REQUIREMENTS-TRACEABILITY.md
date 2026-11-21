@@ -106,3 +106,20 @@ engine persists chronological speaker-attributed turns and groups them into
 assessment units (primary opens a unit, follow-up joins it). Hermetic unit tests
 plus TEST_DATABASE_URL integration tests cover tokens, revocation, creation and
 turn persistence.
+
+## Implementation note — realtime transcript parity and candidate end (2026-11-21)
+
+The LiveKit WebRTC runtime now writes the same structured transcript as the typed
+path. `appendRealtimeMessage` classifies each finalized interviewer utterance
+(`src/lib/interview/realtime-transcript.ts`): a question opens or joins an
+assessment unit, an explicit back-reference is a follow-up in the active unit, and
+a conversational acknowledgement is persisted without a unit so it is never
+independently evaluated (FR-TRANSCRIPT-001/002/004). Transcript writes take a
+per-session row lock, so concurrent finalized audio lines cannot collide on
+`(session_id, sequence_number)` and lose a message (FR-TRANSCRIPT-003,
+NFR-REL-002). The candidate can end the interview from the invitation room through
+the token-scoped `POST /api/v1/interviews/invitations/[token]/end`; repeated end
+requests are idempotent on both the invitation and owner routes (FR-INTERVIEW-011).
+Waiting-room device/mute choices are carried into the room, and the WebRTC room
+tracks reconnect/disconnect and remote-track unsubscription instead of assuming a
+permanent connection.

@@ -123,14 +123,92 @@ d("invitation links (TT-21)", () => {
   it("persists realtime messages in approved kinds and is idempotent on client ids", async () => {
     const session = await makeSession();
     const store = (await import("./room-store")).createDefaultRoomStore();
-    const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
-    const second = await store.appendRealtimeMessage(session.sessionId, "interviewer", "tell me more", "evt-i");
-    const replay = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
+    const first = await store.appendRealtimeMessage(session.sessionId, {
+      speaker: "candidate", contentText: "my answer", clientId: "evt-c",
+    });
+    const question = await store.appendRealtimeMessage(session.sessionId, {
+      speaker: "interviewer", contentText: "Tell me about a system you designed.", clientId: "evt-i",
+    });
+    const ack = await store.appendRealtimeMessage(session.sessionId, {
+      speaker: "interviewer", contentText: "Thanks, that is helpful.", clientId: "evt-a",
+    });
+    const replay = await store.appendRealtimeMessage(session.sessionId, {
+      speaker: "candidate", contentText: "my answer", clientId: "evt-c",
+    });
 
     expect(first.messageKind).toBe("candidate_response");
-    expect(second.messageKind).toBe("primary_question"); // approved message_kind domain
+    expect(question.messageKind).toBe("primary_question");
+    // A conversational acknowledgement is never stored as a question and is
+    // not independently evaluated, so it carries no assessment unit.
+    expect(ack.messageKind).toBe("acknowledgement");
+    expect(ack.assessmentUnitId).toBeNull();
     expect(replay.sequenceNumber).toBe(first.sequenceNumber);
-    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
+    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(3);
+    expect(await db.interviewAssessmentUnit.count({ where: { sessionId: session.sessionId } })).toBe(1);
+  });
+
+  it("groups realtime follow-ups into the active unit and opens a unit per new question", async () => {
+    const session = await makeSession();
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const append = (speaker: "candidate" | "interviewer", contentText: string, clientId: string) =>
+      store.appendRealtimeMessage(session.sessionId, { speaker, contentText, clientId });
+
+    const q1 = await append("interviewer", "Tell me about your last role.", "lk-1");
+    const a1 = await append("candidate", "I built a payments API.", "lk-2");
+    const followUp = await append("interviewer", "You mentioned payments — how did you handle retries?", "lk-3");
+    const a2 = await append("candidate", "With an idempotency key.", "lk-4");
+    const q2 = await append("interviewer", "Describe a system you designed end to end.", "lk-5");
+
+    expect(q1.messageKind).toBe("primary_question");
+    expect(q1.assessmentUnitId).not.toBeNull();
+    expect(a1.assessmentUnitId).toBe(q1.assessmentUnitId);
+    expect(followUp.messageKind).toBe("follow_up_question");
+    expect(followUp.assessmentUnitId).toBe(q1.assessmentUnitId);
+    expect(a2.assessmentUnitId).toBe(q1.assessmentUnitId);
+    expect(q2.assessmentUnitId).not.toBe(q1.assessmentUnitId);
+
+    const units = await db.interviewAssessmentUnit.findMany({
+      where: { sessionId: session.sessionId },
+      orderBy: { unitNumber: "asc" },
+    });
+    expect(units.map((unit) => unit.status)).toEqual(["closed", "open"]);
+    // The transcript keeps every message in chronological order regardless of
+    // grouping (FR-TRANSCRIPT-005).
+    const transcript = await store.messages(session.sessionId);
+    expect(transcript.map((message) => message.sequenceNumber)).toEqual([1, 2, 3, 4, 5]);
+    expect(transcript.map((message) => message.contentText)).toEqual([
+      "Tell me about your last role.",
+      "I built a payments API.",
+      "You mentioned payments — how did you handle retries?",
+      "With an idempotency key.",
+      "Describe a system you designed end to end.",
+    ]);
+  });
+
+  it("allocates unique sequence numbers under concurrent realtime appends", async () => {
+    const session = await makeSession();
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const total = 8;
+
+    // Finalized audio lines arrive as independent HTTP requests, so they can
+    // race. MAX(sequence_number) + 1 without a lock loses the loser to P2002.
+    const results = await Promise.all(
+      Array.from({ length: total }, (_, index) =>
+        store.appendRealtimeMessage(session.sessionId, {
+          speaker: "candidate",
+          contentText: `answer ${index}`,
+          clientId: `race-${index}`,
+        }),
+      ),
+    );
+
+    const sequences = results.map((entry) => entry.sequenceNumber).sort((a, b) => a - b);
+    expect(new Set(sequences).size).toBe(total);
+    expect(sequences).toEqual(Array.from({ length: total }, (_, index) => index + 1));
+
+    const stored = await store.messages(session.sessionId);
+    expect(stored).toHaveLength(total);
+    expect(new Set(stored.map((message) => message.contentText)).size).toBe(total);
   });
 
   it("runs a token-scoped turn against the real store: transcript, unit and active state", async () => {

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
+import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -18,6 +19,15 @@ const PRIMARY =
 const GHOST =
   "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
+/** Candidate-facing wording; storage-level message kinds stay out of the UI. */
+function messageKindLabel(message: TranscriptEntry): string {
+  if (message.speakerType === "candidate") return "Answer";
+  if (message.messageKind === "primary_question") return "Question";
+  if (message.messageKind === "follow_up_question") return "Follow-up";
+  return "Interviewer";
+}
+
+
 export function InterviewRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const [messages, setMessages] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
@@ -30,6 +40,30 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Overlay dialog behaviour (M8): focus moves into the panel when it opens,
+   * Escape closes it, and focus returns to the control that opened it.
+   */
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    overlayRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setOverlayOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [overlayOpen]);
+
 
   useEffect(() => {
     let active = true;
@@ -241,15 +275,30 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           </button>
         </form>
       )}
+      {!ended ? (
+        <div className="flex justify-center">
+          <EndInterviewButton
+            token={token}
+            onEnded={() => {
+              setEnded(true);
+              setOverlayOpen(false);
+            }}
+          />
+        </div>
+      ) : null}
       {voiceNotice ? <p className="text-sm text-amber-300" role="status">{voiceNotice}</p> : null}
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-label="Conversation transcript">
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-modal="true" aria-labelledby="conversation-heading">
           <button type="button" aria-label="Close conversation" onClick={() => setOverlayOpen(false)} className="absolute inset-0 cursor-default" />
-          <div className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5">
+          <div
+            ref={overlayRef}
+            tabIndex={-1}
+            className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5 outline-none"
+          >
             <div className="flex items-center justify-between">
-              <h2 className="font-display text-lg font-semibold text-ink">Conversation</h2>
+              <h2 id="conversation-heading" className="font-display text-lg font-semibold text-ink">Conversation</h2>
               <button type="button" onClick={() => setOverlayOpen(false)} className={GHOST}>Close</button>
             </div>
             {messages.length === 0 ? (
@@ -258,7 +307,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
               messages.map((message) => (
                 <div key={message.sequenceNumber} className={`max-w-[90%] rounded-2xl px-4 py-2 text-sm ${message.speakerType === "candidate" ? "self-end bg-emerald-400/15 text-ink" : "self-start bg-raised text-ink-soft"}`}>
                   <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-ink-muted">
-                    {message.speakerType === "candidate" ? "You" : "AI"} · {message.messageKind.replace(/_/g, " ")}
+                    {message.speakerType === "candidate" ? "You" : "AI"} · {messageKindLabel(message)}
                   </span>
                   {message.contentText}
                 </div>
