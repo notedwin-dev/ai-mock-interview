@@ -31,8 +31,12 @@ describe("POST .../realtime/transcript", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ saved: 2 });
     expect(mocks.append).toHaveBeenCalledTimes(2);
-    expect(mocks.append).toHaveBeenNthCalledWith(1, "s1", "candidate", "my answer", "evt-1");
-    expect(mocks.append).toHaveBeenNthCalledWith(2, "s1", "interviewer", "a question", "evt-2");
+    expect(mocks.append).toHaveBeenNthCalledWith(1, "s1", {
+      speaker: "candidate", contentText: "my answer", clientId: "evt-1",
+    });
+    expect(mocks.append).toHaveBeenNthCalledWith(2, "s1", {
+      speaker: "interviewer", contentText: "a question", clientId: "evt-2",
+    });
   });
 
   it("rejects invalid links and malformed messages", async () => {

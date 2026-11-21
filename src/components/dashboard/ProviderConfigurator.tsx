@@ -587,14 +587,13 @@ function readinessFor(rows: ProviderConfigSummary[], capability: Capability) {
   const serving = rows.filter((row) => row.capabilities[capability]);
   const enabled = serving.find((row) => row.isEnabled) ?? null;
   if (serving.length === 0) {
-    return { state: "empty" as const, label: "Not set up", dot: "bg-ink-muted/60", text: "text-ink-muted", names: "" };
+    return { label: "Not set up", dot: "bg-ink-muted/60", text: "text-ink-muted", names: "" };
   }
   if (!enabled) {
-    return { state: "disabled" as const, label: "Configured, disabled", dot: "bg-ink-muted/60", text: "text-ink-muted", names: friendlyProviderName(serving[0]!) };
+    return { label: "Configured, disabled", dot: "bg-ink-muted/60", text: "text-ink-muted", names: friendlyProviderName(serving[0]!) };
   }
   const status = CREDENTIAL_STATUS[enabled.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated!;
   return {
-    state: enabled.credentialStatus as "valid" | "unvalidated" | "invalid",
     label: status.word,
     dot: status.dot,
     text: status.text,

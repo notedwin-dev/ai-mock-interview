@@ -3,8 +3,10 @@ import { jsonError } from "@/lib/api/respond";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 
 /**
- * POST .../realtime/transcript — persists finalized Gemini Live turns to the
- * same chronological transcript as typed turns (FR-TRANSCRIPT-001/002).
+ * POST .../realtime/transcript — persists finalized native-realtime turns to the
+ * same chronological transcript as typed turns (FR-TRANSCRIPT-001/002/004):
+ * the store derives each interviewer utterance's kind and assessment unit, so
+ * an acknowledgement is never stored as a primary question.
  * Client-provided IDs make repeated deliveries idempotent.
  */
 const bodySchema = z
@@ -44,12 +46,11 @@ export async function POST(
     }
 
     for (const message of body.messages) {
-      await store.appendRealtimeMessage(
-        interview.sessionId,
-        message.speaker,
-        message.content,
-        message.clientId,
-      );
+      await store.appendRealtimeMessage(interview.sessionId, {
+        speaker: message.speaker,
+        contentText: message.content,
+        clientId: message.clientId,
+      });
     }
     return Response.json({ saved: body.messages.length });
   } catch {

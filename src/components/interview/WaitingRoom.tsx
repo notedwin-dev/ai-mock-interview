@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2, Mic, MicOff, Video, VideoOff } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
+import { saveDevicePreferences } from "@/lib/interview/device-preferences";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 
 /**
@@ -73,9 +74,9 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   }
 
   function join() {
-    // Remember the selected output device for the room; no media crosses the
+    // Carry the device/mute choices into the live room; no media crosses the
     // network from this waiting room.
-    if (speakerId) sessionStorage.setItem("aimis-speaker-id", speakerId);
+    saveDevicePreferences({ micId: micId || null, speakerId: speakerId || null, muted });
     stopPreview();
     router.push(`/i/${token}/room`);
   }

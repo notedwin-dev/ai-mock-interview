@@ -30,6 +30,14 @@ export interface TranscriptEntry {
   assessmentUnitId: string | null;
 }
 
+/** One finalized native-realtime line, as delivered by the room client. */
+export interface RealtimeTranscriptMessage {
+  speaker: "candidate" | "interviewer";
+  contentText: string;
+  /** Client-generated event id: repeated deliveries are idempotent. */
+  clientId: string;
+}
+
 export interface RoomStore {
   context(token: string): Promise<RoomContext | null>;
   messages(sessionId: string): Promise<TranscriptEntry[]>;
@@ -47,15 +55,13 @@ export interface RoomStore {
     assessmentUnitId: string | null,
   ): Promise<TranscriptEntry>;
   activeUnit(sessionId: string): Promise<string | null>;
-  openUnit(sessionId: string, unitNumber: number): Promise<string>;
-  closeUnit(unitId: string): Promise<void>;
+  /** Opens the next assessment unit, closing any unit still open (FR-TRANSCRIPT-004). */
+  openUnit(sessionId: string): Promise<string>;
   complete(sessionId: string): Promise<void>;
-  /** Appends one finalized Gemini Live message (idempotent on clientId). */
+  /** Appends one finalized native-realtime line (idempotent on clientId). */
   appendRealtimeMessage(
     sessionId: string,
-    speaker: "candidate" | "interviewer",
-    contentText: string,
-    clientId: string,
+    message: RealtimeTranscriptMessage,
   ): Promise<TranscriptEntry>;
 }
 
@@ -198,14 +204,23 @@ export async function runRoomTurn(
   );
 
   let unitId = activeUnitId;
-  if (output.messageKind === "primary_question") {
-    if (unitId) await store.closeUnit(unitId);
-    unitId = await store.openUnit(context.sessionId, primaryCount + 1);
+  // The schema's message_kind domain has no "transition": a closing or moving-on
+  // remark is a conversational acknowledgement and is never independently
+  // evaluated (FR-TRANSCRIPT-004).
+  let persistedKind: "primary_question" | "follow_up_question" | "acknowledgement" =
+    output.messageKind === "transition" ? "acknowledgement" : output.messageKind;
+  // A follow-up needs an active unit to join; without one the question opens a
+  // unit so no question ends up unassessable.
+  if (persistedKind === "follow_up_question" && !unitId) persistedKind = "primary_question";
+  if (persistedKind === "primary_question") {
+    unitId = await store.openUnit(context.sessionId);
+  } else if (persistedKind === "acknowledgement") {
+    unitId = null;
   }
   await store.appendInterviewer(
     context.sessionId,
     output.interviewerText,
-    output.messageKind,
+    persistedKind,
     unitId,
   );
 
