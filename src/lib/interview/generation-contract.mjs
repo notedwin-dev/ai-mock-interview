@@ -2,29 +2,22 @@
  * Shared contract for the voice interview-planning workflow.
  *
  * Kept as plain ESM so the Next.js server code and the standalone LiveKit
- * worker import the SAME field definitions, prompts and mapping — no drifting
- * copies between the browser, the API and the agent.
+ * worker import the SAME field definitions, prompt and mapping. The realtime
+ * model owns the conversation; this module only defines WHAT to collect and
+ * the exact prompt/tool contract it uses to do so.
  */
 
 /** LiveKit room data topic for instant captions during generation. */
 export const CAPTION_TOPIC = "aimis-caption";
 
 export const GENERATION_FIELDS = [
-  {
-    name: "role",
-    description: "What role would you like to train for?",
-    required: true,
-  },
+  { name: "role", description: "What role would you like to train for?", required: true },
   {
     name: "type",
     description: "Are you aiming for a technical, behavioral or mixed interview?",
     required: true,
   },
-  {
-    name: "level",
-    description: "What job experience level are you targeting?",
-    required: true,
-  },
+  { name: "level", description: "What job experience level are you targeting?", required: true },
   {
     name: "techstack",
     description: "Which technologies or topics should the interview cover?",
@@ -37,6 +30,16 @@ export const GENERATION_FIELDS = [
   },
 ];
 
+/** JSON schema for the realtime model's submit tool — generated from the fields. */
+export const TOOL_PARAMETERS = {
+  type: "object",
+  properties: Object.fromEntries(
+    GENERATION_FIELDS.map((field) => [field.name, { type: "string", description: field.description }]),
+  ),
+  required: GENERATION_FIELDS.map((field) => field.name),
+  additionalProperties: false,
+};
+
 export function greeting(userName) {
   const name = typeof userName === "string" && userName.trim() ? userName.trim() : "there";
   return `Hello, ${name}! Let's prepare your interview. I'll ask you a few questions and generate a perfect interview just for you. Are you ready?`;
@@ -47,52 +50,26 @@ export function closingLine() {
 }
 
 /**
- * Deterministic conversation state. The worker drives the flow from this
- * state machine instead of trusting a realtime model to self-manage turns:
- *   Say (greeting) -> Gather (one question at a time) -> API request
- *   -> Say (closing line) -> End call.
+ * The model gets the COMPLETE ordered list of five questions and owns the flow.
+ * It must ask them one at a time, wait for each answer, never start the mock
+ * interview, and submit all five values through the tool when done.
  */
-export function createPlanningState() {
-  return { index: 0, answers: {}, ready: false, done: false };
-}
-
-/** Marks the greeting as finished, so only later speech counts as an answer. */
-export function beginGathering(state) {
-  state.ready = true;
-  return nextQuestion(state);
-}
-
-export function nextQuestion(state) {
-  if (!state.ready || state.done) return null;
-  const field = GENERATION_FIELDS[state.index];
-  return field ? field.description : null;
-}
-
-/**
- * Records one final user utterance as the answer to the current field.
- * Returns the next exact question, or `{ done: true, answers }` when all five
- * fields have been gathered. Empty/early utterances are ignored.
- */
-export function recordAnswer(state, transcript) {
-  if (!state.ready || state.done) return null;
-  const text = String(transcript ?? "").trim();
-  if (!text) return null;
-  const field = GENERATION_FIELDS[state.index];
-  if (!field) return null;
-  state.answers[field.name] = text;
-  state.index += 1;
-  if (state.index >= GENERATION_FIELDS.length) {
-    state.done = true;
-    return { done: true, answers: { ...state.answers } };
-  }
-  return { done: false, question: GENERATION_FIELDS[state.index].description };
-}
-
 export function buildInstructions(userName) {
+  const questions = GENERATION_FIELDS.map(
+    (field, index) => `${index + 1}. ${field.description}`,
+  ).join("\n");
+
   return [
     `You are the AIMIS voice interview planner speaking with ${userName || "the candidate"}.`,
-    "The application drives this conversation: speak only the exact text it gives you, listen, and answer naturally if the candidate asks what a question means.",
-    "Never invent additional questions or skip ahead. Keep every response short and conversational.",
+    `Start the call by saying exactly: ${greeting(userName)}`,
+    "Your ONLY job is to collect five details and generate an interview. You are NOT conducting the interview itself. Do not ask interview questions, do not test the candidate, and do not give feedback.",
+    "Ask the following five questions IN ORDER, exactly one question at a time. Wait for the candidate's answer before asking the next one. Never skip a question, never reorder them, and never ask extra questions.",
+    questions,
+    "For the type, accept technical, behavioral or mixed. For the amount, accept a number.",
+    "Briefly acknowledge each answer, then ask the next question on the list.",
+    "When all five answers are known, call the submit_interview_config tool with the values you collected. Do not ask anything else.",
+    `After the tool succeeds, say exactly: ${closingLine()}`,
+    "Keep every response short and natural for voice. Never repeat the candidate's answer back to them.",
   ].join(" ");
 }
 
@@ -103,7 +80,7 @@ const CATEGORY_BY_TYPE = {
   mixed: "general",
 };
 
-/** Turns the five spoken answers into the existing approved agent config. */
+/** Turns the five submitted answers into the existing approved agent config. */
 export function mapAnswersToConfig(answers) {
   const role = String(answers.role ?? "").trim();
   const type = String(answers.type ?? "").trim().toLowerCase();
