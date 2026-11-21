@@ -7,6 +7,7 @@ import type { LiveKitConfig } from "@/lib/livekit/env";
  * Agent failures never block the candidate from entering the room.
  */
 export const INTERVIEWER_AGENT_NAME = "aimis-interviewer";
+export const GENERATOR_AGENT_NAME = "aimis-generator";
 
 export interface DispatchContext {
   room: string;
@@ -74,6 +75,44 @@ export async function dispatchInterviewerAgent(
       inviteToken: context.inviteToken,
       jobRole: context.jobRole,
       jobDescription: context.jobDescription,
+    }),
+  });
+  return true;
+}
+
+/**
+ * Dispatches the voice generation agent into a dedicated, short-lived room.
+ * The worker receives a one-shot capability to post captions and the final
+ * configuration; that capability is never exposed to the browser.
+ */
+export async function dispatchGeneratorAgent(
+  context: { room: string; generationId: string; workerToken: string },
+  config: LiveKitConfig,
+  deps: DispatchDeps = {},
+): Promise<boolean> {
+  const create =
+    deps.createClient ??
+    ((cfg: LiveKitConfig) =>
+      new AgentDispatchClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as DispatchClient);
+  const createRooms =
+    deps.createRoomClient ??
+    ((cfg: LiveKitConfig) =>
+      new RoomServiceClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as RoomClient);
+  try {
+    await createRooms(config).createRoom({ name: context.room });
+  } catch {
+    // Room already exists — dispatch as-is.
+  }
+  const client = create(config);
+  const existing = (await client.listDispatch(context.room)).filter(
+    (entry) => (entry as { agentName?: string }).agentName === GENERATOR_AGENT_NAME,
+  );
+  if (existing.length > 0) return false;
+  await client.createDispatch(context.room, GENERATOR_AGENT_NAME, {
+    metadata: JSON.stringify({
+      generationId: context.generationId,
+      workerToken: context.workerToken,
+      room: context.room,
     }),
   });
   return true;

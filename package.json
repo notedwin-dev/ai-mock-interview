@@ -16,7 +16,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "agent:interviewer": "node scripts/livekit-interviewer.mjs",
+    "agent:generator": "node scripts/livekit-generator.mjs"
   },
   "dependencies": {
     "@ai-sdk/google": "4.0.122",

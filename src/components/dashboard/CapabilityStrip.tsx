@@ -143,9 +143,17 @@ export function ConsoleBanner({
           </p>
           <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
             {interviewerReady ? (
-              <Link href="/dashboard/interview/agent" className={PRIMARY_PILL}>
-                Launch AI Interview Agent
-              </Link>
+              <>
+                <Link href="/dashboard/interview/generate" className={PRIMARY_PILL}>
+                  Plan interview by voice
+                </Link>
+                <Link
+                  href="/dashboard/interview/agent"
+                  className="text-sm font-medium text-ink-soft underline decoration-line underline-offset-4 outline-none transition-colors hover:text-ink"
+                >
+                  Plan with text instead
+                </Link>
+              </>
             ) : (
               <>
                 <button
