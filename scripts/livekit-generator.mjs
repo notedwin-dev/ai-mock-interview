@@ -1,24 +1,26 @@
 import "dotenv/config";
 import { fileURLToPath } from "node:url";
-import { cli, defineAgent, voice, WorkerOptions, tool } from "@livekit/agents";
+import { cli, defineAgent, voice, WorkerOptions } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
 import {
-  TOOL_PARAMETERS,
+  beginGathering,
   buildInstructions,
   closingLine,
+  createPlanningState,
   greeting,
+  recordAnswer,
 } from "../src/lib/interview/generation-contract.mjs";
 
 /**
  * AIMIS voice interview-generation worker (Gemini Live on LiveKit).
  * Run with: pnpm agent:generator
  *
- * Workflow (mirrors the approved reference, without Vapi):
- *   start call -> exact greeting -> gather five answers one at a time
- *   -> submit_interview_config tool (server validates + creates the interview)
- *   -> closing line -> end call.
- * The contract module is shared with the server so prompts and fields cannot
- * drift between the two processes.
+ * Workflow (same shape as the approved reference, without Vapi):
+ *   Say exact greeting -> gather five answers one at a time -> POST generated
+ *   config to the app -> say closing line -> end call.
+ *
+ * The turn order is a deterministic state machine from the shared contract,
+ * not an instruction the realtime model may ignore. See docs/UI-PLAN.md.
  */
 export const AGENT_NAME = "aimis-generator";
 export const REALTIME_MODEL = "gemini-3.1-flash-live-preview";
@@ -57,29 +59,8 @@ export default defineAgent({
       "content-type": "application/json",
       "x-aimis-worker-token": workerToken,
     };
-    const caption = (speaker, text) => postCaption(API_BASE, generationId, headers, speaker, text);
-
-    const submitInterviewConfig = tool({
-      name: "submit_interview_config",
-      description:
-        "Submit the five gathered answers once role, type, level, techstack and amount are all known. Call exactly once.",
-      parameters: TOOL_PARAMETERS,
-      execute: async (answers) => {
-        const response = await fetch(
-          `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/complete`,
-          { method: "POST", headers, body: JSON.stringify(answers) },
-        );
-        const body = await response.json().catch(() => null);
-        if (!response.ok) {
-          return { ok: false, message: body?.error?.message ?? "Could not create the interview." };
-        }
-        // Speak the closing line, then end the call as the workflow specifies.
-        const handle = session.say(closingLine());
-        await handle.waitForPlayout();
-        setTimeout(() => ctx.shutdown("interview generated"), 500);
-        return { ok: true, message: "Interview generated." };
-      },
-    });
+    const state = createPlanningState();
+    let speaking = false;
 
     const session = new voice.AgentSession({
       llm: new google.beta.realtime.RealtimeModel({
@@ -91,22 +72,59 @@ export default defineAgent({
       }),
     });
 
+    const say = async (text) => {
+      if (!text) return;
+      speaking = true;
+      try {
+        await session.say(text).waitForPlayout();
+      } finally {
+        speaking = false;
+      }
+    };
+
+    async function finish(answers) {
+      // Raw answers only: the server validates and maps them before creating
+      // the interview, so the worker never owns product rules.
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/complete`,
+          { method: "POST", headers, body: JSON.stringify(answers) },
+        );
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error?.message ?? "generation failed");
+        await say(closingLine());
+      } catch (error) {
+        console.error("generation failed", error instanceof Error ? error.message : "unknown");
+        await say("I could not save your interview. Please try again.");
+      } finally {
+        setTimeout(() => ctx.shutdown("generation finished"), 500);
+      }
+    }
+
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
-      if (event.isFinal) void caption("candidate", event.transcript);
+      if (!event.isFinal || speaking) return;
+      void postCaption(API_BASE, generationId, headers, "candidate", event.transcript);
+      const step = recordAnswer(state, event.transcript);
+      if (!step) return;
+      if (step.done) void finish(step.answers);
+      else void say(step.question);
     });
+
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {
-      if (event.item?.role === "assistant") void caption("agent", itemText(event.item.content));
+      if (event.item?.role === "assistant") {
+        void postCaption(API_BASE, generationId, headers, "agent", itemText(event.item.content));
+      }
     });
 
     await session.start({
-      agent: new voice.Agent({
-        instructions: buildInstructions(userName),
-        tools: [submitInterviewConfig],
-      }),
+      agent: new voice.Agent({ instructions: buildInstructions(userName) }),
       room: ctx.room,
     });
-    // Start the call with the exact greeting from the approved workflow.
-    await session.say(greeting(userName)).waitForPlayout();
+
+    // Say node: exact greeting, then the first gather question. The candidate
+    // answers before the next question is asked.
+    await say(greeting(userName));
+    await say(beginGathering(state));
   },
 });
 

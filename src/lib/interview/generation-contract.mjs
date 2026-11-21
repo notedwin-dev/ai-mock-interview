@@ -34,15 +34,6 @@ export const GENERATION_FIELDS = [
   },
 ];
 
-export const TOOL_PARAMETERS = {
-  type: "object",
-  properties: Object.fromEntries(
-    GENERATION_FIELDS.map((field) => [field.name, { type: "string", description: field.description }]),
-  ),
-  required: GENERATION_FIELDS.map((field) => field.name),
-  additionalProperties: false,
-};
-
 export function greeting(userName) {
   const name = typeof userName === "string" && userName.trim() ? userName.trim() : "there";
   return `Hello, ${name}! Let's prepare your interview. I'll ask you a few questions and generate a perfect interview just for you. Are you ready?`;
@@ -52,16 +43,53 @@ export function closingLine() {
   return "Your interview has been generated. Thank you for the call.";
 }
 
+/**
+ * Deterministic conversation state. The worker drives the flow from this
+ * state machine instead of trusting a realtime model to self-manage turns:
+ *   Say (greeting) -> Gather (one question at a time) -> API request
+ *   -> Say (closing line) -> End call.
+ */
+export function createPlanningState() {
+  return { index: 0, answers: {}, ready: false, done: false };
+}
+
+/** Marks the greeting as finished, so only later speech counts as an answer. */
+export function beginGathering(state) {
+  state.ready = true;
+  return nextQuestion(state);
+}
+
+export function nextQuestion(state) {
+  if (!state.ready || state.done) return null;
+  const field = GENERATION_FIELDS[state.index];
+  return field ? field.description : null;
+}
+
+/**
+ * Records one final user utterance as the answer to the current field.
+ * Returns the next exact question, or `{ done: true, answers }` when all five
+ * fields have been gathered. Empty/early utterances are ignored.
+ */
+export function recordAnswer(state, transcript) {
+  if (!state.ready || state.done) return null;
+  const text = String(transcript ?? "").trim();
+  if (!text) return null;
+  const field = GENERATION_FIELDS[state.index];
+  if (!field) return null;
+  state.answers[field.name] = text;
+  state.index += 1;
+  if (state.index >= GENERATION_FIELDS.length) {
+    state.done = true;
+    return { done: true, answers: { ...state.answers } };
+  }
+  return { done: false, question: GENERATION_FIELDS[state.index].description };
+}
+
 export function buildInstructions(userName) {
   return [
     `You are the AIMIS voice interview planner speaking with ${userName || "the candidate"}.`,
-    `Start with this exact greeting: ${greeting(userName)}`,
-    "Then gather the five details ONE AT A TIME. Ask exactly one question, stop speaking, and wait for the candidate's answer before asking the next.",
-    ...GENERATION_FIELDS.map((field, index) => `${index + 1}. ${field.description}`),
-    "For the type, accept technical, behavioral or mixed. For the amount, accept a number.",
-    "Briefly acknowledge each answer before asking the next question. Never ask several questions in one turn.",
-    "When all five answers are known, call submit_interview_config exactly once. Do not ask anything else.",
-    "After the tool succeeds, say the closing line and end the call.",
+    "The application drives this conversation: speak only the exact text it gives you, listen, and answer naturally if the candidate asks what a question means.",
+    "Never invent additional questions or skip ahead. Keep every response short and conversational.",
   ].join(" ");
 }
 

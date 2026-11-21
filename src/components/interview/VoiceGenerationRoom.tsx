@@ -32,6 +32,7 @@ export function VoiceGenerationRoom() {
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [muted, setMuted] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -62,6 +63,10 @@ export function VoiceGenerationRoom() {
         });
         room.on(RoomEvent.TrackUnsubscribed, (track) => {
           track.detach().forEach((element) => element.remove());
+        });
+        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          if (!active) return;
+          setIsSpeaking(speakers.some((speaker) => speaker.identity !== room.localParticipant.identity));
         });
         room.on(RoomEvent.Reconnecting, () => { if (active) setStatus("reconnecting"); });
         room.on(RoomEvent.Reconnected, () => { if (active) setStatus("connected"); });
@@ -171,7 +176,11 @@ export function VoiceGenerationRoom() {
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
         <section aria-label="AI planner" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">AI</span>
+          <span
+            aria-hidden
+            className={`flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isSpeaking ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
+            AI
+          </span>
           <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
           <p className="mt-1 text-xs text-ink-muted">{status === "connected" ? "Listening" : "Not connected"}</p>
         </section>
