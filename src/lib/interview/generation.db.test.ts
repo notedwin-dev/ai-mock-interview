@@ -22,6 +22,7 @@ vi.mock("@/lib/interview/livekit-dispatch", () => ({
 import { createProviderConfiguration, setActiveRuntimeMode } from "@/lib/providers/config";
 import {
   completeGeneration,
+  confirmGeneration,
   GenerationError,
   getGeneration,
   postCaption,
@@ -95,6 +96,19 @@ d("voice interview generation (integration)", () => {
     const done = await getGeneration(userId, started.id);
     expect(done.status).toBe("completed");
     expect(done.invitationPath).toBe(first.invitationPath);
+    expect(done.config?.jobRole).toBe("Frontend Engineer");
+    expect(done.config?.strictness).toBe("balanced");
+
+    const confirmed = await confirmGeneration(userId, started.id, {
+      ...done.config!,
+      experienceLevel: "Senior",
+      strictness: "rigorous",
+      techStack: ["React"],
+    });
+    expect(confirmed.invitationPath).toBe(first.invitationPath);
+    const afterConfirm = await getGeneration(userId, started.id);
+    expect(afterConfirm.status).toBe("confirmed");
+    expect(afterConfirm.config?.strictness).toBe("rigorous");
 
     await db.userAccount.delete({ where: { userId } });
   });
