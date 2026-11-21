@@ -162,11 +162,16 @@ d("interview session service (integration)", () => {
 
   it("creates a realtime session with only a realtime agent configured", async () => {
     const userId = await createUser();
-    await createProviderConfiguration(userId, {
+    const realtime = await createProviderConfiguration(userId, {
       providerType: "preset",
       providerName: "google",
       apiKey: "sk-plaintext-secret",
       capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    // A realtime interview only launches on a probed credential.
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: realtime.userProviderConfigurationId },
+      data: { credentialStatus: "valid" },
     });
     const categoryId = await createCategory();
 

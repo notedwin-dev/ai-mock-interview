@@ -519,7 +519,7 @@ export function ProviderConfigurator({
       {inactiveCount > 0 ? (
         <p className="text-xs text-ink-muted" role="status">
           {inactiveCount} saved configuration{inactiveCount === 1 ? "" : "s"} from the other
-          mode {" "} kept and inactive — switch modes to use {" "}
+          mode {inactiveCount === 1 ? "is" : "are"} kept and inactive — switch modes to use{" "}
           {inactiveCount === 1 ? "it" : "them"} again.
         </p>
       ) : null}
@@ -810,6 +810,7 @@ function ConfiguredRealtimeRow({
         <button
           type="button"
           onClick={() => { setKeyDraft(""); setEditingKey((current) => !current); }}
+          disabled={pending !== null}
           className={GHOST_PILL}
         >
           Replace key

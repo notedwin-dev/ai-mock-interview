@@ -329,6 +329,20 @@ d("provider configuration service (integration)", () => {
     expect(realtime.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
   });
 
+  it("does not let a PATCH smuggle in a different realtime model", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-realtime",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    const updated = await updateProviderConfiguration(userId, "google", {
+      capabilities: { realtime: { modelId: "gpt-4o-mini-transcribe" } },
+    });
+    expect(updated.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
+  });
+
   it("keeps both runtimes saved and uses only the active mode for outbound calls", async () => {
     const userId = await createUser();
     const realtime = await createProviderConfiguration(userId, {
@@ -351,10 +365,29 @@ d("provider configuration service (integration)", () => {
       code: "not_found",
     });
 
+    // Realtime never launches on an unvalidated credential — simulate the
+    // successful probe before expecting the route to resolve.
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: realtime.userProviderConfigurationId },
+      data: { credentialStatus: "valid" },
+    });
     await setActiveRuntimeMode(userId, "realtime");
     const live = await resolveForOutboundCall(userId, "realtime");
     expect(live.providerName).toBe(realtime.providerName);
     await expect(resolveForOutboundCall(userId, "llm")).rejects.toMatchObject({
+      code: "not_found",
+    });
+  });
+
+  it("never resolves an unvalidated realtime credential for launch", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-realtime",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    await expect(resolveForOutboundCall(userId, "realtime")).rejects.toMatchObject({
       code: "not_found",
     });
   });
