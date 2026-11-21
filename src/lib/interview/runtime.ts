@@ -1,8 +1,6 @@
-import {
-  rowsForRuntime,
-  type ProviderConfigSummary,
-  type RuntimeMode,
-} from "@/lib/providers/config";
+// Type-only: this module is imported by a client component, so pulling in the
+// config service (Prisma / node:module) would break the browser bundle.
+import type { ProviderConfigSummary, RuntimeMode } from "@/lib/providers/config";
 import type { InterviewSetupInput } from "./validation";
 
 /**
@@ -12,6 +10,15 @@ import type { InterviewSetupInput } from "./validation";
  * the custom path, and the scorer never gates an interview (it gates reports).
  */
 export type InterviewRuntimeMode = "realtime" | "custom" | "none";
+
+/** Pure, server-free filter: a realtime row carries the realtime capability. */
+function rowsForRuntime(
+  rows: ProviderConfigSummary[],
+  mode: RuntimeMode | null,
+): ProviderConfigSummary[] {
+  if (!mode) return rows;
+  return rows.filter((row) => Boolean(row.capabilities.realtime) === (mode === "realtime"));
+}
 
 export interface RuntimeSelection {
   mode: InterviewRuntimeMode;
