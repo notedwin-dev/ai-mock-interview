@@ -329,15 +329,6 @@ export async function setActiveRuntimeMode(
   });
 }
 
-/** A realtime row is one carrying the realtime capability; everything else is custom. */
-export function rowsForRuntime<T extends { capabilities: CapabilitiesJson }>(
-  rows: T[],
-  mode: RuntimeMode | null,
-): T[] {
-  if (!mode) return rows;
-  return rows.filter((row) => Boolean(row.capabilities.realtime) === (mode === "realtime"));
-}
-
 /**
  * Creates a configuration row for the caller. An API key is mandatory on
  * create (BYOK everywhere, preset or custom); the credential starts
