@@ -30,6 +30,12 @@ missing.
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | WebRTC room (server) | LiveKit project credentials used to mint short-lived participant tokens. **Never** send the secret to the browser or put it in a `NEXT_PUBLIC_` variable |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | LiveKit agent / free-tier smokes | Owner-supplied Gemini key (free tier). Used by the LiveKit Agents Gemini Live realtime model and by the one-off free-tier evidence scripts; never printed |
 
+Start the voice interview generator with `node scripts/livekit-generator.mjs`
+(agent name `aimis-generator`) alongside `scripts/livekit-interviewer.mjs`. Both
+use the same `GOOGLE_GENERATIVE_AI_API_KEY` and LiveKit credentials; no Vapi
+account or key is required, and the worker capability for each generation is
+stored only as a hash server-side.
+
 For the LiveKit interview runtime, configure a webhook in the LiveKit project
 pointing at `https://<your-host>/api/v1/webhooks/livekit` for `room_started` and
 `room_finished`. The endpoint verifies signatures with `WebhookReceiver` using

@@ -2,7 +2,7 @@ import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib
 import { db } from "@/lib/db";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { z } from "zod";
-import { createInterviewSession, type SessionSummary } from "./service";
+import { createInterviewSession, type CreatedInterview } from "./service";
 import type { InterviewSetupInput } from "./validation";
 
 /**
@@ -161,7 +161,7 @@ export interface AgentCreationDeps {
   createSession?: (
     userId: string,
     input: InterviewSetupInput,
-  ) => Promise<SessionSummary>;
+  ) => Promise<CreatedInterview>;
 }
 
 /**
@@ -175,7 +175,7 @@ export async function createInterviewFromAgentConfig(
   userId: string,
   input: unknown,
   deps: AgentCreationDeps = {},
-): Promise<SessionSummary> {
+): Promise<CreatedInterview> {
   let parsed: z.infer<typeof agentCreationInputSchema>;
   try {
     parsed = agentCreationInputSchema.parse(input);

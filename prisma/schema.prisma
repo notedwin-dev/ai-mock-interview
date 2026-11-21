@@ -62,6 +62,7 @@ model UserAccount {
   candidateProfile      CandidateProfile?
   providerConfigurations UserProviderConfiguration[]
   sessions              InterviewSession[]
+  generations           InterviewGeneration[]
   createdCategories     InterviewCategory[]          @relation("CategoryCreatedBy")
   updatedCategories     InterviewCategory[]          @relation("CategoryUpdatedBy")
   createdTemplates      InterviewQuestionTemplate[]  @relation("TemplateCreatedBy")
@@ -212,6 +213,27 @@ model InterviewSession {
   @@index([categoryId])
   @@index([questionTemplateId])
   @@map("interview_session")
+}
+
+/// A voice-driven interview generation session. Holds only the conversational
+/// state needed to turn a spoken briefing into a structured interview; the raw
+/// worker token is never stored (only its hash).
+model InterviewGeneration {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  roomName         String   @unique @map("room_name") @db.VarChar(120)
+  workerTokenHash  String   @map("worker_token_hash") @db.VarChar(64)
+  status           String   @default("collecting") @map("status") @db.VarChar(20)
+  captionJson      Json?    @map("caption_json") @db.JsonB
+  configJson       Json?    @map("config_json") @db.JsonB
+  invitationPath   String?  @map("invitation_path") @db.VarChar(255)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user UserAccount @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("interview_generation")
 }
 
 model ConversationMessage {
