@@ -119,10 +119,10 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
               <button
                 type="button"
                 onClick={toggleMute}
-                disabled={!cameraOn}
                 title={muted ? 'Unmute' : 'Mute'}
                 aria-label={muted ? 'Unmute' : 'Mute'}
-                className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${muted ? 'bg-rose-200 text-rose-900' : 'bg-white/90 text-neutral-900 hover:bg-white'}`}>
+                aria-pressed={muted}
+                className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors ${muted ? 'bg-rose-200 text-rose-900' : 'bg-white/90 text-neutral-900 hover:bg-white'}`}>
                 {muted ? (
                   <MicOff className="h-5 w-5" aria-hidden />
                 ) : (
@@ -136,15 +136,16 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                   else void enablePreview();
                 }}
                 disabled={busy}
-                title={cameraOn ? 'Stop preview' : 'Enable camera & mic'}
-                aria-label={cameraOn ? 'Stop preview' : 'Enable camera & mic'}
-                className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:opacity-50 ${cameraOn ? 'bg-rose-200 text-rose-900' : 'bg-white/90 text-neutral-900 hover:bg-white'}`}>
+                title={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+                aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+                aria-pressed={cameraOn}
+                className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:opacity-50 ${cameraOn ? 'bg-white/90 text-neutral-900 hover:bg-white' : 'bg-rose-200 text-rose-900'}`}>
                 {busy ? (
                   <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
                 ) : cameraOn ? (
-                  <VideoOff className="h-5 w-5" aria-hidden />
-                ) : (
                   <Video className="h-5 w-5" aria-hidden />
+                ) : (
+                  <VideoOff className="h-5 w-5" aria-hidden />
                 )}
               </button>
             </div>
