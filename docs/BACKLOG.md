@@ -89,7 +89,7 @@ mints mic-only participant tokens per invitation, creates one named agent
 dispatch per room, and the worker persists final transcript events into the
 chronological record. Camera publishing is never granted (ADR-005). Live check:
 token 200 with `publishSources: ["microphone"]`, dispatch with interview
-metadata + 1 job, worker registered as `aimis-interviewer`, and the browser
+metadata + 1 job, worker registered as `aimis-agent` (role `interviewer`), and the browser
 showed "Connected · 1 other participant(s)" with the agent present.
 
 Dependencies that gate M1: 1 → 2/3/4 → 7; 5 gates M2's 9; 21 gates 8's UI detail.

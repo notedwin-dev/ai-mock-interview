@@ -6,14 +6,18 @@ import type { LiveKitConfig } from "@/lib/livekit/env";
  * interview room, carrying the interview context to the Gemini Live agent.
  * Agent failures never block the candidate from entering the room.
  */
-export const INTERVIEWER_AGENT_NAME = "aimis-interviewer";
-export const GENERATOR_AGENT_NAME = "aimis-generator";
+/** One deployed LiveKit agent serves both roles (Build plan limit). */
+export const AIMIS_AGENT_NAME = "aimis-agent";
 
 export interface DispatchContext {
   room: string;
   inviteToken: string;
   jobRole: string;
   jobDescription: string | null;
+  evaluationMode?: string;
+  experienceLevel?: string | null;
+  techStack?: string[];
+  questionCount?: number | null;
 }
 
 interface DispatchClient {
@@ -65,16 +69,21 @@ export async function dispatchInterviewerAgent(
   // that is not our agent and must not suppress our explicit dispatch.
   const existing = (await client.listDispatch(context.room)).filter(
     (entry) =>
-      (entry as { agentName?: string }).agentName === INTERVIEWER_AGENT_NAME,
+      (entry as { agentName?: string }).agentName === AIMIS_AGENT_NAME,
   );
   if (existing.length > 0) return false;
 
-  await client.createDispatch(context.room, INTERVIEWER_AGENT_NAME, {
+  await client.createDispatch(context.room, AIMIS_AGENT_NAME, {
     metadata: JSON.stringify({
+      role: "interviewer",
       sessionId: context.room,
       inviteToken: context.inviteToken,
       jobRole: context.jobRole,
       jobDescription: context.jobDescription,
+      evaluationMode: context.evaluationMode,
+      experienceLevel: context.experienceLevel,
+      techStack: context.techStack,
+      questionCount: context.questionCount,
     }),
   });
   return true;
@@ -105,11 +114,12 @@ export async function dispatchGeneratorAgent(
   }
   const client = create(config);
   const existing = (await client.listDispatch(context.room)).filter(
-    (entry) => (entry as { agentName?: string }).agentName === GENERATOR_AGENT_NAME,
+    (entry) => (entry as { agentName?: string }).agentName === AIMIS_AGENT_NAME,
   );
   if (existing.length > 0) return false;
-  await client.createDispatch(context.room, GENERATOR_AGENT_NAME, {
+  await client.createDispatch(context.room, AIMIS_AGENT_NAME, {
     metadata: JSON.stringify({
+      role: "generator",
       generationId: context.generationId,
       workerToken: context.workerToken,
       room: context.room,

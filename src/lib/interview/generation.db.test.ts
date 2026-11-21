@@ -16,7 +16,7 @@ vi.mock("@/lib/interview/livekit-token", () => ({
 }));
 vi.mock("@/lib/interview/livekit-dispatch", () => ({
   dispatchGeneratorAgent: dispatchMock,
-  GENERATOR_AGENT_NAME: "aimis-generator",
+  AIMIS_AGENT_NAME: "aimis-agent",
 }));
 
 import { createProviderConfiguration, setActiveRuntimeMode } from "@/lib/providers/config";
