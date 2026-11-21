@@ -113,7 +113,8 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   function join() {
     saveDevicePreferences({ micId: micId || null, speakerId: speakerId || null, muted });
     stopCamera();
-    router.push(`/i/${token}/room`);
+    // The query flag survives the route transition; the room connects on mount.
+    router.push(`/i/${token}/room?autojoin=1`);
   }
 
   const micOptions = devices.filter((d) => d.kind === "audioinput");

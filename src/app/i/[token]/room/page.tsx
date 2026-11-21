@@ -16,6 +16,8 @@ export default async function RoomPage(
   props: PageProps<"/i/[token]/room">,
 ) {
   const { token } = await props.params;
+  const search = await props.searchParams;
+  const autoJoin = search?.autojoin === "1";
   const interview = await resolveInvitation(token);
   if (!interview || (interview.status !== "scheduled" && interview.status !== "active")) notFound();
 
@@ -24,7 +26,7 @@ export default async function RoomPage(
   return (
     <main className="mx-auto w-full max-w-[72rem] flex-1 px-4 py-4 lg:px-8">
       {isRealtime ? (
-        <WebRTCRoom token={token} />
+        <WebRTCRoom token={token} autoJoin={autoJoin} />
       ) : (
         <InterviewRoom token={token} interview={interview} />
       )}
