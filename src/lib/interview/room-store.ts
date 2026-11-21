@@ -174,8 +174,10 @@ export function createDefaultRoomStore(): RoomStore {
     },
 
     async activate(sessionId) {
-      await db.interviewSession.update({
-        where: { sessionId },
+      // Conditional write: a duplicate/out-of-order webhook delivery must not
+      // rewrite startedAt of a session that has already moved on.
+      await db.interviewSession.updateMany({
+        where: { sessionId, status: "scheduled" },
         data: { status: "active", startedAt: new Date() },
       });
     },
@@ -213,6 +215,19 @@ export function createDefaultRoomStore(): RoomStore {
       return toEntry(row);
     },
 
+    async appendInterviewerWithNewUnit(sessionId, contentText) {
+      const row = await allocate(sessionId, "sequence_number", async (tx) => {
+        const unitId = await openNextUnit(tx, sessionId);
+        return insertMessage(tx, sessionId, {
+          speakerType: "interviewer",
+          messageKind: "primary_question",
+          contentText,
+          assessmentUnitId: unitId,
+        });
+      });
+      return toEntry(row);
+    },
+
     async activeUnit(sessionId) {
       const unit = await db.interviewAssessmentUnit.findFirst({
         where: { sessionId, status: "open" },
@@ -227,8 +242,10 @@ export function createDefaultRoomStore(): RoomStore {
     },
 
     async complete(sessionId) {
-      await db.interviewSession.update({
-        where: { sessionId },
+      // Conditional write: a repeated room_finished (or a late delivery after
+      // the candidate already ended) never rewrites completedAt.
+      await db.interviewSession.updateMany({
+        where: { sessionId, status: "active" },
         data: { status: "completed", completedAt: new Date() },
       });
     },

@@ -20,6 +20,13 @@ describe("LiveKit room lifecycle webhooks", () => {
     expect(store.activate).not.toHaveBeenCalled();
   });
 
+  it("completes a scheduled session on an early room_finished", async () => {
+    const store = fakeStore();
+    await applyRoomLifecycle("room_finished", "scheduled", "session-1", store);
+    expect(store.activate).toHaveBeenCalledWith("session-1");
+    expect(store.complete).toHaveBeenCalledWith("session-1");
+  });
+
   it("ignores duplicate or out-of-order deliveries", async () => {
     const store = fakeStore();
     await applyRoomLifecycle("room_started", "active", "session-1", store);

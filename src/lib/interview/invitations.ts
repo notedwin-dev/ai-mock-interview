@@ -108,7 +108,6 @@ export async function revokeInvitation(userId: string, sessionId: string): Promi
 }
 
 export interface EndedInterview {
-  sessionId: string;
   status: string;
   completedAt: string | null;
   /** True when the interview was already completed before this request. */
@@ -143,7 +142,6 @@ export async function endInvitationInterview(token: string): Promise<EndedInterv
     throw new InvitationError("invalid_state", "This interview is not running.");
   }
   return {
-    sessionId: current.sessionId,
     status: current.status,
     completedAt: current.completedAt?.toISOString() ?? null,
     alreadyEnded: ended.count === 0,

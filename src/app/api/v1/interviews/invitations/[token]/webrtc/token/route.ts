@@ -15,9 +15,17 @@ export async function POST(
 ): Promise<Response> {
   try {
     const { token } = await ctx.params;
-    const interview = await createDefaultRoomStore().context(token);
+    const store = createDefaultRoomStore();
+    const interview = await store.context(token);
     if (!interview || (interview.status !== "scheduled" && interview.status !== "active")) {
       return jsonError(404, "invitation_not_found", "This interview link is not available.");
+    }
+    // Joining is the moment a scheduled interview really starts. The LiveKit
+    // room_finished webhook remains authoritative for completion; activating
+    // here makes the room's End control usable immediately and keeps the
+    // session human-state truthful even before any webhook is configured.
+    if (interview.status === "scheduled") {
+      await store.activate(interview.sessionId);
     }
 
     let config;

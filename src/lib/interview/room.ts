@@ -54,6 +54,11 @@ export interface RoomStore {
     messageKind: string,
     assessmentUnitId: string | null,
   ): Promise<TranscriptEntry>;
+  /** Opens the next unit and stores its first message in ONE locked transaction. */
+  appendInterviewerWithNewUnit(
+    sessionId: string,
+    contentText: string,
+  ): Promise<TranscriptEntry>;
   activeUnit(sessionId: string): Promise<string | null>;
   /** Opens the next assessment unit, closing any unit still open (FR-TRANSCRIPT-004). */
   openUnit(sessionId: string): Promise<string>;
@@ -213,16 +218,22 @@ export async function runRoomTurn(
   // unit so no question ends up unassessable.
   if (persistedKind === "follow_up_question" && !unitId) persistedKind = "primary_question";
   if (persistedKind === "primary_question") {
-    unitId = await store.openUnit(context.sessionId);
-  } else if (persistedKind === "acknowledgement") {
-    unitId = null;
+    // One locked write: a concurrent realtime line cannot close the unit
+    // between opening it and attaching this question.
+    const entry = await store.appendInterviewerWithNewUnit(
+      context.sessionId,
+      output.interviewerText,
+    );
+    unitId = entry.assessmentUnitId;
+  } else {
+    if (persistedKind === "acknowledgement") unitId = null;
+    await store.appendInterviewer(
+      context.sessionId,
+      output.interviewerText,
+      persistedKind,
+      unitId,
+    );
   }
-  await store.appendInterviewer(
-    context.sessionId,
-    output.interviewerText,
-    persistedKind,
-    unitId,
-  );
 
   // Voice is an enhancement on top of the persisted transcript: a missing or
   // failing TTS configuration never blocks the conversation (FR-INTERVIEW-003).
