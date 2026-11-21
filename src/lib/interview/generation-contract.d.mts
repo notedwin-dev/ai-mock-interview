@@ -14,13 +14,28 @@ export interface MappedGenerationConfig {
   category: "general" | "technical" | "behavioral";
 }
 
+export interface PlanningState {
+  index: number;
+  answers: Partial<GenerationAnswers>;
+  ready: boolean;
+  done: boolean;
+}
+
+export type GatherStep =
+  | { done: false; question: string }
+  | { done: true; answers: GenerationAnswers }
+  | null;
+
 export const GENERATION_FIELDS: ReadonlyArray<{
   name: string;
   description: string;
   required: boolean;
 }>;
-export const TOOL_PARAMETERS: Record<string, unknown>;
 export function greeting(userName?: string): string;
 export function closingLine(): string;
 export function buildInstructions(userName?: string): string;
+export function createPlanningState(): PlanningState;
+export function beginGathering(state: PlanningState): string | null;
+export function nextQuestion(state: PlanningState): string | null;
+export function recordAnswer(state: PlanningState, transcript: string): GatherStep;
 export function mapAnswersToConfig(answers: GenerationAnswers): MappedGenerationConfig;
