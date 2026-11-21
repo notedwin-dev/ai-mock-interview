@@ -1,23 +1,36 @@
-# Image for a single AIMIS LiveKit agent role. Build from the repo root:
+# syntax=docker/dockerfile:1
+# One image per AIMIS agent role, built from the repo root:
 #   docker build -f agents/Dockerfile --build-arg AGENT_ENTRY=scripts/livekit-generator.mjs -t aimis-generator .
 #   docker build -f agents/Dockerfile --build-arg AGENT_ENTRY=scripts/livekit-interviewer.mjs -t aimis-interviewer .
 #
-# Deploy each image to LiveKit Cloud (see docs/DEPLOYMENT.md). Vercel hosts the
-# Next.js app only; these workers need a long-lived process and cannot run there.
-FROM node:22-slim
+# Based on the official LiveKit Agent Dockerfile guidance:
+# https://docs.livekit.io/deploy/agents/builds/
+# ca-certificates is required by the SDK's native Rust core for TLS.
+ARG NODE_VERSION=24
+FROM node:${NODE_VERSION}-slim AS base
 
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm@12.21.0
+
+FROM base AS build
 WORKDIR /app
-
-RUN corepack enable && corepack prepare pnpm@12.21.0 --activate
-
 COPY package.json pnpm-lock.yaml ./
-# Workers need no generated Prisma client, so skip the postinstall prisma step.
-RUN pnpm install --frozen-lockfile --prod --ignore-scripts
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm prune --prod
 
-COPY scripts ./scripts
-COPY src/lib/interview/generation-contract.mjs ./src/lib/interview/generation-contract.mjs
+FROM base
+ARG UID=10001
+RUN adduser --disabled-password --gecos "" --home "/app" --shell "/sbin/nologin" --uid "${UID}" appuser
+WORKDIR /app
+COPY --from=build --chown=appuser:appuser /app /app
+USER appuser
+ENV NODE_ENV=production
 
 ARG AGENT_ENTRY=scripts/livekit-interviewer.mjs
 ENV AGENT_ENTRY=${AGENT_ENTRY}
-
 CMD ["sh", "-c", "node \"$AGENT_ENTRY\""]
