@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2, PhoneOff } from "lucide-react";
 import { requestEndInterview, type EndInterviewSuccess } from "@/lib/interview/end-interview-client";
 
@@ -13,12 +14,15 @@ import { requestEndInterview, type EndInterviewSuccess } from "@/lib/interview/e
 export function EndInterviewButton({
   token,
   onEnded,
+  feedbackHref,
   label = "End interview",
 }: {
   token: string;
   onEnded: (result: EndInterviewSuccess) => void;
+  feedbackHref?: string;
   label?: string;
 }) {
+  const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,6 +39,7 @@ export function EndInterviewButton({
       return;
     }
     onEnded(outcome);
+    if (feedbackHref) router.push(feedbackHref);
   }
 
   return (

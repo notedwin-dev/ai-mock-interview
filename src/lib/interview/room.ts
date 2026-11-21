@@ -18,6 +18,9 @@ export interface RoomContext {
   userId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   evaluationMode: string;
   status: string;
 }
@@ -125,7 +128,7 @@ export const MAX_PRIMARY_QUESTIONS = 6;
 function roomInstructions(context: RoomContext, primaryCount: number): string {
   return [
     "You are the AIMIS AI interviewer in a live mock interview.",
-    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Target question count: ${context.questionCount ?? "not specified"}. Evaluation mode: ${context.evaluationMode}.`,
     "Ask short, focused questions and never invent facts about the candidate.",
     "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer; use transition to move on.",
     primaryCount >= MAX_PRIMARY_QUESTIONS

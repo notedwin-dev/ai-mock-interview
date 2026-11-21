@@ -30,6 +30,7 @@ interface RecentSessionRow {
   evaluationMode: string;
   status: string;
   createdAt: Date;
+  completedAt: Date | null;
 }
 
 function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
@@ -44,6 +45,7 @@ function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
       evaluationMode: true,
       status: true,
       createdAt: true,
+      completedAt: true,
     },
   });
 }

@@ -20,7 +20,7 @@ describe("voice generation contract", () => {
     GENERATION_FIELDS.forEach((field, index) => {
       expect(instructions).toContain(`${index + 1}. ${field.description}`);
     });
-    expect(instructions).toContain("Ask the following five questions IN ORDER");
+    expect(instructions).toContain("Ask the following six questions IN ORDER");
     expect(instructions).toContain("Wait for the candidate's answer before asking the next one");
     expect(instructions).toContain("You are NOT conducting the interview itself");
     expect(instructions).toContain("Never skip a question, never reorder them");
@@ -39,12 +39,16 @@ describe("voice generation contract", () => {
         level: "Senior",
         techstack: "React, TypeScript",
         amount: "5",
+        strictness: "Rigorous",
       }),
     ).toEqual({
       purpose: "Prepare a mixed interview for Frontend Engineer.",
       jobRole: "Frontend Engineer",
-      jobDescription: "Experience level: Senior. Tech stack: React, TypeScript. Number of questions: 5.",
-      strictness: "balanced",
+      jobDescription: "",
+      experienceLevel: "Senior",
+      techStack: ["React", "TypeScript"],
+      questionCount: 5,
+      strictness: "rigorous",
       category: "general",
     });
   });

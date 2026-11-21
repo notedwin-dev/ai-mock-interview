@@ -12,6 +12,9 @@ const context: RoomContext = {
   userId: "owner-1",
   jobRole: "Backend Engineer",
   jobDescription: "Design APIs",
+  experienceLevel: null,
+  techStack: [],
+  questionCount: null,
   evaluationMode: "balanced",
   status: "scheduled",
 };

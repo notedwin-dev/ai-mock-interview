@@ -17,6 +17,9 @@ describe("GET /api/v1/interviews/invitations/[token]", () => {
       sessionId: "session-1",
       jobRole: "Backend Engineer",
       jobDescription: "APIs",
+      experienceLevel: null,
+      techStack: [],
+      questionCount: null,
       categoryNameSnapshot: "General",
       evaluationMode: "balanced",
       runtimeMode: "custom",
@@ -27,7 +30,7 @@ describe("GET /api/v1/interviews/invitations/[token]", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ interview: view });
     expect(Object.keys(view).sort()).toEqual([
-      "categoryNameSnapshot", "evaluationMode", "jobDescription", "jobRole", "runtimeMode", "sessionId", "status",
+      "categoryNameSnapshot", "evaluationMode", "experienceLevel", "jobDescription", "jobRole", "questionCount", "runtimeMode", "sessionId", "status", "techStack",
     ]);
   });
 

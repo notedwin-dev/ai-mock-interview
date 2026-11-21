@@ -2,6 +2,7 @@ import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import { cli, defineAgent, voice, WorkerOptions } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
+import { CAPTION_TOPIC } from "../src/lib/interview/generation-contract.mjs";
 
 /**
  * AIMIS LiveKit interviewer agent (owner direction: Gemini only).
@@ -61,6 +62,15 @@ export default defineAgent({
      */
     let queue = Promise.resolve();
     let lineCounter = 0;
+    const encoder = new TextEncoder();
+    function publishCaption(speaker, text, isFinal) {
+      if (!text) return;
+      const payload = encoder.encode(JSON.stringify({ speaker, text: text.slice(0, 1000), isFinal }));
+      void ctx.room.localParticipant.publishData(payload, {
+        topic: CAPTION_TOPIC,
+        reliable: isFinal,
+      });
+    }
     const persist = (speaker, text, createdAt) => {
       if (!meta.inviteToken || !text) return queue;
       const clientId = `lk-${createdAt || Date.now()}-${speaker}-${++lineCounter}`;
@@ -90,11 +100,16 @@ export default defineAgent({
     };
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
-      if (event.isFinal) persist("candidate", event.transcript);
+      const text = String(event.transcript ?? "").trim();
+      if (!text) return;
+      publishCaption("candidate", text, event.isFinal);
+      if (event.isFinal) persist("candidate", text);
     });
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {
       if (event.item?.role === "assistant") {
-        persist("interviewer", itemText(event.item.content), event.createdAt);
+        const text = itemText(event.item.content);
+        publishCaption("agent", text, true);
+        persist("interviewer", text, event.createdAt);
       }
     });
 

@@ -34,6 +34,9 @@ export interface InvitationView {
   sessionId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   categoryNameSnapshot: string;
   evaluationMode: string;
   /** The one runtime this session runs (ADR-006): exactly one room UI is shown. */
@@ -89,13 +92,22 @@ export async function resolveInvitation(token: string): Promise<InvitationView |
       sessionId: true,
       jobRole: true,
       jobDescription: true,
+      experienceLevel: true,
+      techStack: true,
+      questionCount: true,
       categoryNameSnapshot: true,
       evaluationMode: true,
       runtimeMode: true,
       status: true,
     },
   });
-  return session ?? null;
+  if (!session) return null;
+  return {
+    ...session,
+    techStack: Array.isArray(session.techStack)
+      ? session.techStack.filter((value): value is string => typeof value === "string")
+      : [],
+  };
 }
 
 /** Invalidates the link. Safe to call twice. */

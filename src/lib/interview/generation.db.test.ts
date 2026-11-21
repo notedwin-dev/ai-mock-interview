@@ -85,9 +85,10 @@ d("voice interview generation (integration)", () => {
       level: "Mid level",
       techstack: "React, TypeScript",
       amount: "5",
+      strictness: "Balanced",
     };
     const first = await completeGeneration(started.id, workerToken, config);
-    expect(first.invitationPath).toMatch(/^\/i\//);
+    expect(first.invitationPath).toMatch(/^\/interview\//);
     const second = await completeGeneration(started.id, workerToken, config);
     expect(second.invitationPath).toBe(first.invitationPath);
 

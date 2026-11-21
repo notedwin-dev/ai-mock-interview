@@ -27,5 +27,5 @@ export function hashInvitationToken(token: string): string {
 
 /** The link path handed to the owner — a real route, never a made-up URL. */
 export function invitationPath(token: string): string {
-  return `/i/${token}`;
+  return `/interview/${token}`;
 }

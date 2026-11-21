@@ -81,6 +81,9 @@ export interface SessionSummary {
   sessionId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   categoryId: string;
   categoryCodeSnapshot: string;
   categoryNameSnapshot: string;
@@ -119,6 +122,11 @@ function toSessionSummary(
     sessionId: session.sessionId,
     jobRole: session.jobRole,
     jobDescription: session.jobDescription,
+    experienceLevel: session.experienceLevel,
+    techStack: Array.isArray(session.techStack)
+      ? (session.techStack as unknown[]).filter((v): v is string => typeof v === "string")
+      : [],
+    questionCount: session.questionCount,
     categoryId: session.categoryId,
     categoryCodeSnapshot: session.categoryCodeSnapshot,
     categoryNameSnapshot: session.categoryNameSnapshot,
@@ -267,6 +275,9 @@ export async function createInterviewSession(
       userId,
       jobRole: parsed.jobRole,
       jobDescription: parsed.jobDescription ?? null,
+      experienceLevel: parsed.experienceLevel ?? null,
+      techStack: parsed.techStack ? (parsed.techStack as unknown as Prisma.InputJsonValue) : undefined,
+      questionCount: parsed.questionCount ?? null,
       categoryId: category.categoryId,
       categoryCodeSnapshot: category.categoryCode,
       categoryNameSnapshot: category.categoryName,

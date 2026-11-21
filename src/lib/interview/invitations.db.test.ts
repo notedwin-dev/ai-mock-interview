@@ -67,7 +67,7 @@ d("invitation links (TT-21)", () => {
     const issued = await issueInvitation(ownerId, session.sessionId);
 
     expect(issued.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(issued.path).toBe(`/i/${issued.token}`);
+    expect(issued.path).toBe(`/interview/${issued.token}`);
     const stored = await db.interviewSession.findUniqueOrThrow({ where: { sessionId: session.sessionId } });
     expect(stored.invitationTokenHash).toBe(hashInvitationToken(issued.token));
     expect(stored.invitationTokenHash).not.toContain(issued.token);
@@ -83,6 +83,9 @@ d("invitation links (TT-21)", () => {
       sessionId: session.sessionId,
       jobRole: "Backend Engineer",
       jobDescription: "Design APIs",
+      experienceLevel: null,
+      techStack: [],
+      questionCount: null,
       categoryNameSnapshot: "General",
       evaluationMode: "balanced",
       runtimeMode: "custom",

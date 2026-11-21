@@ -4,12 +4,16 @@ export interface GenerationAnswers {
   level: string;
   techstack: string;
   amount: string;
+  strictness: string;
 }
 
 export interface MappedGenerationConfig {
   purpose: string;
   jobRole: string;
   jobDescription: string;
+  experienceLevel: string;
+  techStack: string[];
+  questionCount: number | undefined;
   strictness: "supportive" | "balanced" | "rigorous";
   category: "general" | "technical" | "behavioral";
 }

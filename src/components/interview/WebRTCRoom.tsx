@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquare, Mic, MicOff, X } from "lucide-react";
+import { Loader2, MessageSquare, X } from "lucide-react";
 import { Room, RoomEvent, Track, type RemoteParticipant } from "livekit-client";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { readDevicePreferences, saveDevicePreferences } from "@/lib/interview/device-preferences";
+import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
 /**
@@ -21,7 +23,15 @@ type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
 const GHOST =
   "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
-export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoin?: boolean }) {
+export function WebRTCRoom({
+  token,
+  sessionId,
+  autoJoin = false,
+}: {
+  token: string;
+  sessionId: string;
+  autoJoin?: boolean;
+}) {
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -36,6 +46,9 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
   const [notice, setNotice] = useState<string | null>(null);
   const [messages, setMessages] = useState<TranscriptEntry[]>([]);
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const [caption, setCaption] = useState("The interviewer will speak shortly.");
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
 
   useEffect(() => () => {
     leavingRef.current = true;
@@ -157,6 +170,20 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
       room.on(RoomEvent.TrackUnsubscribed, (track) => {
         track.detach().forEach((element) => element.remove());
       });
+      room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+        if (topic !== CAPTION_TOPIC) return;
+        try {
+          const parsed = JSON.parse(new TextDecoder().decode(payload)) as { text?: string };
+          if (parsed.text) setCaption(parsed.text);
+        } catch {
+          // Ignore malformed caption packets.
+        }
+      });
+      room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        const local = room.localParticipant.identity;
+        setIsAgentSpeaking(speakers.some((speaker) => speaker.identity !== local));
+        setIsUserSpeaking(speakers.some((speaker) => speaker.identity === local));
+      });
       room.on(RoomEvent.Reconnecting, () => setStatus("reconnecting"));
       room.on(RoomEvent.Reconnected, () => {
         setStatus("connected");
@@ -202,7 +229,7 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
     if (!autoJoin || didAutoJoinRef.current) return;
     didAutoJoinRef.current = true;
     // Drop the one-shot flag from the URL before connecting.
-    window.history.replaceState(null, "", `/i/${token}/room`);
+    window.history.replaceState(null, "", `/interview/${token}/room`);
     // A microtask cannot be cancelled by the route-transition cleanup that
     // previously swallowed the deferred join.
     queueMicrotask(() => void join());
@@ -242,7 +269,6 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
     saveDevicePreferences({ ...current, muted: nextMuted });
   }
 
-  const lastInterviewer = [...messages].reverse().find((m) => m.speakerType === "interviewer");
   const aiState =
     status === "connected" || status === "reconnecting"
       ? participants.length > 0
@@ -291,6 +317,7 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
               ) : null}
               <EndInterviewButton
                 token={token}
+                feedbackHref={`/dashboard/interview/${sessionId}/feedback`}
                 onEnded={() => {
                   setEnded(true);
                   void leave();
@@ -311,39 +338,14 @@ export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoi
         </div>
       </section>
 
-      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
-        <section aria-label="AI interviewer" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">A</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
-          <p className="mt-1 text-xs text-ink-muted">{aiState}</p>
-          {lastInterviewer ? (
-            <p className="mt-4 max-w-md text-sm leading-relaxed text-ink-soft">{lastInterviewer.contentText}</p>
-          ) : (
-            <p className="mt-4 max-w-md text-sm text-ink-muted">
-              The interviewer speaks in the room. Open the conversation to follow the transcript.
-            </p>
-          )}
-        </section>
-
-        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
-          <button
-            type="button"
-            onClick={() => void toggleMute()}
-            aria-label="Microphone"
-            title={muted ? "Unmute" : "Mute"}
-            aria-pressed={muted}
-            className={`${GHOST} mt-4`}>
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute" : "Mute"}
-          </button>
-          <p className="mt-3 max-w-xs text-xs text-ink-muted">
-            Your camera is never used as AI input. Only your microphone is sent to the live room.
-          </p>
-        </section>
-      </div>
+      <VoiceRoomPanels
+        isAgentSpeaking={isAgentSpeaking}
+        isUserSpeaking={isUserSpeaking}
+        muted={muted}
+        caption={caption}
+        onToggleMute={() => void toggleMute()}
+        agentState={aiState}
+      />
 
       <div ref={audioRef} aria-hidden />
       {notice ? <p className="text-xs text-amber-300" role="status">{notice}</p> : null}
