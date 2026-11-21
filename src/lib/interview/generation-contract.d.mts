@@ -26,6 +26,8 @@ export type GatherStep =
   | { done: true; answers: GenerationAnswers }
   | null;
 
+export const CAPTION_TOPIC: string;
+
 export const GENERATION_FIELDS: ReadonlyArray<{
   name: string;
   description: string;

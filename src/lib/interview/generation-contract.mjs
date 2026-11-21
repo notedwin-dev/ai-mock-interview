@@ -6,6 +6,9 @@
  * copies between the browser, the API and the agent.
  */
 
+/** LiveKit room data topic for instant captions during generation. */
+export const CAPTION_TOPIC = "aimis-caption";
+
 export const GENERATION_FIELDS = [
   {
     name: "role",
