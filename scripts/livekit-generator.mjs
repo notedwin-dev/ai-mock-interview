@@ -99,8 +99,9 @@ export default defineAgent({
 
     /**
      * A RealtimeModel has no separate TTS model, so session.say() throws.
-     * generateReply uses the model's own speech; verbatim instructions keep the
-     * conversation on contract without letting the model improvise.
+     * generateReply uses the model's own speech generation. The text is passed
+     * ONLY as a one-turn instruction — never as userInput — so the agent speaks
+     * the contract line instead of repeating the candidate's answer.
      */
     const say = async (text) => {
       if (!text) return;
@@ -108,9 +109,7 @@ export default defineAgent({
       publishCaption("agent", text, true);
       try {
         await session.generateReply({
-          userInput: text,
-          instructions:
-            "Repeat the user's message word for word as your spoken reply. Do not answer it, paraphrase it, or add anything.",
+          instructions: `Speak exactly these words to the candidate: "${text}". Do not answer, paraphrase, add anything, or repeat any earlier user message.`,
         }).waitForPlayout();
       } finally {
         speaking = false;
