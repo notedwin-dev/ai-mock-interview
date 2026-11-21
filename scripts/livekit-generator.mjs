@@ -83,17 +83,15 @@ export default defineAgent({
     }
 
     const session = new voice.AgentSession({
-      // Manual turn detection: no automatic model reply after user speech.
-      turnHandling: { turnDetection: "manual" },
+      // Keep the realtime model's native turn detection and transcription.
+      // Automatic replies are paused after start (below) so the model listens
+      // and transcribes but never interviews the candidate on its own.
       llm: new google.beta.realtime.RealtimeModel({
         model: REALTIME_MODEL,
         apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
         instructions: buildInstructions(userName),
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        realtimeInputConfig: {
-          automaticActivityDetection: { disabled: true },
-        },
       }),
     });
 
@@ -108,10 +106,14 @@ export default defineAgent({
       speaking = true;
       publishCaption("agent", text, true);
       try {
+        // Explicit replies are allowed; automatic ones stay blocked by the
+        // StopResponse hook on the agent.
+        session.resumeReplyAuthorization();
         await session.generateReply({
           instructions: `Speak exactly these words to the candidate: "${text}". Do not answer, paraphrase, add anything, or repeat any earlier user message.`,
         }).waitForPlayout();
       } finally {
+        session.pauseReplyAuthorization();
         speaking = false;
       }
     };
@@ -157,9 +159,16 @@ export default defineAgent({
     });
 
     await session.start({
-      agent: new voice.Agent({ instructions: buildInstructions(userName) }),
+      agent: new voice.Agent({
+        instructions: buildInstructions(userName),
+        // Keep listening/transcribing, but never auto-reply to the candidate.
+        onUserTurnCompleted: () => {
+          throw new voice.StopResponse();
+        },
+      }),
       room: ctx.room,
     });
+    session.pauseReplyAuthorization();
 
     // Say node: exact greeting, then the first gather question.
     await say(greeting(userName));

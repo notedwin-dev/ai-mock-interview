@@ -30,6 +30,7 @@ export function VoiceGenerationRoom() {
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
   const startedAtRef = useRef(Date.now());
+  const agentPresentRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
@@ -70,9 +71,11 @@ export function VoiceGenerationRoom() {
           track.detach().forEach((element) => element.remove());
         });
         room.on(RoomEvent.ParticipantConnected, () => {
+          agentPresentRef.current = true;
           if (active) setAgentPresent(true);
         });
         room.on(RoomEvent.ParticipantDisconnected, () => {
+          agentPresentRef.current = false;
           if (active) setAgentPresent(false);
         });
         room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
@@ -137,7 +140,13 @@ export function VoiceGenerationRoom() {
         const data = (await response.json()) as GenerationState;
         if (!active) return;
         setGeneration(data);
-        if (data.status === "collecting" && !data.caption && Date.now() - startedAtRef.current > 60000) {
+        // Only bail out if the agent never joined at all. Once it is in the
+        // room, captions may come via the data channel rather than this poll.
+        if (
+          data.status === "collecting" &&
+          !agentPresentRef.current &&
+          Date.now() - startedAtRef.current > 60000
+        ) {
           setError("The planner did not join in time. Leave and start a new voice session.");
         }
         if (data.status === "completed" && data.invitationPath) {
