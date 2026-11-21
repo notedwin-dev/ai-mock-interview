@@ -21,11 +21,12 @@ type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
 const GHOST =
   "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
-export function WebRTCRoom({ token }: { token: string }) {
+export function WebRTCRoom({ token, autoJoin = false }: { token: string; autoJoin?: boolean }) {
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const leavingRef = useRef(false);
+  const didAutoJoinRef = useRef(false);
   const [status, setStatus] = useState<RoomStatus>("idle");
   const [joined, setJoined] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
@@ -100,15 +101,15 @@ export function WebRTCRoom({ token }: { token: string }) {
     };
   }, [overlayOpen]);
 
-  function refreshParticipants(room: Room) {
+  const refreshParticipants = useCallback((room: Room) => {
     setParticipants([...room.remoteParticipants.values()].map((p: RemoteParticipant) => p.identity));
-  }
+  }, []);
 
   function clearAudio() {
     audioRef.current?.replaceChildren();
   }
 
-  async function join() {
+  const join = useCallback(async () => {
     setError(null);
     setNotice(null);
     setStatus("connecting");
@@ -193,7 +194,19 @@ export function WebRTCRoom({ token }: { token: string }) {
       setError("The live room could not be reached. Check the server configuration.");
       setStatus("idle");
     }
-  }
+  }, [token, loadTranscript, refreshParticipants]);
+
+  // "Join now" in the waiting room is the single join action: connect
+  // immediately on arrival, without asking the candidate to click again.
+  useEffect(() => {
+    if (!autoJoin || didAutoJoinRef.current) return;
+    didAutoJoinRef.current = true;
+    // Drop the one-shot flag from the URL before connecting.
+    window.history.replaceState(null, "", `/i/${token}/room`);
+    // A microtask cannot be cancelled by the route-transition cleanup that
+    // previously swallowed the deferred join.
+    queueMicrotask(() => void join());
+  }, [autoJoin, token, join]);
 
   async function leave() {
     leavingRef.current = true;
