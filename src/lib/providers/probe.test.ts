@@ -187,6 +187,24 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("invalid");
   });
 
+  it("explains a rejected realtime API key instead of hiding the provider reason", async () => {
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } } }),
+      jsonFetch([]),
+      {
+        realtimeToken: async () => {
+          throw new Error('Google realtime auth token request failed: 400 {"error":{"message":"API key not valid. Please pass a valid API key."}}');
+        },
+      },
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "authentication_failed",
+      endpointReachable: true,
+      detail: "The provider rejected the API key.",
+    });
+  });
+
   it("skips realtime even on a probeable preset while still validating the row's other capabilities", async () => {
     const result = await runProbe(
       configRow({

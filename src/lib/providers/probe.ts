@@ -168,6 +168,62 @@ async function classifyProbeFailure(
   return { errorCode: "provider_error", detail: "The probe failed.", endpointReachable: false, credentialValid: false };
 }
 
+/**
+ * Native realtime token failures arrive as provider SDK errors whose message
+ * embeds the HTTP response. Surface a sanitized, actionable reason instead of
+ * a generic "rejected setup" so a bad key is distinguishable from a quota or
+ * a missing model. No credential material is ever echoed.
+ */
+function describeRealtimeError(error: unknown): {
+  errorCode: ProbeErrorCode;
+  detail: string;
+  endpointReachable: boolean;
+} {
+  if (error instanceof ProviderCryptoError) {
+    return {
+      errorCode: "authentication_failed",
+      detail: "The stored credential could not be decrypted; re-save the configuration.",
+      endpointReachable: false,
+    };
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  const lower = raw.toLowerCase();
+  const statusMatch = raw.match(/\b([45]\d{2})\b/);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const providerMessage = raw.match(/"message"\s*:\s*"([^"]+)"/)?.[1];
+  const sanitized = (providerMessage ?? "")
+    .replace(/AIza[0-9A-Za-z_-]{10,}/g, "[redacted]")
+    .replace(/sk-[0-9A-Za-z_-]{8,}/g, "[redacted]")
+    .slice(0, 300);
+
+  if (/api[ _]?key not valid|api_key_invalid|invalid api key|unauthorized|permission_denied|authentication/.test(lower)) {
+    return {
+      errorCode: "authentication_failed",
+      detail: "The provider rejected the API key.",
+      endpointReachable: status !== null,
+    };
+  }
+  if (/quota|rate[ _]?limit|resource_exhausted/.test(lower)) {
+    return {
+      errorCode: "rate_limited",
+      detail: "The provider rate-limited the realtime session request.",
+      endpointReachable: status !== null,
+    };
+  }
+  if (status === 404 || /not[ _]?found|model.*(unsupported|not available)/.test(lower)) {
+    return {
+      errorCode: "model_unsupported",
+      detail: "The provider does not expose the configured realtime model.",
+      endpointReachable: status !== null,
+    };
+  }
+  return {
+    errorCode: "provider_error",
+    detail: sanitized || "The provider rejected the realtime session setup.",
+    endpointReachable: status !== null,
+  };
+}
+
 export class ProbeHttpError extends Error {
   readonly status: number;
   readonly stage: "models" | "capability";
@@ -271,16 +327,17 @@ export async function probeProviderConfiguration(
           selectedModelAccepted: null,
           detail: "Realtime session token accepted; no interview audio was sent.",
         });
-      } catch {
+      } catch (error) {
+        const reason = describeRealtimeError(error);
         results.push({
           capability,
           status: "failed",
-          endpointReachable: false,
+          endpointReachable: reason.endpointReachable,
           credentialValid: false,
           modelsDiscovered: null,
           selectedModelAccepted: null,
-          errorCode: "provider_error",
-          detail: "The configured provider rejected the realtime session setup.",
+          errorCode: reason.errorCode,
+          detail: reason.detail,
         });
       }
       continue;
