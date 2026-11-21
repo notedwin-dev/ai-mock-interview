@@ -52,3 +52,14 @@ No Vapi account or key is involved.
 
 For local development, the same scripts run directly with `pnpm agent:generator`
 and `pnpm agent:interviewer` (both defined in `package.json`).
+
+## Why not Vercel Sandbox for the workers?
+
+An on-demand Vercel Sandbox can host a voice agent, but LiveKit Agents are
+designed as a standby **worker pool**: an agent server registers with LiveKit
+and waits for dispatch, which completes in under 150 ms when a server is ready.
+A fresh sandbox must clone the repo, install dependencies and start the agent —
+roughly 20–40 s — and needs extra lifecycle/polling code. Hosted agents are
+LiveKit's first-class deployment path and keep dispatch fast with no extra app
+code, so this project uses them while Vercel hosts only the Next.js app.
+Revisit if a single-platform deployment becomes more important than join latency.
