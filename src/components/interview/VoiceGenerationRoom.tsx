@@ -28,11 +28,13 @@ export function VoiceGenerationRoom() {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
+  const startedAtRef = useRef(Date.now());
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [muted, setMuted] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [agentPresent, setAgentPresent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -63,6 +65,12 @@ export function VoiceGenerationRoom() {
         });
         room.on(RoomEvent.TrackUnsubscribed, (track) => {
           track.detach().forEach((element) => element.remove());
+        });
+        room.on(RoomEvent.ParticipantConnected, () => {
+          if (active) setAgentPresent(true);
+        });
+        room.on(RoomEvent.ParticipantDisconnected, () => {
+          if (active) setAgentPresent(false);
         });
         room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           if (!active) return;
@@ -110,6 +118,9 @@ export function VoiceGenerationRoom() {
         const data = (await response.json()) as GenerationState;
         if (!active) return;
         setGeneration(data);
+        if (data.status === "collecting" && !data.caption && Date.now() - startedAtRef.current > 60000) {
+          setError("The planner did not join in time. Leave and start a new voice session.");
+        }
         if (data.status === "completed" && data.invitationPath) {
           setStatus("completed");
           void roomRef.current?.disconnect();
@@ -153,7 +164,11 @@ export function VoiceGenerationRoom() {
   }
 
   const caption = generation?.caption?.text ??
-    "The planner will speak shortly. Tell it about the interview you want to practise.";
+    (status === "connected" && !agentPresent
+      ? "Connected. Waiting for the planner to join…"
+      : status === "connected"
+        ? "The planner is ready. It will ask the first question shortly."
+        : "The planner will speak shortly. Tell it about the interview you want to practise.");
 
   return (
     <div className="flex min-h-[calc(100vh-2rem)] flex-col gap-4">
@@ -161,7 +176,10 @@ export function VoiceGenerationRoom() {
         <div>
           <h1 className="font-display text-lg font-semibold text-ink">Interview generation</h1>
           <p className="mt-1 text-xs text-ink-muted">
-            {status === "connected" ? "Connected — tell the planner what you need."
+            {status === "connected"
+              ? agentPresent
+                ? "Connected — answer the planner's questions."
+                : "Connected — waiting for the planner to join."
               : status === "connecting" ? "Connecting…"
                 : status === "reconnecting" ? "Reconnecting…"
                   : status === "completed" ? "Your interview is ready."

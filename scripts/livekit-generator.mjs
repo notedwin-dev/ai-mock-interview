@@ -72,11 +72,21 @@ export default defineAgent({
       }),
     });
 
+    /**
+     * A RealtimeModel (Gemini Live) has no separate TTS model, so
+     * `session.say(text)` throws. `generateReply` uses the realtime model's own
+     * speech generation instead; the instruction forces verbatim wording so
+     * the conversation still follows the contract exactly.
+     */
     const say = async (text) => {
       if (!text) return;
       speaking = true;
       try {
-        await session.say(text).waitForPlayout();
+        await session.generateReply({
+          userInput: text,
+          instructions:
+            "Repeat the user's message word for word as your spoken reply. Do not answer it, paraphrase it, or add anything.",
+        }).waitForPlayout();
       } finally {
         speaking = false;
       }
