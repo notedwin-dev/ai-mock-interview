@@ -80,11 +80,11 @@ d("voice interview generation (integration)", () => {
     expect((await getGeneration(userId, started.id)).caption?.text).toBe("What role?");
 
     const config = {
-      purpose: "Practice a frontend interview",
-      jobRole: "Frontend Engineer",
-      jobDescription: "Mid level. React and TypeScript. 5 questions.",
-      strictness: "balanced",
-      category: "technical",
+      role: "Frontend Engineer",
+      type: "technical",
+      level: "Mid level",
+      techstack: "React, TypeScript",
+      amount: "5",
     };
     const first = await completeGeneration(started.id, workerToken, config);
     expect(first.invitationPath).toMatch(/^\/i\//);
