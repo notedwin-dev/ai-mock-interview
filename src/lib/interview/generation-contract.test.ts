@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  beginGathering,
   buildInstructions,
   closingLine,
-  createPlanningState,
   GENERATION_FIELDS,
   greeting,
   mapAnswersToConfig,
-  recordAnswer,
+  TOOL_PARAMETERS,
 } from "./generation-contract.mjs";
 
 describe("voice generation contract", () => {
@@ -17,32 +15,23 @@ describe("voice generation contract", () => {
     );
   });
 
-  it("asks one question at a time, in the approved order, then finishes", () => {
-    const state = createPlanningState();
-    expect(recordAnswer(state, "too early")).toBeNull();
-    expect(beginGathering(state)).toBe(GENERATION_FIELDS[0]!.description);
-
-    const answers = [
-      "Frontend Engineer",
-      "technical",
-      "Mid level",
-      "React, TypeScript",
-      "5",
-    ];
-    const fieldNames = GENERATION_FIELDS.map((field) => field.name);
-    answers.forEach((answer, index) => {
-      const step = recordAnswer(state, answer);
-      if (index < answers.length - 1) {
-        expect(step).toEqual({ done: false, question: GENERATION_FIELDS[index + 1]!.description });
-      } else {
-        expect(step).toEqual({ done: true, answers: Object.fromEntries(fieldNames.map((name, i) => [name, answers[i]])) });
-      }
+  it("gives the model the complete ordered question list and forbids interviewing", () => {
+    const instructions = buildInstructions("Adrian");
+    GENERATION_FIELDS.forEach((field, index) => {
+      expect(instructions).toContain(`${index + 1}. ${field.description}`);
     });
-    expect(state.done).toBe(true);
-    expect(recordAnswer(state, "ignored")).toBeNull();
+    expect(instructions).toContain("Ask the following five questions IN ORDER");
+    expect(instructions).toContain("Wait for the candidate's answer before asking the next one");
+    expect(instructions).toContain("You are NOT conducting the interview itself");
+    expect(instructions).toContain("Never skip a question, never reorder them");
+    expect(instructions).toContain("Never repeat the candidate's answer back to them");
   });
 
-  it("maps the five gathered answers onto the approved agent config", () => {
+  it("exposes all five tool fields as required", () => {
+    expect(TOOL_PARAMETERS.required).toEqual(GENERATION_FIELDS.map((field) => field.name));
+  });
+
+  it("maps the five submitted answers onto the approved agent config", () => {
     expect(
       mapAnswersToConfig({
         role: "Frontend Engineer",
@@ -60,8 +49,7 @@ describe("voice generation contract", () => {
     });
   });
 
-  it("keeps the model from inventing extra turns and closes with the approved line", () => {
-    expect(buildInstructions("Adrian")).toContain("Never invent additional questions or skip ahead");
+  it("closes with the approved line", () => {
     expect(closingLine()).toBe("Your interview has been generated. Thank you for the call.");
   });
 });
