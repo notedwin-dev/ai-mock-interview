@@ -10,7 +10,7 @@ beforeAll(async () => {
   vi.stubEnv("AIMIS_AGENT_DISABLE_CLI", "1");
   // Importing the LiveKit SDK is heavy under parallel test workers; give it a
   // bounded but realistic budget instead of the default 10s hook timeout.
-  helpers = (await import("../../../scripts/livekit-interviewer.mjs")) as unknown as Helpers;
+  helpers = (await import("../../../scripts/livekit-agent.mjs")) as unknown as Helpers;
 }, 30000);
 
 describe("LiveKit interviewer agent", () => {

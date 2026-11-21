@@ -53,6 +53,10 @@ export async function POST(
           inviteToken: token,
           jobRole: interview.jobRole,
           jobDescription: interview.jobDescription,
+          evaluationMode: interview.evaluationMode,
+          experienceLevel: interview.experienceLevel,
+          techStack: interview.techStack,
+          questionCount: interview.questionCount,
         },
         config,
       );

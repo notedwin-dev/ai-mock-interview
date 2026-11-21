@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
-# One image per AIMIS agent role, built from the repo root:
-#   docker build -f agents/Dockerfile --build-arg AGENT_ENTRY=scripts/livekit-generator.mjs -t aimis-generator .
-#   docker build -f agents/Dockerfile --build-arg AGENT_ENTRY=scripts/livekit-interviewer.mjs -t aimis-interviewer .
+# Single AIMIS agent image (Build plan allows one deployed agent):
+#   docker build -f agents/Dockerfile -t aimis-agent .
 #
 # Based on the official LiveKit Agent Dockerfile guidance:
 # https://docs.livekit.io/deploy/agents/builds/
@@ -31,6 +30,6 @@ COPY --from=build --chown=appuser:appuser /app /app
 USER appuser
 ENV NODE_ENV=production
 
-ARG AGENT_ENTRY=scripts/livekit-interviewer.mjs
+ARG AGENT_ENTRY=scripts/livekit-agent.mjs
 ENV AGENT_ENTRY=${AGENT_ENTRY}
 CMD ["sh", "-c", "node \"$AGENT_ENTRY\""]
