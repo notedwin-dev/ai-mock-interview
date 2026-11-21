@@ -12,6 +12,7 @@ and verification workflow explicit for humans and AI agents.
 | [DEVELOPMENT.md](./DEVELOPMENT.md) | Scripts, daily workflow, task lifecycle, definition of done |
 | [TESTING.md](./TESTING.md) | Testing strategy, what must be tested, verification evidence rules |
 | [ENVIRONMENT.md](./ENVIRONMENT.md) | Environment variables, secret handling, encryption keys |
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Vercel app + hosted LiveKit agent topology and build/deploy commands |
 | [REQUIREMENTS-TRACEABILITY.md](./REQUIREMENTS-TRACEABILITY.md) | Requirements → modules → tasks dependency map, open decisions |
 | [BACKLOG.md](./BACKLOG.md) | Initial implementation backlog and milestone plan |
 | [RISKS.md](./RISKS.md) | Risk register and unresolved decision register |
