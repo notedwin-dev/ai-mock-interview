@@ -86,7 +86,7 @@ export async function dispatchInterviewerAgent(
  * configuration; that capability is never exposed to the browser.
  */
 export async function dispatchGeneratorAgent(
-  context: { room: string; generationId: string; workerToken: string },
+  context: { room: string; generationId: string; workerToken: string; userName: string },
   config: LiveKitConfig,
   deps: DispatchDeps = {},
 ): Promise<boolean> {
@@ -113,6 +113,7 @@ export async function dispatchGeneratorAgent(
       generationId: context.generationId,
       workerToken: context.workerToken,
       room: context.room,
+      userName: context.userName,
     }),
   });
   return true;

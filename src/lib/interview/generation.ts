@@ -4,7 +4,8 @@ import { db } from "@/lib/db";
 import { getLiveKitConfig } from "@/lib/livekit/env";
 import { mintParticipantToken } from "./livekit-token";
 import { dispatchGeneratorAgent } from "./livekit-dispatch";
-import { agentConfigSchema, createInterviewFromAgentConfig } from "./agent";
+import { createInterviewFromAgentConfig } from "./agent";
+import { mapAnswersToConfig } from "./generation-contract.mjs";
 
 /**
  * Voice-driven interview generation. The browser talks to a LiveKit room
@@ -25,6 +26,17 @@ const captionSchema = z
   .object({
     speaker: z.enum(["agent", "candidate"]),
     text: z.string().trim().min(1).max(1000),
+  })
+  .strict();
+
+/** The five values the voice planner gathers, kept in the shared contract. */
+export const generationAnswersSchema = z
+  .object({
+    role: z.string().trim().min(1).max(150),
+    type: z.string().trim().min(1).max(40),
+    level: z.string().trim().min(1).max(120),
+    techstack: z.string().trim().min(1).max(1000),
+    amount: z.string().trim().min(1).max(40),
   })
   .strict();
 
@@ -61,6 +73,15 @@ export async function startGeneration(userId: string) {
     throw new GenerationError("not_configured", "Voice generation is not configured on this server.");
   }
 
+  const account = await db.userAccount.findUnique({
+    where: { userId },
+    select: {
+      email: true,
+      candidateProfile: { select: { displayName: true } },
+    },
+  });
+  const userName = account?.candidateProfile?.displayName || account?.email.split("@")[0] || "there";
+
   const id = randomUUID();
   const roomName = `gen-${id}`;
   const workerToken = randomBytes(32).toString("base64url");
@@ -79,7 +100,7 @@ export async function startGeneration(userId: string) {
   );
   try {
     await dispatchGeneratorAgent(
-      { room: roomName, generationId: id, workerToken },
+      { room: roomName, generationId: id, workerToken, userName },
       config,
     );
   } catch {
@@ -111,7 +132,8 @@ export async function postCaption(id: string, workerToken: string, input: unknow
 export async function completeGeneration(id: string, workerToken: string, input: unknown) {
   const record = await assertWorker(id, workerToken);
   if (record.status === "completed") return { invitationPath: record.invitationPath };
-  const config = agentConfigSchema.parse(input);
+  const answers = generationAnswersSchema.parse(input);
+  const config = mapAnswersToConfig(answers);
   const session = await createInterviewFromAgentConfig(record.userId, {
     config,
     missingFields: [],

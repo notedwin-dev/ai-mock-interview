@@ -2,41 +2,41 @@ import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import { cli, defineAgent, voice, WorkerOptions, tool } from "@livekit/agents";
 import * as google from "@livekit/agents-plugin-google";
-import { z } from "zod";
+import {
+  TOOL_PARAMETERS,
+  buildInstructions,
+  closingLine,
+  greeting,
+} from "../src/lib/interview/generation-contract.mjs";
 
 /**
- * AIMIS voice interview-generation agent (Gemini Live on LiveKit).
- * Run with: node scripts/livekit-generator.mjs
- * It collects the interview briefing conversationally, then calls the backend
- * to create the interview. No Vapi and no new vendor keys are used.
+ * AIMIS voice interview-generation worker (Gemini Live on LiveKit).
+ * Run with: pnpm agent:generator
+ *
+ * Workflow (mirrors the approved reference, without Vapi):
+ *   start call -> exact greeting -> gather five answers one at a time
+ *   -> submit_interview_config tool (server validates + creates the interview)
+ *   -> closing line -> end call.
+ * The contract module is shared with the server so prompts and fields cannot
+ * drift between the two processes.
  */
 export const AGENT_NAME = "aimis-generator";
 export const REALTIME_MODEL = "gemini-3.1-flash-live-preview";
 
 const API_BASE = process.env.APP_URL || "http://localhost:3000";
 
-export function buildInstructions() {
-  return [
-    "You are the AIMIS voice interview planner. Have a natural, concise conversation with the candidate to plan their mock interview.",
-    "Collect exactly these details: the interview purpose, the target job role, the relevant experience level, the tech stack or key topics, how many questions they want, and how strict the feedback should be (Supportive, Balanced or Rigorous).",
-    "Ask one short question at a time and listen to the answer. Confirm the details back before finishing.",
-    "When every detail is known, call the submit_interview_config tool. Map experience level and number of questions into the job description text.",
-    "Choose category general, technical or behavioural from the role and topics. Never invent facts or discuss protected traits.",
-  ].join(" ");
-}
-
-const configSchema = z.object({
-  purpose: z.string().min(1).max(500),
-  jobRole: z.string().min(1).max(150),
-  jobDescription: z.string().max(8000),
-  strictness: z.enum(["supportive", "balanced", "rigorous"]),
-  category: z.enum(["general", "technical", "behavioral"]),
-});
-
 function itemText(content) {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content.map((part) => (typeof part === "string" ? part : part?.text ?? "")).join("").trim();
+}
+
+function postCaption(base, generationId, headers, speaker, text) {
+  if (!text) return Promise.resolve();
+  return fetch(
+    `${base}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/caption`,
+    { method: "POST", headers, body: JSON.stringify({ speaker, text: text.slice(0, 1000) }) },
+  ).catch(() => undefined);
 }
 
 export default defineAgent({
@@ -47,7 +47,7 @@ export default defineAgent({
     } catch {
       meta = {};
     }
-    const { generationId, workerToken } = meta;
+    const { generationId, workerToken, userName } = meta;
     if (!generationId || !workerToken) {
       console.error("generator worker missing generation capability");
       return;
@@ -57,31 +57,27 @@ export default defineAgent({
       "content-type": "application/json",
       "x-aimis-worker-token": workerToken,
     };
-    const caption = async (speaker, text) => {
-      if (!text) return;
-      try {
-        await fetch(
-          `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/caption`,
-          { method: "POST", headers, body: JSON.stringify({ speaker, text: text.slice(0, 1000) }) },
-        );
-      } catch {
-        // Captioning is best-effort; the conversation itself continues.
-      }
-    };
+    const caption = (speaker, text) => postCaption(API_BASE, generationId, headers, speaker, text);
 
     const submitInterviewConfig = tool({
       name: "submit_interview_config",
       description:
-        "Submit the completed interview briefing once the purpose, job role, experience level, tech stack, question count and evaluation strictness are known. Call this exactly once.",
-      parameters: configSchema,
-      execute: async (args) => {
+        "Submit the five gathered answers once role, type, level, techstack and amount are all known. Call exactly once.",
+      parameters: TOOL_PARAMETERS,
+      execute: async (answers) => {
         const response = await fetch(
           `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/complete`,
-          { method: "POST", headers, body: JSON.stringify(args) },
+          { method: "POST", headers, body: JSON.stringify(answers) },
         );
         const body = await response.json().catch(() => null);
-        if (!response.ok) return { ok: false, message: body?.error?.message ?? "Could not create the interview." };
-        return { ok: true, message: "The interview has been created and is ready to open." };
+        if (!response.ok) {
+          return { ok: false, message: body?.error?.message ?? "Could not create the interview." };
+        }
+        // Speak the closing line, then end the call as the workflow specifies.
+        const handle = session.say(closingLine());
+        await handle.waitForPlayout();
+        setTimeout(() => ctx.shutdown("interview generated"), 500);
+        return { ok: true, message: "Interview generated." };
       },
     });
 
@@ -89,7 +85,7 @@ export default defineAgent({
       llm: new google.beta.realtime.RealtimeModel({
         model: REALTIME_MODEL,
         apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-        instructions: buildInstructions(),
+        instructions: buildInstructions(userName),
         inputAudioTranscription: {},
         outputAudioTranscription: {},
       }),
@@ -103,10 +99,14 @@ export default defineAgent({
     });
 
     await session.start({
-      agent: new voice.Agent({ instructions: buildInstructions(), tools: [submitInterviewConfig] }),
+      agent: new voice.Agent({
+        instructions: buildInstructions(userName),
+        tools: [submitInterviewConfig],
+      }),
       room: ctx.room,
     });
-    await session.generateReply({ instructions: "Greet the candidate and ask for the interview purpose." });
+    // Start the call with the exact greeting from the approved workflow.
+    await session.say(greeting(userName)).waitForPlayout();
   },
 });
 
