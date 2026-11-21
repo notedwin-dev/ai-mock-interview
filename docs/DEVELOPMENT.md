@@ -60,6 +60,19 @@ Dangerous operations (`prisma migrate reset`) wipe local dev data only — never
 against a deployed database. Production data changes follow the deletion lifecycle
 requirements (7-day grace, cascades), not ad-hoc SQL.
 
+## Troubleshooting: the login page keeps reloading
+
+If `/signin` (or any page) reloads continuously and forms cannot be completed,
+this is a `next dev` / Turbopack Fast Refresh loop, **not** an authentication
+bug. It has been observed after `pnpm verify` regenerates `next-env.d.ts` while
+the dev server is running, and after a machine restart with stale HMR state.
+The browser reproduces it with repeated `Fast Refresh` / "Download the React
+DevTools" messages and no failing network requests.
+
+Fix: stop the dev server, delete `.next/dev`, and run `pnpm dev` again. Verify
+the loop is gone by setting a marker in `window`/`sessionStorage` and checking
+it survives a short wait. Only then retry the sign-in flow.
+
 ## Environment
 
 Copy `.env.example` → `.env` and fill required values (see
