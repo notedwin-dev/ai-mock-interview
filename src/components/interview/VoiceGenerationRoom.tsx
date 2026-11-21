@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Mic, MicOff, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
+import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 
 /**
  * Voice-driven interview generation (FR-SETUP-006). The same two-panel shape
@@ -33,7 +34,9 @@ export function VoiceGenerationRoom() {
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [muted, setMuted] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [liveCaption, setLiveCaption] = useState<{ speaker: "agent" | "candidate"; text: string } | null>(null);
   const [agentPresent, setAgentPresent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -74,7 +77,23 @@ export function VoiceGenerationRoom() {
         });
         room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           if (!active) return;
-          setIsSpeaking(speakers.some((speaker) => speaker.identity !== room.localParticipant.identity));
+          const local = room.localParticipant.identity;
+          setIsAgentSpeaking(speakers.some((speaker) => speaker.identity !== local));
+          setIsUserSpeaking(speakers.some((speaker) => speaker.identity === local));
+        });
+        room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+          if (!active || topic !== CAPTION_TOPIC) return;
+          try {
+            const parsed = JSON.parse(new TextDecoder().decode(payload)) as {
+              speaker?: string;
+              text?: string;
+            };
+            if (parsed.text && (parsed.speaker === "agent" || parsed.speaker === "candidate")) {
+              setLiveCaption({ speaker: parsed.speaker, text: parsed.text });
+            }
+          } catch {
+            // Ignore malformed data messages; they never affect the call.
+          }
         });
         room.on(RoomEvent.Reconnecting, () => { if (active) setStatus("reconnecting"); });
         room.on(RoomEvent.Reconnected, () => { if (active) setStatus("connected"); });
@@ -163,7 +182,7 @@ export function VoiceGenerationRoom() {
     router.push("/dashboard");
   }
 
-  const caption = generation?.caption?.text ??
+  const caption = liveCaption?.text ?? generation?.caption?.text ??
     (status === "connected" && !agentPresent
       ? "Connected. Waiting for the planner to join…"
       : status === "connected"
@@ -194,18 +213,36 @@ export function VoiceGenerationRoom() {
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
         <section aria-label="AI planner" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span
-            aria-hidden
-            className={`flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isSpeaking ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
-            AI
+          <span className="relative flex h-20 w-20 items-center justify-center">
+            {isAgentSpeaking ? (
+              <span aria-hidden className="absolute inset-0 animate-ping rounded-full border-2 border-emerald-400/70" />
+            ) : null}
+            <span
+              aria-hidden
+              className={`relative flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isAgentSpeaking ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
+              AI
+            </span>
           </span>
           <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
-          <p className="mt-1 text-xs text-ink-muted">{status === "connected" ? "Listening" : "Not connected"}</p>
+          <p className="mt-1 text-xs text-ink-muted">
+            {isAgentSpeaking ? "Speaking" : status === "connected" ? "Listening" : "Not connected"}
+          </p>
         </section>
         <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
+          <span className="relative flex h-20 w-20 items-center justify-center">
+            {isUserSpeaking && !muted ? (
+              <span aria-hidden className="absolute inset-0 animate-ping rounded-full border-2 border-emerald-400/70" />
+            ) : null}
+            <span
+              aria-hidden
+              className={`relative flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold transition-colors ${isUserSpeaking && !muted ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>
+              Y
+            </span>
+          </span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
+          <p className="mt-1 text-xs text-ink-muted">
+            {muted ? "Microphone muted" : isUserSpeaking ? "Speaking" : "Microphone ready"}
+          </p>
           <button type="button" onClick={() => void toggleMute()} aria-label="Microphone" aria-pressed={muted} className="mt-4 inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft">
             {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
             {muted ? "Unmute" : "Mute"}

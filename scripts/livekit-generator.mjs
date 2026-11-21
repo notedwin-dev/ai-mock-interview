@@ -5,6 +5,7 @@ import * as google from "@livekit/agents-plugin-google";
 import {
   beginGathering,
   buildInstructions,
+  CAPTION_TOPIC,
   closingLine,
   createPlanningState,
   greeting,
@@ -15,12 +16,12 @@ import {
  * AIMIS voice interview-generation worker (Gemini Live on LiveKit).
  * Run with: pnpm agent:generator
  *
- * Workflow (same shape as the approved reference, without Vapi):
- *   Say exact greeting -> gather five answers one at a time -> POST generated
- *   config to the app -> say closing line -> end call.
+ * Workflow: Say exact greeting -> gather five answers one at a time -> POST
+ * config -> Say closing line -> End call.
  *
- * The turn order is a deterministic state machine from the shared contract,
- * not an instruction the realtime model may ignore. See docs/UI-PLAN.md.
+ * Turn-taking is MANUAL: the realtime model never commits a user turn on its
+ * own, so it cannot start interviewing the candidate. The state machine in the
+ * shared contract decides when to speak the next exact question.
  */
 export const AGENT_NAME = "aimis-generator";
 export const REALTIME_MODEL = "gemini-3.1-flash-live-preview";
@@ -31,14 +32,6 @@ function itemText(content) {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content.map((part) => (typeof part === "string" ? part : part?.text ?? "")).join("").trim();
-}
-
-function postCaption(base, generationId, headers, speaker, text) {
-  if (!text) return Promise.resolve();
-  return fetch(
-    `${base}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/caption`,
-    { method: "POST", headers, body: JSON.stringify({ speaker, text: text.slice(0, 1000) }) },
-  ).catch(() => undefined);
 }
 
 export default defineAgent({
@@ -61,26 +54,58 @@ export default defineAgent({
     };
     const state = createPlanningState();
     let speaking = false;
+    const encoder = new TextEncoder();
+
+    // Instant captions go straight to the browser over the room data channel;
+    // the HTTP endpoint persists only final lines for late joiners/history.
+    let lastCaptionText = "";
+    let lastCaptionAt = 0;
+    function publishCaption(speaker, text, isFinal) {
+      const now = Date.now();
+      // Interim transcripts can arrive many times per second. Skip duplicates
+      // and cap them at 10/s; finals are always sent immediately.
+      if (!isFinal && (text === lastCaptionText || now - lastCaptionAt < 100)) return;
+      lastCaptionText = text;
+      lastCaptionAt = now;
+      const payload = encoder.encode(JSON.stringify({ speaker, text, isFinal }));
+      void ctx.room.localParticipant.publishData(payload, {
+        topic: CAPTION_TOPIC,
+        reliable: isFinal,
+      });
+    }
+
+    function persistCaption(speaker, text) {
+      if (!text) return;
+      void fetch(
+        `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/caption`,
+        { method: "POST", headers, body: JSON.stringify({ speaker, text: text.slice(0, 1000) }) },
+      ).catch(() => undefined);
+    }
 
     const session = new voice.AgentSession({
+      // Manual turn detection: no automatic model reply after user speech.
+      turnHandling: { turnDetection: "manual" },
       llm: new google.beta.realtime.RealtimeModel({
         model: REALTIME_MODEL,
         apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
         instructions: buildInstructions(userName),
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        realtimeInputConfig: {
+          automaticActivityDetection: { disabled: true },
+        },
       }),
     });
 
     /**
-     * A RealtimeModel (Gemini Live) has no separate TTS model, so
-     * `session.say(text)` throws. `generateReply` uses the realtime model's own
-     * speech generation instead; the instruction forces verbatim wording so
-     * the conversation still follows the contract exactly.
+     * A RealtimeModel has no separate TTS model, so session.say() throws.
+     * generateReply uses the model's own speech; verbatim instructions keep the
+     * conversation on contract without letting the model improvise.
      */
     const say = async (text) => {
       if (!text) return;
       speaking = true;
+      publishCaption("agent", text, true);
       try {
         await session.generateReply({
           userInput: text,
@@ -93,8 +118,6 @@ export default defineAgent({
     };
 
     async function finish(answers) {
-      // Raw answers only: the server validates and maps them before creating
-      // the interview, so the worker never owns product rules.
       try {
         const response = await fetch(
           `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/complete`,
@@ -103,18 +126,25 @@ export default defineAgent({
         const body = await response.json().catch(() => null);
         if (!response.ok) throw new Error(body?.error?.message ?? "generation failed");
         await say(closingLine());
+        // Give TTS/playback a full tail before tearing the call down.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       } catch (error) {
         console.error("generation failed", error instanceof Error ? error.message : "unknown");
         await say("I could not save your interview. Please try again.");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       } finally {
-        setTimeout(() => ctx.shutdown("generation finished"), 500);
+        ctx.shutdown("generation finished");
       }
     }
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
+      const text = String(event.transcript ?? "").trim();
+      if (!text) return;
+      // Stream interim transcript immediately; only finals advance the flow.
+      publishCaption("candidate", text, event.isFinal);
       if (!event.isFinal || speaking) return;
-      void postCaption(API_BASE, generationId, headers, "candidate", event.transcript);
-      const step = recordAnswer(state, event.transcript);
+      persistCaption("candidate", text);
+      const step = recordAnswer(state, text);
       if (!step) return;
       if (step.done) void finish(step.answers);
       else void say(step.question);
@@ -122,7 +152,8 @@ export default defineAgent({
 
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (event) => {
       if (event.item?.role === "assistant") {
-        void postCaption(API_BASE, generationId, headers, "agent", itemText(event.item.content));
+        const text = itemText(event.item.content);
+        if (text && !speaking) publishCaption("agent", text, true);
       }
     });
 
@@ -131,8 +162,7 @@ export default defineAgent({
       room: ctx.room,
     });
 
-    // Say node: exact greeting, then the first gather question. The candidate
-    // answers before the next question is asked.
+    // Say node: exact greeting, then the first gather question.
     await say(greeting(userName));
     await say(beginGathering(state));
   },
