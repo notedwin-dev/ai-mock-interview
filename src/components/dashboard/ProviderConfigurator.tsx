@@ -790,7 +790,10 @@ function ConfiguredRealtimeRow({
   onDelete: (row: ProviderConfigSummary) => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const fullProbe = probeByRow[row.userProviderConfigurationId];
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+  const rowId = row.userProviderConfigurationId;
+  const fullProbe = probeByRow[rowId];
   const probe = fullProbe?.capabilities.find((result) => result.capability === "realtime") ?? null;
   return (
     <div className="mt-3 flex flex-col gap-2 border-t border-line pt-3">
@@ -798,11 +801,18 @@ function ConfiguredRealtimeRow({
         <button type="button" onClick={() => onProbe(row)} disabled={pending !== null} className={GHOST_PILL}>Test capability</button>
         <button
           type="button"
-          onClick={() => void onPatch(row, { isEnabled: !row.isEnabled }, `${row.userProviderConfigurationId}:enable`)}
+          onClick={() => void onPatch(row, { isEnabled: !row.isEnabled }, `${rowId}:enable`)}
           disabled={pending !== null}
           className={GHOST_PILL}
         >
           {row.isEnabled ? "Disable" : "Enable"}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setKeyDraft(""); setEditingKey((current) => !current); }}
+          className={GHOST_PILL}
+        >
+          Replace key
         </button>
         {!confirm ? (
           <button type="button" onClick={() => setConfirm(true)} disabled={pending !== null} className={DANGER_PILL}>Delete</button>
@@ -813,19 +823,54 @@ function ConfiguredRealtimeRow({
           </>
         )}
       </div>
+      {editingKey ? (
+        <form
+          className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!keyDraft.trim()) return;
+            void onPatch(row, { apiKey: keyDraft.trim() }, `${rowId}:key`).then((ok) => {
+              if (ok) setEditingKey(false);
+            });
+          }}
+        >
+          <span className={LABEL_CLASS}>Realtime API key</span>
+          <input
+            type="password"
+            value={keyDraft}
+            onChange={(event) => setKeyDraft(event.target.value)}
+            className={FIELD_CLASS}
+            placeholder="Paste a new provider API key"
+            autoComplete="off"
+            maxLength={4096}
+            aria-label="Replacement realtime API key"
+          />
+          {actionError[`${rowId}:key`] ? (
+            <p className="text-xs text-red-400">{actionError[`${rowId}:key`]!.message}</p>
+          ) : null}
+          <div className="flex gap-2">
+            <button type="submit" disabled={pending !== null || !keyDraft.trim()} className={PRIMARY_PILL}>
+              Save key
+            </button>
+            <button type="button" onClick={() => setEditingKey(false)} className={GHOST_PILL}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
       {fullProbe ? (
         <div className="rounded-xl border border-line bg-surface p-3">
           <span className={LABEL_CLASS}>Last test result</span>
           <ProbeResultView result={probe} capability="realtime" />
         </div>
       ) : null}
-      {actionError[`${row.userProviderConfigurationId}:probe`] ? (
+      {actionError[`${rowId}:probe`] ? (
         <p className="text-xs text-red-400">
-          {actionError[`${row.userProviderConfigurationId}:probe`]!.message}
+          {actionError[`${rowId}:probe`]!.message}
         </p>
       ) : null}
-      {actionError[`${row.userProviderConfigurationId}:enable`] ? (
-        <p className="text-xs text-red-400">{actionError[`${row.userProviderConfigurationId}:enable`]!.message}</p>
+      {actionError[`${rowId}:enable`] ? (
+        <p className="text-xs text-red-400">{actionError[`${rowId}:enable`]!.message}</p>
       ) : null}
     </div>
   );
