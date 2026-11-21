@@ -20,6 +20,21 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  */
 type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
 
+/**
+ * MDN: MediaStreamTrack.enabled is the actual mute switch — setting it to
+ * false makes the track emit silence. LiveKit's setMicrophoneEnabled controls
+ * publishing; we also set the browser track so "mute" is real user media.
+ */
+type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
+
+function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
+  const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
+    | LocalMicPublication
+    | undefined;
+  const track = publication?.audioTrack?.mediaTrack;
+  if (track) track.enabled = enabled;
+}
+
 const GHOST =
   "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
@@ -208,6 +223,7 @@ export function WebRTCRoom({
       } catch {
         micUnavailable = true;
       }
+      setBrowserMicEnabled(room, !preferences.muted && !micUnavailable);
       // Reflect the actual track state, not the requested state — a permission
       // denial or a rejoin must never show "muted" while audio is being sent.
       setMuted(micUnavailable || !room.localParticipant.isMicrophoneEnabled);
@@ -254,6 +270,7 @@ export function WebRTCRoom({
     }
     try {
       await participant.setMicrophoneEnabled(!next);
+      setBrowserMicEnabled(roomRef.current, !next);
       const actual = !participant.isMicrophoneEnabled;
       setMuted(actual);
       saveMutePreference(actual);

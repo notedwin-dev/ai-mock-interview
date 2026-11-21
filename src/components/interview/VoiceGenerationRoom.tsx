@@ -19,6 +19,17 @@ type Status = "starting" | "connecting" | "connected" | "reconnecting" | "comple
 // shortly after a real unmount so revisiting the page starts a fresh session.
 let generationStartedThisLoad = false;
 
+/** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
+type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
+
+function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
+  const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
+    | LocalMicPublication
+    | undefined;
+  const track = publication?.audioTrack?.mediaTrack;
+  if (track) track.enabled = enabled;
+}
+
 interface GenerationConfig {
   jobRole: string;
   jobDescription: string;
@@ -47,6 +58,7 @@ export function VoiceGenerationRoom() {
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(false);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [liveCaption, setLiveCaption] = useState<{ speaker: "agent" | "candidate"; text: string } | null>(null);
@@ -124,10 +136,12 @@ export function VoiceGenerationRoom() {
           await room.localParticipant.setMicrophoneEnabled(true);
         } catch {
           if (active) {
+            mutedRef.current = true;
             setMuted(true);
             setError("Microphone unavailable — the planner cannot hear you.");
           }
         }
+        setBrowserMicEnabled(room, !mutedRef.current);
         if (active) setStatus("connected");
       } catch {
         if (active) {
@@ -186,13 +200,17 @@ export function VoiceGenerationRoom() {
 
   async function toggleMute() {
     const participant = roomRef.current?.localParticipant;
+    const next = !mutedRef.current;
+    setBrowserMicEnabled(roomRef.current, !next);
+    mutedRef.current = next;
+    setMuted(next);
     if (!participant) return;
-    const next = !muted;
     try {
       await participant.setMicrophoneEnabled(!next);
-      setMuted(!participant.isMicrophoneEnabled);
     } catch {
+      mutedRef.current = true;
       setMuted(true);
+      setBrowserMicEnabled(roomRef.current, false);
     }
   }
 
