@@ -55,6 +55,22 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       if (event.key === "Escape") {
         event.stopPropagation();
         setOverlayOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      // Keep keyboard focus inside the modal panel.
+      const focusables = overlayRef.current?.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusables || focusables.length === 0) return;
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener("keydown", onKeyDown);
