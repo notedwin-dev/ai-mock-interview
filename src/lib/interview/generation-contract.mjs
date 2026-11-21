@@ -81,7 +81,6 @@ export function buildInstructions(userName) {
 
 const CATEGORY_BY_TYPE = {
   technical: "technical",
-  behavioural: "behavioral",
   behavioral: "behavioral",
   mixed: "general",
 };
