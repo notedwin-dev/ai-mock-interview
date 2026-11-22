@@ -22,7 +22,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # avoids postinstall `prisma generate` before prisma/schema.prisma is copied.
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY . .
-RUN pnpm prune --prod
+RUN pnpm prune --prod --ignore-scripts
 
 FROM base
 ARG UID=10001
