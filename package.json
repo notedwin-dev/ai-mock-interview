@@ -17,7 +17,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "agent": "node scripts/livekit-agent.mjs"
+    "agent": "node scripts/livekit-agent.mjs start"
   },
   "dependencies": {
     "@ai-sdk/google": "4.0.122",

@@ -34,4 +34,6 @@ ENV NODE_ENV=production
 
 ARG AGENT_ENTRY=scripts/livekit-agent.mjs
 ENV AGENT_ENTRY=${AGENT_ENTRY}
-CMD ["sh", "-c", "node \"$AGENT_ENTRY\""]
+# The LiveKit Agents CLI requires the `start` subcommand in production;
+# without it the process prints usage and exits (CrashLoop).
+CMD ["sh", "-c", "node \"$AGENT_ENTRY\" start"]
