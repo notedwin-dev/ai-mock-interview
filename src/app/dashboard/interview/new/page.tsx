@@ -33,7 +33,7 @@ export default async function Page() {
       <div className="w-full max-w-xl">
         <Link
           href="/dashboard"
-          className="text-sm text-ink-soft transition-colors hover:text-ink"
+          className="back-link"
         >
           ← Back to dashboard
         </Link>

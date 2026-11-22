@@ -54,14 +54,14 @@ export default function ConfigurationPage() {
     <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-ink-soft transition-colors hover:text-ink"
+        className="back-link"
       >
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
+      <h1 className="page-title">
         AI configuration
       </h1>
-      <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted">
+      <p className="page-lede">
         Choose how your interviews run: a pre-configured realtime agent that
         handles voice, understanding and speech natively — or a custom pipeline
         where you pick the provider, API key and exact model for each

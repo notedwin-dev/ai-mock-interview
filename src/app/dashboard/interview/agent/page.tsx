@@ -23,13 +23,13 @@ export default async function AgentPage() {
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
-      <Link href="/dashboard" className="text-sm text-ink-soft transition-colors hover:text-ink">
+      <Link href="/dashboard" className="back-link">
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
+      <h1 className="page-title">
         Launch AI Interview Agent
       </h1>
-      <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted">
+      <p className="page-lede">
         Tell the agent what you want to practise. It gathers the purpose, role,
         job description and evaluation strictness, then shows you the generated
         configuration before creating a ready interview.

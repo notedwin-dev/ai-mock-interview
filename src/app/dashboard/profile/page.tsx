@@ -59,11 +59,11 @@ export default function ProfilePage() {
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-ink-soft transition-colors hover:text-ink"
+        className="back-link"
       >
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
+      <h1 className="page-title">
         Profile
       </h1>
       <Suspense fallback={<p className="mt-1 text-sm text-ink-muted">Loading…</p>}>
