@@ -2,10 +2,12 @@ import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
 import { InterviewAgent } from "@/components/interview/InterviewAgent";
 
-// requireAccount() uses connection(), which hangs during prerendering. Opting
-// out of instant-navigation validation makes this a request-time render, so
-// auth resolves instead of leaving a Suspense stream open forever (which made
-// the browser reload the page repeatedly).
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
 export const instant = false;
 
 /**
@@ -14,8 +16,7 @@ export const instant = false;
  * server-side. The manual setup form remains available as a fallback only.
  *
  * Auth is read at page level (not inside a nested Suspense boundary) so the
- * dynamic render resolves as one stream instead of leaving the client tab in
- * a perpetual loading state that the browser keeps retrying.
+ * dynamic render resolves as one stream instead of an open boundary.
  */
 export default async function AgentPage() {
   await requireAccount({ role: "candidate" });

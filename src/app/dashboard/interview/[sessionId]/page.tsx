@@ -6,8 +6,12 @@ import {
 } from "@/lib/interview/service";
 import { RoomControls } from "@/components/interview/RoomControls";
 
-// Auth uses connection(); the segment must render per request, otherwise the
-// Suspense stream never settles and the browser reloads the page indefinitely.
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
 export const instant = false;
 
 /**
