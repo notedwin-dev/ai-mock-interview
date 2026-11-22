@@ -74,3 +74,32 @@ body::before {
     88px 88px,
     88px 88px;
 }
+
+/*
+ * Repeated pill controls and form fields, standardised with @apply (AGENTS.md
+ * §10): the interview/room components previously each declared their own
+ * PRIMARY/GHOST/PILL/FIELD class strings that were near-identical. The
+ * component classes below are the single source; add a layout utility
+ * (e.g. w-full, justify-center, px-6) inline where a one-off size differs.
+ */
+@layer components {
+  /* Neutral ghost pill — icon actions and secondary controls. */
+  .btn-ghost {
+    @apply inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400;
+  }
+
+  /* Primary emerald pill — interview/room primary actions. */
+  .btn-primary {
+    @apply inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  /* Form field — full-width raised input in setup/config forms. */
+  .field {
+    @apply h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20;
+  }
+
+  /* Device selection pill — waiting-room input/output/camera selectors. */
+  .device-pill {
+    @apply h-10 max-w-full rounded-full border border-line bg-surface pl-8 pr-3 text-xs text-ink outline-none transition-colors focus:border-emerald-400/70;
+  }
+}

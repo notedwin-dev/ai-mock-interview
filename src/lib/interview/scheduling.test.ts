@@ -3,6 +3,7 @@ import { InterviewError } from "./service";
 import {
   assertEditableSession,
   editableDetailsSchema,
+  isEditableSession,
   parseScheduledAt,
 } from "./scheduling";
 
@@ -58,6 +59,49 @@ describe("assertEditableSession", () => {
         completedAt: new Date("2026-11-22T09:00:00.000Z"),
       }),
     ).toThrow(InterviewError);
+  });
+});
+
+describe("isEditableSession", () => {
+  it("is the shared pure lock rule used by the server boundary and the edit page", () => {
+    expect(isEditableSession({ status: "created", startedAt: null, completedAt: null })).toBe(true);
+    expect(isEditableSession({ status: "scheduled", startedAt: null, completedAt: null })).toBe(true);
+  });
+
+  it("locks once started, completed or outside the editable statuses", () => {
+    expect(isEditableSession({ status: "active", startedAt: null, completedAt: null })).toBe(false);
+    expect(isEditableSession({ status: "completed", startedAt: null, completedAt: null })).toBe(false);
+    expect(isEditableSession({ status: "failed", startedAt: null, completedAt: null })).toBe(false);
+    expect(
+      isEditableSession({
+        status: "scheduled",
+        startedAt: new Date("2026-11-22T08:00:00.000Z"),
+        completedAt: null,
+      }),
+    ).toBe(false);
+    expect(
+      isEditableSession({
+        status: "scheduled",
+        startedAt: null,
+        completedAt: new Date("2026-11-22T09:00:00.000Z"),
+      }),
+    ).toBe(false);
+  });
+
+  it("is inverted exactly by assertEditableSession", () => {
+    const cases = [
+      { status: "created", startedAt: null, completedAt: null },
+      { status: "scheduled", startedAt: null, completedAt: null },
+      { status: "active", startedAt: null, completedAt: null },
+      { status: "completed", startedAt: null, completedAt: null },
+    ] as const;
+    for (const session of cases) {
+      if (isEditableSession(session)) {
+        expect(() => assertEditableSession(session)).not.toThrow();
+      } else {
+        expect(() => assertEditableSession(session)).toThrow(InterviewError);
+      }
+    }
   });
 });
 

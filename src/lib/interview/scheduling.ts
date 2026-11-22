@@ -53,17 +53,30 @@ export function parseScheduledAt(value: unknown, now = new Date()): Date {
   return date;
 }
 
+/**
+ * Pure lock rule, shared by the server boundary and the edit page (TT-8 review
+ * dedup): a session's details are locked once it has started or completed, or
+ * when its status is outside the editable set.
+ */
+export function isEditableSession(session: {
+  status: string;
+  startedAt: Date | null;
+  completedAt: Date | null;
+}): boolean {
+  return (
+    !session.startedAt &&
+    !session.completedAt &&
+    (EDITABLE_STATUSES as readonly string[]).includes(session.status)
+  );
+}
+
 /** Details lock as soon as a session has started, completed or failed. */
 export function assertEditableSession(session: {
   status: string;
   startedAt: Date | null;
   completedAt: Date | null;
 }): void {
-  if (
-    session.startedAt ||
-    session.completedAt ||
-    !(EDITABLE_STATUSES as readonly string[]).includes(session.status)
-  ) {
+  if (!isEditableSession(session)) {
     throw new InterviewError(
       "invalid_state",
       "This interview has already started or completed, so its details are locked.",

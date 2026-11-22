@@ -7,6 +7,7 @@ import { Room, RoomEvent, Track } from "livekit-client";
 import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
 import { InterviewNextSteps } from "@/components/interview/InterviewNextSteps";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
+import { setBrowserMicEnabled } from "@/lib/interview/livekit-mic";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 
 /**
@@ -19,17 +20,6 @@ type Status = "starting" | "connecting" | "connected" | "reconnecting" | "comple
 // One generation per page load, including Strict Mode's double effect. Reset
 // shortly after a real unmount so revisiting the page starts a fresh session.
 let generationStartedThisLoad = false;
-
-/** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
-type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
-
-function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
-  const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
-    | LocalMicPublication
-    | undefined;
-  const track = publication?.audioTrack?.mediaTrack;
-  if (track) track.enabled = enabled;
-}
 
 interface GenerationConfig {
   jobRole: string;

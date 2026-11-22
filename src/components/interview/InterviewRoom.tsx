@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { useOverlayFocusTrap } from "@/components/interview/use-overlay-focus-trap";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -14,11 +15,6 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  * API; the camera is never an AI input (ADR-005). Microphone audio is sent to
  * the configured ASR provider only after the candidate presses Record answer.
  */
-const PRIMARY =
-  "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
-
 /** Candidate-facing wording; storage-level message kinds stay out of the UI. */
 function messageKindLabel(message: TranscriptEntry): string {
   if (message.speakerType === "candidate") return "Answer";
@@ -44,41 +40,10 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
 
   /**
    * Overlay dialog behaviour (M8): focus moves into the panel when it opens,
-   * Escape closes it, and focus returns to the control that opened it.
+   * Escape closes it, and focus returns to the control that opened it. Shared
+   * implementation in use-overlay-focus-trap (TT-8 review dedup).
    */
-  useEffect(() => {
-    if (!overlayOpen) return;
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    overlayRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        setOverlayOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      // Keep keyboard focus inside the modal panel.
-      const focusables = overlayRef.current?.querySelectorAll<HTMLElement>(
-        'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusables || focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, [overlayOpen]);
+  useOverlayFocusTrap(overlayOpen, overlayRef, () => setOverlayOpen(false));
 
 
   useEffect(() => {
@@ -220,7 +185,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <h1 className="font-display text-lg font-semibold text-ink">Mock interview · {interview.jobRole}</h1>
           <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {evaluationModeLabel(interview.evaluationMode)} mode</p>
         </div>
-        <button type="button" onClick={() => setOverlayOpen((open) => !open)} className={GHOST}>
+        <button type="button" onClick={() => setOverlayOpen((open) => !open)} className="btn-ghost">
           {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
           {overlayOpen ? "Hide conversation" : "Open conversation"}
         </button>
@@ -248,7 +213,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             type="button"
             onClick={toggleMute}
             aria-pressed={muted}
-            className={`${GHOST} mt-4`}>
+            className="btn-ghost mt-4">
             {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
             {muted ? "Unmute" : "Mute"}
           </button>
@@ -276,7 +241,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <button
             type="button"
             onClick={() => (recording ? recorderRef.current?.stop() : void startRecording())}
-            className={GHOST}
+            className="btn-ghost"
             aria-label={recording ? "Stop recording" : "Record answer"}
           >
             {recording ? (
@@ -285,7 +250,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
               <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
             )}
           </button>
-          <button type="submit" disabled={!draft.trim() || state === "thinking"} className={PRIMARY}>
+          <button type="submit" disabled={!draft.trim() || state === "thinking"} className="btn-primary">
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
           </button>
@@ -316,7 +281,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           >
             <div className="flex items-center justify-between">
               <h2 id="conversation-heading" className="font-display text-lg font-semibold text-ink">Conversation</h2>
-              <button type="button" onClick={() => setOverlayOpen(false)} className={GHOST}>Close</button>
+              <button type="button" onClick={() => setOverlayOpen(false)} className="btn-ghost">Close</button>
             </div>
             {messages.length === 0 ? (
               <p className="text-sm text-ink-muted">No turns yet. Introduce yourself to begin.</p>

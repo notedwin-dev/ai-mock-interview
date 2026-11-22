@@ -14,12 +14,6 @@ import { evaluationModeLabel } from "@/lib/interview/labels";
  * choices are preferences carried into the live room, where the mic is actually
  * captured. Nothing is sent to the AI until "Join now".
  */
-const PRIMARY =
-  "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
-
-const PILL =
-  "h-10 max-w-full rounded-full border border-line bg-surface pl-8 pr-3 text-xs text-ink outline-none transition-colors focus:border-emerald-400/70";
-
 export function WaitingRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -197,7 +191,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={micId}
                 onChange={(event) => setMicId(event.target.value)}
                 aria-label="Microphone input"
-                className={PILL}>
+                className="device-pill">
                 {micOptions.length === 0 ? <option value="">Microphone</option> : null}
                 {micOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -213,7 +207,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={speakerId}
                 onChange={(event) => setSpeakerId(event.target.value)}
                 aria-label="Speaker output"
-                className={PILL}>
+                className="device-pill">
                 {speakerOptions.length === 0 ? <option value="">Speaker</option> : null}
                 {speakerOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -229,7 +223,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={cameraId}
                 onChange={(event) => changeCamera(event.target.value)}
                 aria-label="Camera"
-                className={PILL}>
+                className="device-pill">
                 {cameraOptions.length === 0 ? <option value="">Camera</option> : null}
                 {cameraOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -260,7 +254,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             type="button"
             onClick={join}
             disabled={busy}
-            className={`${PRIMARY} w-full justify-center`}>
+            className="btn-primary w-full justify-center px-6">
             Join now
           </button>
           <Link

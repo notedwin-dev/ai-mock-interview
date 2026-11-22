@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { requireAccount } from "@/lib/auth/guard";
 import { EditInterviewDetails } from "@/components/dashboard/EditInterviewDetails";
 import { InterviewError, loadOwnedSession } from "@/lib/interview/service";
+import { isEditableSession } from "@/lib/interview/scheduling";
 
 export const instant = false;
 
@@ -20,8 +21,8 @@ export default async function Page(
     throw error;
   }
 
-  const locked = Boolean(session.startedAt || session.completedAt) ||
-    !["created", "scheduled"].includes(session.status);
+  // Shared lock rule (also enforced at the API boundary) — see scheduling.ts.
+  const locked = !isEditableSession(session);
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:px-10">
