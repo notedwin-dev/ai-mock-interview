@@ -12,7 +12,8 @@ export async function POST(
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
   try {
     const { id } = await ctx.params;
-    return Response.json(await confirmGeneration(account.account.userId, id, await request.json()));
+    const body = await request.json().catch(() => ({}));
+    return Response.json(await confirmGeneration(account.account.userId, id, body));
   } catch (error) {
     if (error instanceof GenerationError) {
       const status = error.code === "not_found" ? 404 : 409;

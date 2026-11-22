@@ -15,8 +15,9 @@ export async function PATCH(
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
   try {
     const { sessionId } = await ctx.params;
+    const body = await request.json().catch(() => ({}));
     return Response.json(
-      await editInterviewDetails(account.account.userId, sessionId, await request.json()),
+      await editInterviewDetails(account.account.userId, sessionId, body),
     );
   } catch (error) {
     return errorResponse(error);
