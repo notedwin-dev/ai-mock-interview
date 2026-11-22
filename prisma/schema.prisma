@@ -1,0 +1,336 @@
+/*
+ * AIMIS database schema — derived from AIMIS_Data_Dictionary_v0.4.xlsx (13 tables).
+ *
+ * Conventions (Notion "Data Model & Security", ADR-020):
+ * - Tables and columns are lowercase snake_case via @@map/@map; Prisma-side names
+ *   are camelCase per docs/CONVENTIONS.md.
+ * - Column types, sizes, nullability, PK/FK targets and ON DELETE rules follow the
+ *   v0.4 dictionary exactly (TIMESTAMPTZ, JSONB, BYTEA, NUMERIC(3,2), NUMERIC(5,4),
+ *   SMALLINT, BIGINT, VARCHAR sizes).
+ * - Value domains (role/status/mode strings) are enforced by PostgreSQL CHECK
+ *   constraints appended in the initial migration, because the v0.4 dictionary
+ *   stores them as VARCHAR. The domain values below are the machine-readable
+ *   forms of the approved requirement wording:
+ *     account_role        candidate | recruiter | administrator (FR-AUTH-004)
+ *     account_status      active | pending_deletion | deactivated (deletion lifecycle)
+ *     provider_type       preset | custom (register: PRESET / CUSTOM)
+ *     credential_status   unvalidated | valid | invalid (FR-PROVIDER-006)
+ *     visibility          private | public (profiles are private by default)
+ *     evaluation_mode     supportive | balanced | rigorous (FR-SETUP-004)
+ *     runtime_mode        preset_realtime | custom (FR-SETUP-005)
+ *     session status      created | active | completed | failed
+ *     speaker_type        interviewer | candidate (FR-TRANSCRIPT-001/002)
+ *     message_kind        primary_question | follow_up_question | candidate_response
+ *                         | acknowledgement (FR-INTERVIEW-007/008)
+ *     candidate_input_mode text | voice (FR-INTERVIEW-004/005)
+ *     unit status         open | closed
+ *     evaluation_status   queued | processing | completed | failed (FR-ASYNC-005)
+ *     template status     draft | active | retired (one active version per code)
+ *     deletion_status     pending | removed | failed (media_recording, deferred)
+ * - Identifiers default to PostgreSQL's built-in gen_random_uuid() so any writer
+ *   (app, tests, admin SQL) gets server-side IDs.
+ * - Domain-crossing rules the dictionary cannot express (same-session consistency
+ *   of message→unit and unit→evaluation references) are enforced in the service
+ *   transaction boundary, per the Notion data-model implementation checks.
+ */
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model UserAccount {
+  userId              String    @id @default(dbgenerated("gen_random_uuid()")) @map("user_id") @db.Uuid
+  email               String    @unique @db.VarChar(255)
+  passwordHash        String    @map("password_hash") @db.VarChar(255)
+  accountRole         String    @map("account_role") @db.VarChar(20)
+  accountStatus       String    @default("active") @map("account_status") @db.VarChar(20)
+  emailVerifiedAt     DateTime? @map("email_verified_at") @db.Timestamptz(6)
+  deletionRequestedAt DateTime? @map("deletion_requested_at") @db.Timestamptz(6)
+  deletionDeadlineAt  DateTime? @map("deletion_deadline_at") @db.Timestamptz(6)
+  deactivatedAt       DateTime? @map("deactivated_at") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  candidateProfile      CandidateProfile?
+  providerConfigurations UserProviderConfiguration[]
+  sessions              InterviewSession[]
+  createdCategories     InterviewCategory[]          @relation("CategoryCreatedBy")
+  updatedCategories     InterviewCategory[]          @relation("CategoryUpdatedBy")
+  createdTemplates      InterviewQuestionTemplate[]  @relation("TemplateCreatedBy")
+  updatedTemplates      InterviewQuestionTemplate[]  @relation("TemplateUpdatedBy")
+
+  @@map("user_account")
+}
+
+model CandidateProfile {
+  userId              String   @id @map("user_id") @db.Uuid
+  displayName         String   @map("display_name") @db.VarChar(100)
+  headline            String?  @map("headline") @db.VarChar(160)
+  professionalSummary String?  @map("professional_summary")
+  targetRole          String?  @map("target_role") @db.VarChar(150)
+  skillsJson          Json     @map("skills_json") @db.JsonB
+  educationJson       Json     @map("education_json") @db.JsonB
+  experienceJson      Json     @map("experience_json") @db.JsonB
+  portfolioLinksJson  Json     @map("portfolio_links_json") @db.JsonB
+  visibility          String   @default("private") @map("visibility") @db.VarChar(20)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user    UserAccount       @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  resumes CandidateResume[]
+
+  @@map("candidate_profile")
+}
+
+model CandidateResume {
+  resumeId                 String    @id @default(dbgenerated("gen_random_uuid()")) @map("resume_id") @db.Uuid
+  profileUserId            String    @map("profile_user_id") @db.Uuid
+  originalFileName         String    @map("original_filename") @db.VarChar(255)
+  storageKey               String    @map("storage_key") @db.VarChar(500)
+  mimeType                 String    @map("mime_type") @db.VarChar(100)
+  fileSizeBytes            BigInt    @map("file_size_bytes") @db.BigInt
+  isSharedWithRecruiters   Boolean   @default(false) @map("is_shared_with_recruiters")
+  sharingConsentedAt       DateTime? @map("sharing_consented_at") @db.Timestamptz(6)
+  sharingConsentVersion    String?   @map("sharing_consent_version") @db.VarChar(50)
+  sharingRevokedAt         DateTime? @map("sharing_revoked_at") @db.Timestamptz(6)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  profile CandidateProfile @relation(fields: [profileUserId], references: [userId], onDelete: Cascade)
+
+  @@index([profileUserId])
+  @@map("candidate_resume")
+}
+
+model UserProviderConfiguration {
+  userProviderConfigurationId String   @id @default(dbgenerated("gen_random_uuid()")) @map("user_provider_configuration_id") @db.Uuid
+  userId                      String   @map("user_id") @db.Uuid
+  providerType                String   @map("provider_type") @db.VarChar(20)
+  providerName                String   @map("provider_name") @db.VarChar(120)
+  baseUrl                     String?  @map("base_url") @db.VarChar(2048)
+  encryptedApiKey             Bytes?   @map("encrypted_api_key") @db.ByteA
+  encryptionKeyVersion        String?  @map("encryption_key_version") @db.VarChar(30)
+  capabilitiesJson            Json     @map("capabilities_json") @db.JsonB
+  credentialStatus            String   @default("unvalidated") @map("credential_status") @db.VarChar(20)
+  isEnabled                   Boolean  @default(true) @map("is_enabled")
+  configurationVersion        Int      @default(1) @map("configuration_version")
+  createdAt                   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user               UserAccount          @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  scorerEvaluations  InterviewEvaluation[] @relation("EvaluationScorerConfiguration")
+
+  @@index([userId])
+  @@map("user_provider_configuration")
+}
+
+model InterviewCategory {
+  categoryId      String   @id @default(dbgenerated("gen_random_uuid()")) @map("category_id") @db.Uuid
+  categoryCode    String   @unique @map("category_code") @db.VarChar(30)
+  categoryName    String   @map("category_name") @db.VarChar(80)
+  description     String?  @map("description")
+  isActive        Boolean  @default(true) @map("is_active")
+  displayOrder    Int      @default(0) @map("display_order") @db.SmallInt
+  createdByUserId String?  @map("created_by_user_id") @db.Uuid
+  updatedByUserId String?  @map("updated_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdBy UserAccount? @relation("CategoryCreatedBy", fields: [createdByUserId], references: [userId], onDelete: SetNull)
+  updatedBy UserAccount? @relation("CategoryUpdatedBy", fields: [updatedByUserId], references: [userId], onDelete: SetNull)
+
+  templates InterviewQuestionTemplate[]
+  sessions  InterviewSession[]
+
+  @@map("interview_category")
+}
+
+model InterviewQuestionTemplate {
+  templateId      String   @id @default(dbgenerated("gen_random_uuid()")) @map("template_id") @db.Uuid
+  categoryId      String   @map("category_id") @db.Uuid
+  templateCode    String   @map("template_code") @db.VarChar(80)
+  templateName    String   @map("template_name") @db.VarChar(120)
+  description     String?  @map("description")
+  templateContent String   @map("template_content")
+  versionNumber   Int      @default(1) @map("version_number")
+  status          String   @default("draft") @map("status") @db.VarChar(20)
+  createdByUserId String?  @map("created_by_user_id") @db.Uuid
+  updatedByUserId String?  @map("updated_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  category   InterviewCategory @relation(fields: [categoryId], references: [categoryId], onDelete: Restrict)
+  createdBy  UserAccount?      @relation("TemplateCreatedBy", fields: [createdByUserId], references: [userId], onDelete: SetNull)
+  updatedBy  UserAccount?      @relation("TemplateUpdatedBy", fields: [updatedByUserId], references: [userId], onDelete: SetNull)
+  sessions   InterviewSession[]
+
+  @@unique([templateCode, versionNumber])
+  @@index([categoryId])
+  @@map("interview_question_template")
+}
+
+model InterviewSession {
+  sessionId               String    @id @default(dbgenerated("gen_random_uuid()")) @map("session_id") @db.Uuid
+  userId                  String    @map("user_id") @db.Uuid
+  jobRole                 String    @map("job_role") @db.VarChar(150)
+  jobDescription          String?   @map("job_description")
+  categoryId              String    @map("category_id") @db.Uuid
+  categoryCodeSnapshot    String    @map("category_code_snapshot") @db.VarChar(30)
+  categoryNameSnapshot    String    @map("category_name_snapshot") @db.VarChar(80)
+  questionTemplateId      String?   @map("question_template_id") @db.Uuid
+  evaluationMode          String    @map("evaluation_mode") @db.VarChar(20)
+  runtimeMode             String    @map("runtime_mode") @db.VarChar(30)
+  providerRouteSnapshot   Json      @map("provider_route_snapshot") @db.JsonB
+  interviewerPromptVersion String   @map("interviewer_prompt_version") @db.VarChar(50)
+  status                  String    @default("created") @map("status") @db.VarChar(20)
+  failureCode             String?   @map("failure_code") @db.VarChar(60)
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt               DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt             DateTime? @map("completed_at") @db.Timestamptz(6)
+  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user             UserAccount                @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  category         InterviewCategory          @relation(fields: [categoryId], references: [categoryId], onDelete: Restrict)
+  questionTemplate InterviewQuestionTemplate? @relation(fields: [questionTemplateId], references: [templateId], onDelete: Restrict)
+
+  messages  ConversationMessage[]
+  units     InterviewAssessmentUnit[]
+  evaluation InterviewEvaluation?
+  recordings MediaRecording[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([categoryId])
+  @@index([questionTemplateId])
+  @@map("interview_session")
+}
+
+model ConversationMessage {
+  messageId         String  @id @default(dbgenerated("gen_random_uuid()")) @map("message_id") @db.Uuid
+  sessionId         String  @map("session_id") @db.Uuid
+  assessmentUnitId  String? @map("assessment_unit_id") @db.Uuid
+  sequenceNumber    Int     @map("sequence_number")
+  speakerType       String  @map("speaker_type") @db.VarChar(20)
+  messageKind       String  @map("message_kind") @db.VarChar(30)
+  contentText       String  @map("content_text")
+  candidateInputMode String? @map("candidate_input_mode") @db.VarChar(20)
+  idempotencyKey    String? @map("idempotency_key") @db.VarChar(100)
+
+  session        InterviewSession          @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+  assessmentUnit InterviewAssessmentUnit?  @relation(fields: [assessmentUnitId], references: [assessmentUnitId], onDelete: SetNull)
+
+  @@unique([sessionId, sequenceNumber])
+  @@index([assessmentUnitId])
+  @@map("conversation_message")
+}
+
+model InterviewAssessmentUnit {
+  assessmentUnitId String    @id @default(dbgenerated("gen_random_uuid()")) @map("assessment_unit_id") @db.Uuid
+  sessionId        String    @map("session_id") @db.Uuid
+  unitNumber       Int       @map("unit_number")
+  status           String    @default("open") @map("status") @db.VarChar(20)
+  openedAt         DateTime  @default(now()) @map("opened_at") @db.Timestamptz(6)
+  closedAt         DateTime? @map("closed_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session  InterviewSession     @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+  messages ConversationMessage[]
+  evaluation AnswerEvaluation?
+
+  @@unique([sessionId, unitNumber])
+  @@map("interview_assessment_unit")
+}
+
+model InterviewEvaluation {
+  evaluationId                 String    @id @default(dbgenerated("gen_random_uuid()")) @map("evaluation_id") @db.Uuid
+  sessionId                    String    @unique @map("session_id") @db.Uuid
+  scorerConfigurationId        String?   @map("scorer_configuration_id") @db.Uuid
+  scorerProviderNameSnapshot   String    @map("scorer_provider_name_snapshot") @db.VarChar(120)
+  scorerModelId                String    @map("scorer_model_id") @db.VarChar(150)
+  rubricVersion                String    @map("rubric_version") @db.VarChar(50)
+  promptVersion                String    @map("prompt_version") @db.VarChar(50)
+  evaluationStatus             String    @default("queued") @map("evaluation_status") @db.VarChar(20)
+  interviewSummary             String?   @map("interview_summary")
+  overallScore                 Decimal?  @map("overall_score") @db.Decimal(3, 2)
+  strengthsJson                Json?     @map("strengths_json") @db.JsonB
+  improvementAreasJson         Json?     @map("improvement_areas_json") @db.JsonB
+  attemptCount                 Int       @default(0) @map("attempt_count")
+  nextRetryAt                  DateTime? @map("next_retry_at") @db.Timestamptz(6)
+  lockedAt                     DateTime? @map("locked_at") @db.Timestamptz(6)
+  startedAt                    DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt                  DateTime? @map("completed_at") @db.Timestamptz(6)
+  lastErrorCode                String?   @map("last_error_code") @db.VarChar(60)
+  createdAt                    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  session             InterviewSession           @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+  scorerConfiguration UserProviderConfiguration? @relation("EvaluationScorerConfiguration", fields: [scorerConfigurationId], references: [userProviderConfigurationId], onDelete: SetNull)
+  answerEvaluations   AnswerEvaluation[]
+
+  @@map("interview_evaluation")
+}
+
+model AnswerEvaluation {
+  answerEvaluationId String   @id @default(dbgenerated("gen_random_uuid()")) @map("answer_evaluation_id") @db.Uuid
+  evaluationId       String   @map("evaluation_id") @db.Uuid
+  assessmentUnitId   String   @unique @map("assessment_unit_id") @db.Uuid
+  overallScore       Decimal  @map("overall_score") @db.Decimal(3, 2)
+  feedbackText       String   @map("feedback_text")
+  recommendedAnswer  String   @map("recommended_answer")
+  strengthsJson      Json     @map("strengths_json") @db.JsonB
+  improvementAreasJson Json   @map("improvement_areas_json") @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  evaluation      InterviewEvaluation      @relation(fields: [evaluationId], references: [evaluationId], onDelete: Cascade)
+  assessmentUnit  InterviewAssessmentUnit  @relation(fields: [assessmentUnitId], references: [assessmentUnitId], onDelete: Cascade)
+  criterionScores EvaluationCriterionScore[]
+
+  @@index([evaluationId])
+  @@map("answer_evaluation")
+}
+
+model EvaluationCriterionScore {
+  answerEvaluationId     String  @map("answer_evaluation_id") @db.Uuid
+  criterionCode          String  @map("criterion_code") @db.VarChar(50)
+  criterionLabelSnapshot String  @map("criterion_label_snapshot") @db.VarChar(100)
+  scoreValue             Int     @map("score_value") @db.SmallInt
+  maxScore               Int     @map("max_score") @db.SmallInt
+  weightSnapshot         Decimal @map("weight_snapshot") @db.Decimal(5, 4)
+  evidenceText           String? @map("evidence_text")
+  rationale              String? @map("rationale")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  answerEvaluation AnswerEvaluation @relation(fields: [answerEvaluationId], references: [answerEvaluationId], onDelete: Cascade)
+
+  @@id([answerEvaluationId, criterionCode])
+  @@map("evaluation_criterion_score")
+}
+
+model MediaRecording {
+  recordingId          String    @id @default(dbgenerated("gen_random_uuid()")) @map("recording_id") @db.Uuid
+  sessionId            String    @map("session_id") @db.Uuid
+  mediaType            String    @map("media_type") @db.VarChar(30)
+  storageKey           String    @map("storage_key") @db.VarChar(500)
+  mimeType             String    @map("mime_type") @db.VarChar(100)
+  fileSizeBytes        BigInt?   @map("file_size_bytes") @db.BigInt
+  durationSeconds      Int?      @map("duration_seconds")
+  consentedAt          DateTime  @map("consented_at") @db.Timestamptz(6)
+  consentVersion       String    @map("consent_version") @db.VarChar(50)
+  recordingStartedAt   DateTime  @map("recording_started_at") @db.Timestamptz(6)
+  recordingCompletedAt DateTime? @map("recording_completed_at") @db.Timestamptz(6)
+  expiresAt            DateTime? @map("expires_at") @db.Timestamptz(6)
+  deletionStatus       String    @default("pending") @map("deletion_status") @db.VarChar(20)
+  deletedAt            DateTime? @map("deleted_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  session InterviewSession @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("media_recording")
+}
+
+
