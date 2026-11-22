@@ -9,6 +9,7 @@ import {
   greeting,
   TOOL_PARAMETERS,
 } from "../src/lib/interview/generation-contract.mjs";
+import { AIMIS_REALTIME_MODEL_ID } from "../src/lib/utils/constants.mjs";
 
 /**
  * AIMIS single LiveKit agent (Gemini Live). One deployment serves both roles:
@@ -18,7 +19,9 @@ import {
  * carries the role instead of using two agent names.
  */
 export const AGENT_NAME = "aimis-agent";
-export const REALTIME_MODEL = "gemini-3.1-flash-live-preview";
+// The agent's exact model ID is admin-fixed and shared with the app through the
+// constants module — never hardcoded here (owner decision 2026-11-23).
+export const REALTIME_MODEL = AIMIS_REALTIME_MODEL_ID;
 const API_BASE = process.env.APP_URL || "http://localhost:3000";
 
 /* ------------------------------ shared helpers ------------------------------ */

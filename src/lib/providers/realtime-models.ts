@@ -1,4 +1,5 @@
 import type { Capability } from "./registry";
+import { AIMIS_REALTIME_MODEL_ID } from "@/lib/utils/constants";
 
 /**
  * Admin-fixed realtime models (owner decision 2026-11-20): in Pre-configured
@@ -6,6 +7,11 @@ import type { Capability } from "./registry";
  * administrator and never user-editable. IDs below are from official provider
  * docs; unsupported/free-tier-excluded options are shown as unavailable
  * rather than invented.
+ *
+ * The Google entry is the model the LiveKit agent actually runs
+ * (`AIMIS_REALTIME_MODEL_ID`); sourcing it from the shared constant keeps the
+ * deployed worker and this catalogue from drifting apart (owner decision
+ * 2026-11-23).
  */
 export interface RealtimeProviderSpec {
   providerName: string;
@@ -21,7 +27,7 @@ export const REALTIME_PROVIDERS: readonly RealtimeProviderSpec[] = [
     providerName: "google",
     title: "Gemini Realtime",
     monogram: "G",
-    modelId: "gemini-3.8-live-extended-thinking",
+    modelId: AIMIS_REALTIME_MODEL_ID,
     note: "Free tier — no billing required.",
   },
   {
