@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +40,22 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prisma generated client
+/src/generated/prisma
+
+# local user recordings (24h retention) — never commit media
+/storage/*
+!/storage/.gitkeep
+
+# AI editor skill files installed by `prisma init`
+/.agents/
+/.claude/
+/.windsurf/
+/skills-lock.json
+
+# OpenCode project-local agent config (machine/user-specific, not shared)
+/opencode.json
+
+# reference images
+docs/design/references/**/*.png
