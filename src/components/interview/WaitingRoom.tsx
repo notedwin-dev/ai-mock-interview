@@ -12,11 +12,6 @@ import type { InvitationView } from "@/lib/interview/invitations";
  * to the AI or the server. Device setup is explicit; "Join Call" is the only
  * action that enters the live room, so nothing auto-starts.
  */
-const PRIMARY =
-  "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
-
 export function WaitingRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -72,9 +67,6 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   }
 
   function join() {
-    // Remember the selected output device for the room; no media crosses the
-    // network from this waiting room.
-    if (speakerId) sessionStorage.setItem("aimis-speaker-id", speakerId);
     stopPreview();
     router.push(`/i/${token}/room`);
   }
@@ -97,7 +89,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-ink-muted">
               <Video className="h-8 w-8" aria-hidden />
               <p>Your preview stays in this browser — it is never sent to the AI.</p>
-              <button type="button" onClick={() => void enablePreview()} disabled={busy} className={GHOST}>
+              <button type="button" onClick={() => void enablePreview()} disabled={busy} className="btn-ghost">
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Video className="h-4 w-4" aria-hidden />}
                 Enable camera &amp; mic
               </button>
@@ -125,20 +117,20 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                   ))}
                 </select>
               </label>
-              <button type="button" onClick={stopPreview} className={GHOST}>
+              <button type="button" onClick={stopPreview} className="btn-ghost">
                 <VideoOff className="h-4 w-4" aria-hidden /> Stop preview
               </button>
             </>
           ) : (
             <p className="text-xs text-ink-muted">Enable devices to check them here.</p>
           )}
-          <button type="button" onClick={toggleMute} disabled={!cameraOn} className={GHOST}>
+          <button type="button" onClick={toggleMute} disabled={!cameraOn} className="btn-ghost">
             {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
             {muted ? "Unmute" : "Mute"}
           </button>
           {notice ? <p className="text-xs text-amber-300">{notice}</p> : null}
           <div className="mt-auto flex flex-col gap-2">
-            <button type="button" onClick={join} className={PRIMARY}>Join Call</button>
+            <button type="button" onClick={join} className="btn-primary">Join Call</button>
             <Link href={`/i/${token}`} className="text-center text-xs text-ink-muted underline decoration-line underline-offset-4">
               Back to interview details
             </Link>

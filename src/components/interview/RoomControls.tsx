@@ -19,6 +19,11 @@ import type { SessionSummary, TranscriptMessage } from "@/lib/interview/service"
 
 const SESSION_STATUS_WORDS: Record<string, { word: string; dot: string; text: string }> = {
   created: { word: "Set up", dot: "bg-ink-muted/60", text: "text-ink-muted" },
+  scheduled: {
+    word: "Ready",
+    dot: "bg-ink-muted/60",
+    text: "text-ink-muted",
+  },
   active: {
     word: "In progress",
     dot: "bg-emerald-400",
@@ -150,7 +155,7 @@ export function RoomControls({
     if (session.status === "completed") {
       return { word: "Completed", tone: "text-ink-soft", dot: "bg-ink-soft" };
     }
-    if (session.status === "created") {
+    if (session.status === "created" || session.status === "scheduled") {
       return pending
         ? { word: "Connecting…", tone: "text-ink-muted", dot: "bg-ink-muted/60 animate-pulse" }
         : { word: "Ready", tone: "text-ink-muted", dot: "bg-ink-muted/60" };
@@ -298,13 +303,13 @@ export function RoomControls({
         </p>
       ) : null}
 
-      {session.status === "created" ? (
+      {(session.status === "created" || session.status === "scheduled") ? (
         <div className="flex flex-col items-center gap-2">
           <button
             type="button"
             disabled={pending}
             onClick={() => postLifecycle("start")}
-            className="inline-flex h-11 cursor-pointer items-center justify-center rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+            className="btn-primary"
           >
             {pending ? "Starting…" : "Start interview"}
           </button>
@@ -337,7 +342,7 @@ export function RoomControls({
             <button
               type="submit"
               disabled={pending || answerText.trim().length === 0}
-              className="inline-flex h-11 shrink-0 cursor-pointer items-center rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+              className="btn-primary shrink-0"
             >
               {pending ? "Sending…" : "Send"}
             </button>
