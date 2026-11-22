@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
+import { InterviewNextSteps } from "@/components/interview/InterviewNextSteps";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 
@@ -57,6 +58,7 @@ export function VoiceGenerationRoom() {
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
+  const [confirmed, setConfirmed] = useState<{ invitationPath: string; sessionId: string } | null>(null);
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(false);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
@@ -225,13 +227,15 @@ export function VoiceGenerationRoom() {
       },
     );
     const body = (await response.json().catch(() => null)) as
-      | { invitationPath?: string; error?: { message?: string } }
+      | { invitationPath?: string; sessionId?: string; error?: { message?: string } }
       | null;
-    if (!response.ok || !body?.invitationPath) {
+    if (!response.ok || !body?.invitationPath || !body?.sessionId) {
       throw new Error(body?.error?.message ?? "Could not confirm the interview.");
     }
     generationStartedThisLoad = false;
-    router.push(`${body.invitationPath}/waiting`);
+    // Confirming only applies the details. The candidate decides what happens
+    // next: start now, schedule, or leave and set it later (owner decision).
+    setConfirmed({ invitationPath: body.invitationPath, sessionId: body.sessionId });
   }
 
   function repeatLast() {
@@ -276,7 +280,12 @@ export function VoiceGenerationRoom() {
         </button>
       </section>
 
-      {status === "completed" && generation?.config ? (
+      {confirmed ? (
+        <InterviewNextSteps
+          invitationPath={confirmed.invitationPath}
+          sessionId={confirmed.sessionId}
+        />
+      ) : status === "completed" && generation?.config ? (
         <GenerationConfirmation config={generation.config} onConfirm={confirm} />
       ) : (
         <>

@@ -92,6 +92,7 @@ export interface SessionSummary {
   providerRouteSnapshot: ProviderRouteSnapshot;
   interviewerPromptVersion: string;
   status: string;
+  scheduledAt: string | null;
   failureCode: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -135,6 +136,7 @@ function toSessionSummary(
     providerRouteSnapshot,
     interviewerPromptVersion: session.interviewerPromptVersion,
     status: session.status,
+    scheduledAt: session.scheduledAt?.toISOString() ?? null,
     failureCode: session.failureCode,
     createdAt: session.createdAt.toISOString(),
     startedAt: session.startedAt?.toISOString() ?? null,
@@ -171,7 +173,8 @@ export async function listActiveInterviewCategories(): Promise<InterviewCategory
   }));
 }
 
-async function loadOwnedSession(
+/** Ownership-checked session loader shared by scheduling and detail edits. */
+export async function loadOwnedSession(
   userId: string,
   sessionId: string,
 ): Promise<InterviewSession> {

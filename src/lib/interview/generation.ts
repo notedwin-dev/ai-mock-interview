@@ -164,7 +164,7 @@ export async function confirmGeneration(
   userId: string,
   id: string,
   input: unknown,
-): Promise<{ invitationPath: string }> {
+): Promise<{ invitationPath: string; sessionId: string }> {
   const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
   if (!record) throw new GenerationError("not_found", "Generation session not found.");
   if (record.status !== "completed" || !record.sessionId) {
@@ -187,5 +187,5 @@ export async function confirmGeneration(
     where: { id },
     data: { configJson: config as unknown as never, status: "confirmed" },
   });
-  return { invitationPath: record.invitationPath! };
+  return { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
 }
