@@ -18,7 +18,9 @@ RUN npm install -g pnpm@12.21.0
 FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+# The agent does not need generated Prisma client. Skipping lifecycle scripts
+# avoids postinstall `prisma generate` before prisma/schema.prisma is copied.
+RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY . .
 RUN pnpm prune --prod
 
