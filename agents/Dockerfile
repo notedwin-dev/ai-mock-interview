@@ -18,10 +18,13 @@ RUN npm install -g pnpm@12.21.0
 FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# The agent does not need generated Prisma client. Skipping lifecycle scripts
-# avoids postinstall `prisma generate` before prisma/schema.prisma is copied.
-RUN pnpm install --frozen-lockfile --ignore-scripts
+# Native LiveKit RTC modules need their install scripts. Provide the Prisma
+# schema/config so the root postinstall (`prisma generate`) can also run.
+COPY prisma ./prisma
+COPY prisma7.config.ts ./
+RUN pnpm install --frozen-lockfile
 COPY . .
+# Prisma is a dev dependency removed by prune; skip scripts at this stage only.
 RUN pnpm prune --prod --ignore-scripts
 
 FROM base
