@@ -18,7 +18,10 @@
  *     visibility          private | public (profiles are private by default)
  *     evaluation_mode     supportive | balanced | rigorous (FR-SETUP-004)
  *     runtime_mode        preset_realtime | custom (FR-SETUP-005)
- *     session status      created | active | completed | failed
+ *     session status      scheduled | active | completed | failed
+  *                         (`created` is a legacy value retained by the
+  *                         scheduled_invitations migration for pre-schedule
+  *                         sessions; new sessions are born `scheduled`)
  *     speaker_type        interviewer | candidate (FR-TRANSCRIPT-001/002)
  *     message_kind        primary_question | follow_up_question | candidate_response
  *                         | acknowledgement (FR-INTERVIEW-007/008)

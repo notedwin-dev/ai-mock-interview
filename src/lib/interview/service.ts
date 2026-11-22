@@ -12,7 +12,8 @@ import {
   hashInvitationToken,
   invitationPath,
 } from "./invitation-token";
-import type { IssuedInvitation } from "./invitations";
+import type { RoomStore } from "./room";
+import { findActiveSessionByToken, type IssuedInvitation } from "./invitations";
 import {
   interviewSetupSchema,
   typedTurnSchema,
@@ -261,17 +262,16 @@ export async function createInterviewSession(
 }
 
 /**
- * Marks a created session active (FR-INTERVIEW-001). kept separate from
+ * Marks a scheduled session active (FR-INTERVIEW-001). kept separate from
  * creation so a runtime setup failure (M2) can land the session in
- * `failed` without ever having started.
+ * `failed` without ever having started. `created` is a legacy status retained
+ * for sessions made before the default changed to `scheduled`.
  */
 export async function startInterviewSession(
   userId: string,
   sessionId: string,
 ): Promise<SessionSummary> {
   const session = await loadOwnedSession(userId, sessionId);
-  // 'created' is retained for sessions made before the scheduled-state
-  // migration; newly created interviews start as 'scheduled'.
   if (session.status !== "scheduled" && session.status !== "created") {
     throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
   }
@@ -308,20 +308,84 @@ export async function endInterviewSession(
   );
 }
 
-async function nextSequenceNumber(sessionId: string): Promise<number> {
-  const aggregate = await db.conversationMessage.aggregate({
-    where: { sessionId },
-    _max: { sequenceNumber: true },
-  });
-  return (aggregate._max.sequenceNumber ?? 0) + 1;
+/**
+ * Shared message insertion with conflict handling (FR-TRANSCRIPT-001,
+ * NFR-REL-002). Retried submissions with the same idempotency key return the
+ * original message instead of duplicating it (the partial unique index on
+ * (session_id, idempotency_key)); a sequence-number collision (concurrent
+ * turns) is retried once against a fresh max before surfacing as a conflict.
+ * Shared by the typed turn path (submitTypedTurn) and the token-scoped room
+ * store so both stay safe under concurrent inserts.
+ */
+async function appendMessage(
+  sessionId: string,
+  data: {
+    speakerType: string;
+    messageKind: string;
+    contentText: string;
+    candidateInputMode?: string | null;
+    idempotencyKey?: string | null;
+    assessmentUnitId?: string | null;
+  },
+): Promise<{ message: ConversationMessage; created: boolean }> {
+  if (data.idempotencyKey) {
+    const existing = await db.conversationMessage.findFirst({
+      where: { sessionId, idempotencyKey: data.idempotencyKey },
+    });
+    if (existing) return { message: existing, created: false };
+  }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const aggregate = await db.conversationMessage.aggregate({
+        where: { sessionId },
+        _max: { sequenceNumber: true },
+      });
+      const message = await db.conversationMessage.create({
+        data: {
+          sessionId,
+          sequenceNumber: (aggregate._max.sequenceNumber ?? 0) + 1,
+          speakerType: data.speakerType,
+          messageKind: data.messageKind,
+          contentText: data.contentText,
+          candidateInputMode: data.candidateInputMode ?? null,
+          idempotencyKey: data.idempotencyKey ?? null,
+          assessmentUnitId: data.assessmentUnitId ?? null,
+        },
+      });
+      return { message, created: true };
+    } catch (error) {
+      const isDuplicate =
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+      // The partial unique index on (session_id, idempotency_key) carries
+      // "idempotency" in its name; sequence violations carry "sequence".
+      const violation = JSON.stringify(
+        error instanceof Error && "meta" in error ? (error as { meta?: unknown }).meta : "",
+      );
+      const duplicateIdempotency = isDuplicate && violation.includes("idempotency");
+      if (duplicateIdempotency) {
+        // A concurrent duplicate insert: return the winner instead of a 500.
+        const existing = await db.conversationMessage.findFirst({
+          where: { sessionId, idempotencyKey: data.idempotencyKey ?? undefined },
+        });
+        if (existing) return { message: existing, created: false };
+      }
+      const duplicateSequence = isDuplicate && violation.includes("sequence");
+      if (attempt === 0 && duplicateSequence) {
+        continue; // recompute max sequence after a concurrent insert
+      }
+      throw new InterviewError(
+        "invalid_state",
+        "The response could not be ordered. Try again.",
+      );
+    }
+  }
+  throw new InterviewError("invalid_state", "The response could not be ordered. Try again.");
 }
 
 /**
- * Persists one typed candidate response (FR-INTERVIEW-004). Retried
- * finalized submissions with the same idempotency key return the original
- * message instead of duplicating it (NFR-REL-002 partial unique index);
- * a sequence-number collision (concurrent turns) is retried once against a
- * fresh max before surfacing as a conflict.
+ * Persists one typed candidate response (FR-INTERVIEW-004) on the shared
+ * appendMessage conflict path.
  */
 export async function submitTypedTurn(
   userId: string,
@@ -348,58 +412,131 @@ export async function submitTypedTurn(
     );
   }
 
-  if (parsed.idempotencyKey) {
-    const existing = await db.conversationMessage.findFirst({
-      where: { sessionId: session.sessionId, idempotencyKey: parsed.idempotencyKey },
-    });
-    if (existing) {
-      return { message: toMessageSummary(existing), created: false };
-    }
-  }
+  const result = await appendMessage(session.sessionId, {
+    speakerType: "candidate",
+    messageKind: "candidate_response",
+    contentText: parsed.contentText,
+    candidateInputMode: parsed.inputMode,
+    idempotencyKey: parsed.idempotencyKey ?? null,
+  });
+  return { message: toMessageSummary(result.message), created: result.created };
+}
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const message = await db.conversationMessage.create({
-        data: {
-          sessionId: session.sessionId,
-          sequenceNumber: await nextSequenceNumber(session.sessionId),
-          speakerType: "candidate",
-          messageKind: "candidate_response",
-          contentText: parsed.contentText,
-          candidateInputMode: parsed.inputMode,
-          idempotencyKey: parsed.idempotencyKey ?? null,
+/**
+ * Persistence for the token-scoped room (FR-INTERVIEW-004), sharing
+ * appendMessage with the typed path. The token is resolved to the owning
+ * session by invitations.findActiveSessionByToken — no account session.
+ */
+export function createRoomStore(): RoomStore {
+  return {
+    async context(token) {
+      const session = await findActiveSessionByToken(token);
+      if (!session) return null;
+      return {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        jobRole: session.jobRole,
+        jobDescription: session.jobDescription,
+        evaluationMode: session.evaluationMode,
+        status: session.status,
+      };
+    },
+
+    async messages(sessionId) {
+      const rows = await db.conversationMessage.findMany({
+        where: { sessionId },
+        orderBy: { sequenceNumber: "asc" },
+        select: {
+          sequenceNumber: true,
+          speakerType: true,
+          messageKind: true,
+          contentText: true,
+          assessmentUnitId: true,
         },
       });
-      return { message: toMessageSummary(message), created: true };
-    } catch (error) {
-      const isDuplicate =
-        error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
-      // The partial unique index on (session_id, idempotency_key) carries
-      // "idempotency" in its name; sequence violations carry "sequence".
-      const violation = JSON.stringify(error instanceof Error && "meta" in error ? (error as { meta?: unknown }).meta : "");
-      const duplicateIdempotency = isDuplicate && violation.includes("idempotency");
-      if (duplicateIdempotency) {
-        const existing = await db.conversationMessage.findFirst({
-          where: { sessionId: session.sessionId, idempotencyKey: parsed.idempotencyKey },
-        });
-        if (existing) {
-          return { message: toMessageSummary(existing), created: false };
-        }
-      }
-      const duplicateSequence = isDuplicate && violation.includes("sequence");
-      if (attempt === 0 && duplicateSequence) {
-        continue; // recompute max sequence after a concurrent insert
-      }
-      if (duplicateSequence) {
-        throw new InterviewError(
-          "invalid_state",
-          "The response could not be ordered. Try again.",
-        );
-      }
-      throw error;
-    }
-  }
-  throw new InterviewError("invalid_state", "The response could not be ordered. Try again.");
+      return rows.map((message) => ({
+        sequenceNumber: message.sequenceNumber,
+        speakerType: message.speakerType,
+        messageKind: message.messageKind,
+        contentText: message.contentText,
+        assessmentUnitId: message.assessmentUnitId,
+      }));
+    },
+
+    async activate(sessionId) {
+      await db.interviewSession.update({
+        where: { sessionId },
+        data: { status: "active", startedAt: new Date() },
+      });
+    },
+
+    async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
+      const result = await appendMessage(sessionId, {
+        speakerType: "candidate",
+        messageKind: "candidate_response",
+        contentText,
+        idempotencyKey: idempotencyKey ?? null,
+        assessmentUnitId,
+      });
+      return {
+        entry: {
+          sequenceNumber: result.message.sequenceNumber,
+          speakerType: result.message.speakerType,
+          messageKind: result.message.messageKind,
+          contentText: result.message.contentText,
+          assessmentUnitId: result.message.assessmentUnitId,
+        },
+        created: result.created,
+      };
+    },
+
+    async appendInterviewer(sessionId, contentText, messageKind, assessmentUnitId) {
+      const result = await appendMessage(sessionId, {
+        speakerType: "interviewer",
+        messageKind,
+        contentText,
+        assessmentUnitId,
+      });
+      return {
+        sequenceNumber: result.message.sequenceNumber,
+        speakerType: result.message.speakerType,
+        messageKind: result.message.messageKind,
+        contentText: result.message.contentText,
+        assessmentUnitId: result.message.assessmentUnitId,
+      };
+    },
+
+    async activeUnit(sessionId) {
+      const unit = await db.interviewAssessmentUnit.findFirst({
+        where: { sessionId, status: "open" },
+        orderBy: { unitNumber: "desc" },
+        select: { assessmentUnitId: true },
+      });
+      return unit?.assessmentUnitId ?? null;
+    },
+
+    async openUnit(sessionId, unitNumber) {
+      const unit = await db.interviewAssessmentUnit.create({
+        data: { sessionId, unitNumber },
+        select: { assessmentUnitId: true },
+      });
+      return unit.assessmentUnitId;
+    },
+
+    async closeUnit(unitId) {
+      await db.interviewAssessmentUnit.update({
+        where: { assessmentUnitId: unitId },
+        data: { status: "closed", closedAt: new Date() },
+      });
+    },
+
+    async complete(sessionId) {
+      await db.interviewSession.update({
+        where: { sessionId },
+        data: { status: "completed", completedAt: new Date() },
+      });
+    },
+  };
 }
 
 /**

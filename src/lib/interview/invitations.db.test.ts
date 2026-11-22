@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { PrismaClient } from "@/generated/prisma/client";
+import { Prisma, PrismaClient } from "@/generated/prisma/client";
 import { hashInvitationToken } from "./invitation-token";
 import { issueInvitation, resolveInvitation, revokeInvitation } from "./invitations";
 import { runRoomTurn } from "./room";
@@ -43,22 +43,24 @@ afterEach(async () => {
   await db.$executeRawUnsafe(`TRUNCATE TABLE ${TABLES.join(", ")} CASCADE`);
 });
 
-async function makeSession(overrides: Record<string, unknown> = {}) {
-  return db.interviewSession.create({
-    data: {
-      userId: ownerId,
-      categoryId,
-      jobRole: "Backend Engineer",
-      jobDescription: "Design APIs",
-      categoryCodeSnapshot: "general",
-      categoryNameSnapshot: "General",
-      evaluationMode: "balanced",
-      runtimeMode: "custom",
-      providerRouteSnapshot: {},
-      interviewerPromptVersion: "v1",
-      ...overrides,
-    } as never,
-  });
+/** Typed seed fixture — overrides stay checked against the Prisma input type. */
+type SessionSeed = Prisma.InterviewSessionUncheckedCreateInput;
+
+async function makeSession(overrides: Partial<SessionSeed> = {}) {
+  const data: SessionSeed = {
+    userId: ownerId,
+    categoryId,
+    jobRole: "Backend Engineer",
+    jobDescription: "Design APIs",
+    categoryCodeSnapshot: "general",
+    categoryNameSnapshot: "General",
+    evaluationMode: "balanced",
+    runtimeMode: "custom",
+    providerRouteSnapshot: {},
+    interviewerPromptVersion: "v1",
+    ...overrides,
+  };
+  return db.interviewSession.create({ data });
 }
 
 d("invitation links (TT-21)", () => {
