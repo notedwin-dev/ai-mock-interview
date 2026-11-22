@@ -20,20 +20,20 @@
     "agent": "node scripts/livekit-agent.mjs start"
   },
   "dependencies": {
-    "@ai-sdk/google": "4.0.122",
-    "@ai-sdk/openai-compatible": "3.0.93",
-    "@ai-sdk/react": "4.0.181",
+    "@ai-sdk/google": "4.0.124",
+    "@ai-sdk/openai-compatible": "3.0.94",
+    "@ai-sdk/react": "4.0.183",
     "@livekit/agents": "1.10.1",
     "@livekit/agents-plugin-google": "1.10.1",
-    "@livekit/rtc-node": "1.2.2",
+    "@livekit/rtc-node": "1.2.3",
     "@node-rs/argon2": "2.2.2",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
-    "ai": "7.0.177",
+    "ai": "7.0.179",
     "dotenv": "^18.0.10",
-    "livekit-client": "2.24.1",
+    "livekit-client": "2.25.0",
     "livekit-server-sdk": "2.20.1",
-    "lucide-react": "^1.73.0",
+    "lucide-react": "^1.77.0",
     "next": "16.4.6",
     "next-auth": "5.0.0-beta.32",
     "pg": "^8.23.1",
@@ -53,7 +53,7 @@
     "prisma": "7.10.1",
     "tailwindcss": "^4",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   },
   "packageManager": "pnpm@12.21.0"
 }
