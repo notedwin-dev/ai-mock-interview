@@ -74,3 +74,18 @@ body::before {
     88px 88px,
     88px 88px;
 }
+
+/*
+ * Shared pill buttons (AGENTS.md §10): the primary/ghost class sets are
+ * repeated across the waiting room, the live room and the meeting-room
+ * controls, so they live here as component-layer classes instead of
+ * duplicated strings. Keep one-off styles inline.
+ */
+@layer components {
+  .btn-primary {
+    @apply inline-flex h-11 cursor-pointer items-center justify-center gap-2 rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .btn-ghost {
+    @apply inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400;
+  }
+}

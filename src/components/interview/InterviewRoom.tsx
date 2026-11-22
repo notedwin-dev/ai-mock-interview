@@ -11,11 +11,6 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  * openable OVERLAY (never a sidebar). All turns go through the token-scoped
  * API; the camera is never an AI input (ADR-005).
  */
-const PRIMARY =
-  "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
-
 export function InterviewRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const [messages, setMessages] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
@@ -83,7 +78,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <h1 className="font-display text-lg font-semibold text-ink">Mock interview · {interview.jobRole}</h1>
           <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {interview.evaluationMode} mode</p>
         </div>
-        <button type="button" onClick={() => setOverlayOpen((open) => !open)} className={GHOST}>
+        <button type="button" onClick={() => setOverlayOpen((open) => !open)} className="btn-ghost">
           {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
           {overlayOpen ? "Hide conversation" : "Open conversation"}
         </button>
@@ -107,7 +102,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
           <p className="mt-1 text-xs text-ink-muted">{muted ? "microphone muted" : "microphone ready"}</p>
-          <button type="button" onClick={() => setMuted((value) => !value)} className={`${GHOST} mt-4`}>
+          <button type="button" onClick={() => setMuted((value) => !value)} className="btn-ghost mt-4">
             {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
             {muted ? "Unmute" : "Mute"}
           </button>
@@ -130,7 +125,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             aria-label="Your interview answer"
             disabled={state === "thinking"}
           />
-          <button type="submit" disabled={!draft.trim() || state === "thinking"} className={PRIMARY}>
+          <button type="submit" disabled={!draft.trim() || state === "thinking"} className="btn-primary">
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
           </button>
@@ -144,7 +139,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <div className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-lg font-semibold text-ink">Conversation</h2>
-              <button type="button" onClick={() => setOverlayOpen(false)} className={GHOST}>Close</button>
+              <button type="button" onClick={() => setOverlayOpen(false)} className="btn-ghost">Close</button>
             </div>
             {messages.length === 0 ? (
               <p className="text-sm text-ink-muted">No turns yet. Introduce yourself to begin.</p>
