@@ -77,7 +77,12 @@ export class RoomError extends Error {
 export const roomLlmOutputSchema = z
   .object({
     interviewerText: z.string().trim().min(1).max(2000),
-    messageKind: z.enum(["primary_question", "follow_up_question", "transition"]),
+    // Kinds are constrained to the conversation_message CHECK domain
+    // (primary_question | follow_up_question | candidate_response |
+    // acknowledgement). The interviewer only ever emits the first two; a
+    // "transition" kind does not exist in the DB and would violate the
+    // constraint after the candidate turn is already persisted.
+    messageKind: z.enum(["primary_question", "follow_up_question"]),
     endCall: z.boolean(),
   })
   .strict();
@@ -99,9 +104,9 @@ function roomInstructions(context: RoomContext, primaryCount: number): string {
     "You are the AIMIS AI interviewer in a live mock interview.",
     `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
     "Ask short, focused questions and never invent facts about the candidate.",
-    "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer; use transition to move on.",
+    "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer. When you move to a new area, emit the next primary_question directly — do not emit a separate transition message.",
     primaryCount >= MAX_PRIMARY_QUESTIONS
-      ? "The interview is complete: reply with a brief closing transition and set endCall=true."
+      ? "The interview is complete: reply with a brief follow_up_question that closes the conversation (for example, thanking the candidate) and set endCall=true."
       : "Set endCall=true only after the interview is genuinely complete. Choose at most one follow-up per answer.",
   ].join(" ");
 }

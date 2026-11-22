@@ -129,7 +129,7 @@ describe("runRoomTurn", () => {
   it("rejects unknown links and interviews that are not in a joinable state", async () => {
     const { store } = fakeStore();
     const missing = fakeStore({ ...context, status: "completed" });
-    const deps = { resolveRoute: async () => llmRoute, generate: async () => ({ interviewerText: "x", messageKind: "transition" as const, endCall: true }) };
+    const deps = { resolveRoute: async () => llmRoute, generate: async () => ({ interviewerText: "x", messageKind: "follow_up_question" as const, endCall: true }) };
 
     await expect(runRoomTurn("bad", { contentText: "hi" }, { ...deps, store: { ...store, context: async () => null } })).rejects.toMatchObject({ code: "invitation_not_found" });
     await expect(runRoomTurn(TOKEN, { contentText: "hi" }, { ...deps, store: missing.store })).rejects.toMatchObject({ code: "invalid_state" });
