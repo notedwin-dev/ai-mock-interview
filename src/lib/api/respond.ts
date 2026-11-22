@@ -2,6 +2,7 @@ import { ProfileError } from "@/lib/profile/service";
 import { ResumeFileError } from "@/lib/profile/resume-file";
 import { InterviewError } from "@/lib/interview/service";
 import { ProviderConfigError } from "@/lib/providers/config";
+import { LlmError } from "@/lib/ai/llm";
 import { z } from "zod";
 
 /**
@@ -12,6 +13,20 @@ import { z } from "zod";
 
 export function jsonError(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
+}
+
+/**
+ * Maps an LlmError to a 502 with a safe, fixed message (shared by the
+ * agent-led and token-scoped interview routes). Provider error text is never
+ * forwarded: it can contain request URLs, headers or credential fragments
+ * (NFR-SEC-008).
+ */
+export function llmErrorProviderResponse(error: LlmError): Response {
+  return jsonError(
+    502,
+    error.code === "invalid_output" ? "provider_invalid_output" : "provider_failed",
+    "The configured provider could not complete this request. Check the configuration and try again.",
+  );
 }
 
 export function errorResponse(error: unknown): Response {

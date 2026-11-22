@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { requireApiAccount } from "@/lib/auth/guard";
 import {
@@ -38,13 +38,7 @@ const requestSchema = z.discriminatedUnion("action", [
 
 function mapAgentError(error: unknown): Response {
   if (error instanceof LlmError) {
-    // Provider error text can contain request URLs or credential fragments —
-    // never forward it; the taxonomy alone is actionable for the UI.
-    return jsonError(
-      502,
-      error.code === "invalid_output" ? "provider_invalid_output" : "provider_failed",
-      "The configured provider could not complete this request. Check the configuration and try again.",
-    );
+    return llmErrorProviderResponse(error);
   }
   if (error instanceof AgentError) {
     const status =

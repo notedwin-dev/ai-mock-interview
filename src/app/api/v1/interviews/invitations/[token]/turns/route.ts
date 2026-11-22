@@ -1,4 +1,4 @@
-import { jsonError } from "@/lib/api/respond";
+import { jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { resolveInvitation } from "@/lib/interview/invitations";
 import { RoomError, runRoomTurn } from "@/lib/interview/room";
@@ -17,11 +17,7 @@ function mapError(error: unknown): Response {
     return jsonError(status, error.code, error.message);
   }
   if (error instanceof LlmError) {
-    return jsonError(
-      502,
-      error.code === "invalid_output" ? "provider_invalid_output" : "provider_failed",
-      "The configured interviewer could not respond. Check the provider configuration.",
-    );
+    return llmErrorProviderResponse(error);
   }
   return jsonError(500, "internal_error", "Something went wrong. Try again.");
 }
