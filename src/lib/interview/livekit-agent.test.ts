@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 type Helpers = {
   buildInstructions: (meta: { jobRole?: string; jobDescription?: string | null }) => string;
   itemText: (content: unknown) => string;
+  roleForMetadata: (meta: unknown) => string;
 };
 let helpers: Helpers;
 beforeAll(async () => {
@@ -12,6 +13,15 @@ beforeAll(async () => {
   // bounded but realistic budget instead of the default 10s hook timeout.
   helpers = (await import("../../../scripts/livekit-agent.mjs")) as unknown as Helpers;
 }, 30000);
+
+describe("single LiveKit agent routing", () => {
+  it("routes generator and interviewer dispatches by metadata role", () => {
+    expect(helpers.roleForMetadata({ role: "generator" })).toBe("generator");
+    expect(helpers.roleForMetadata({ role: "interviewer" })).toBe("interviewer");
+    expect(helpers.roleForMetadata({})).toBe("interviewer");
+    expect(helpers.roleForMetadata(null)).toBe("interviewer");
+  });
+});
 
 describe("LiveKit interviewer agent", () => {
   it("uses the interview context in instructions and forbids invented facts", () => {

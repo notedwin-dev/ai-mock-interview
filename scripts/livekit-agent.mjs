@@ -206,6 +206,11 @@ export async function runInterviewerJob(ctx, meta) {
 
 /* --------------------------------- entry ----------------------------------- */
 
+/** Defaults to interviewer so malformed/legacy metadata still serves a call. */
+export function roleForMetadata(meta) {
+  return meta?.role === "generator" ? "generator" : "interviewer";
+}
+
 export default defineAgent({
   entry: async (ctx) => {
     let meta = {};
@@ -214,7 +219,7 @@ export default defineAgent({
     } catch {
       meta = {};
     }
-    if (meta.role === "generator") await runGeneratorJob(ctx, meta);
+    if (roleForMetadata(meta) === "generator") await runGeneratorJob(ctx, meta);
     else await runInterviewerJob(ctx, meta);
   },
 });
