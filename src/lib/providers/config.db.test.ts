@@ -167,16 +167,64 @@ d("provider configuration service (integration)", () => {
     ]);
   });
 
-  it("rejects a preset used for a capability it does not declare", async () => {
+  it("accepts the openai TTS preset (OWNER-020) and still rejects undeclared capabilities", async () => {
     const userId = await createUser();
+    // Adding tts to OpenAI is now an approved preset capability: it must be
+    // accepted without inventing a new provider row.
+    const tts = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "openai",
+      apiKey: "sk-x",
+      capabilities: { tts: { modelId: "gpt-4o-mini-tts" } },
+    });
+    expect(Object.keys(tts.capabilities)).toEqual(["tts"]);
+
+    // A capability a preset does NOT declare is still rejected.
     await expect(
       createProviderConfiguration(userId, {
         providerType: "preset",
-        providerName: "openai",
-        apiKey: "sk-x",
+        providerName: "anthropic",
+        apiKey: "sk-y",
         capabilities: { tts: { modelId: "tts-1" } },
       }),
     ).rejects.toMatchObject({ code: "capability_not_supported" });
+  });
+
+  it("reuses the stored credential when a TTS capability is added to an existing preset row (OWNER-021)", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "openai",
+      apiKey: "sk-openai-stored-key",
+      capabilities: { llm: { modelId: "gpt-4o" } },
+    });
+
+    const before = await db.userProviderConfiguration.findFirst({
+      where: { userId, providerName: "openai" },
+    });
+    const bytesBefore = Buffer.from(before!.encryptedApiKey!).toString("base64");
+
+    // A capabilities PATCH with NO apiKey must not force re-entry of the key:
+    // the stored encrypted envelope is kept byte-identical.
+    const updated = await updateProviderConfiguration(userId, "openai", {
+      capabilities: {
+        llm: { modelId: "gpt-4o" },
+        tts: { modelId: "gpt-4o-mini-tts" },
+      },
+    });
+
+    expect(Object.keys(updated.capabilities).sort()).toEqual(["llm", "tts"]);
+    expect(updated.credentialStatus).toBe("unvalidated"); // material change → retest
+    const after = await db.userProviderConfiguration.findFirst({
+      where: { userId, providerName: "openai" },
+    });
+    expect(Buffer.from(after!.encryptedApiKey!).toString("base64")).toBe(bytesBefore);
+    expect(after!.encryptionKeyVersion).toBe("vtest");
+
+    // The reused credential still resolves for outbound TTS calls.
+    const resolved = await resolveForOutboundCall(userId, "tts");
+    expect(resolved.modelId).toBe("gpt-4o-mini-tts");
+    expect(resolved.apiKey).toBe("sk-openai-stored-key");
   });
 
   it("rejects unknown presets, reserved custom names and missing credentials/URL", async () => {

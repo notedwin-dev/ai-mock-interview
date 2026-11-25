@@ -15,19 +15,37 @@ import { evaluateBaseUrl } from "./ssrf";
  * provider/server failures; a probe failure never falls back to another
  * model or provider.
  *
- * Probe wire shapes: the `openai` preset and every custom row speak the
- * OpenAI-compatible wire (`GET /models`, `POST /chat/completions`,
- * `POST /audio/speech`, `POST /audio/transcriptions`); the `fish-audio`
- * preset speaks its native TTS wire (`POST /v1/tts`, model selected by a
- * request header). Native realtime sessions (the `realtime` capability:
- * Gemini Live, OpenAI Realtime) negotiate the provider's own protocol and
- * always report skipped until the realtime runtime lands — they must never
- * reach the wires above. Model-list discovery (FR-PROVIDER-009) lives in the
- * same module and shares the wire handling: presets without an override use
- * `GET {base}/models` (Bearer); registry overrides (Google:
- * `GET /v1beta/models` with `x-goog-api-key`) are honoured by both
- * stored-row and candidate discovery. Other presets need their M2 adapters
- * and are reported as skipped, which does not validate the configuration. DNS-rebinding/redirect
+ * Probe wire shapes:
+ * - `openai` and every custom row speak the OpenAI-compatible wire
+ *   (`GET /models`, `POST /chat/completions`, `POST /audio/speech`,
+ *   `POST /audio/transcriptions`). A custom row whose Base URL points at
+ *   `fish.audio` is probed on Fish's native TTS wire instead, matching the
+ *   runtime TTS adapter (same URL test).
+ * - `fish-audio` speaks its native TTS wire (`POST /v1/tts`, model selected
+ *   by a request header).
+ * - `google` speaks its native Gemini wire: ASR and TTS go through
+ *   `POST /v1beta/interactions` with `x-goog-api-key` (the same resource
+ *   shape the runtime ASR adapter uses); LLM/scorer run on the
+ *   OpenAI-compatible surface at `{base}/v1beta/openai/chat/completions`
+ *   with Bearer auth (verified against the official OpenAI-compatibility
+ *   docs, 2026-11-25). The model list keeps the native
+ *   `GET /v1beta/models` override.
+ * - `anthropic` speaks its native Messages wire: LLM/scorer go through
+ *   `POST /v1/messages` with `x-api-key` + `anthropic-version`; it has no
+ *   model-list endpoint (404/405 there is "when supported", not a failure).
+ * - `elevenlabs` speaks its native wire: TTS is
+ *   `POST /v1/text-to-speech/{model_id}` and ASR is `POST
+ *   /v1/speech-to-text`, both with `xi-api-key`; it has no model-list
+ *   endpoint.
+ *
+ * Native realtime sessions (the `realtime` capability: Gemini Live, OpenAI
+ * Realtime) negotiate the provider's own protocol and are verified through
+ * the realtime session-token path above — a non-Gemini realtime
+ * configuration is reported skipped until its native runtime lands. Model-list
+ * discovery (FR-PROVIDER-009) lives in the same module and shares the wire
+ * handling: presets without an override use `GET {base}/models` (Bearer);
+ * registry overrides (Google: `GET /v1beta/models` with `x-goog-api-key`)
+ * are honoured by both stored-row and candidate discovery. DNS-rebinding/redirect
  * pinning at connect time lands with the M2 adapter transport (see ssrf.ts
  * notes).
  *
@@ -152,7 +170,6 @@ function classifyHttpFailure(
 
 async function classifyProbeFailure(
   error: unknown,
-  fetchImpl: typeof fetch,
 ): Promise<{ errorCode: ProbeErrorCode; detail: string; endpointReachable: boolean; credentialValid: boolean }> {
   if (error instanceof ProviderCryptoError) {
     // Fail closed (ADR-0005): a credential that cannot be decrypted means the
@@ -240,20 +257,33 @@ export class ProbeHttpError extends Error {
 }
 
 /**
- * Presets the probe can verify natively today: `openai`, `deepseek`,
- * `zai-glm` and `qwen` speak the OpenAI-compatible wire shape, and
- * `fish-audio` speaks its own documented TTS wire (see the capability ping
- * below). The remaining presets (`anthropic`, `google`, `elevenlabs`) still
- * await their native-protocol adapters and are reported skipped — never
- * silently "validated".
+ * Presets the probe can verify natively: every approved preset has a
+ * documented wire the probe speaks (see the capability ping below) — the
+ * OpenAI-compatible shape for `openai`/`deepseek`/`zai-glm`/`qwen`, the
+ * native Gemini wire for `google`, the native Messages wire for `anthropic`,
+ * the native `xi-api-key` wires for `elevenlabs` and the native TTS wire for
+ * `fish-audio`. No preset is silently "validated" on a wire that is not
+ * actually exercised: a capability without a verified wire for a preset
+ * stays on its native wire or fails closed.
  */
 const PROBEABLE_PRESETS = new Set<string>([
   "openai",
+  "anthropic",
+  "google",
+  "elevenlabs",
   "fish-audio",
   "deepseek",
   "zai-glm",
   "qwen",
 ]);
+
+/**
+ * Fish-shaped URL test — byte-for-byte the runtime TTS adapter's check
+ * (src/lib/ai/tts.ts): a custom row whose Base URL points at `fish.audio`
+ * must be probed on the same native TTS wire the runtime uses, not on an
+ * OpenAI-shaped endpoint the runtime would never hit.
+ */
+const FISH_AUDIO_URL_RE = /^https?:\/\/(?:[^/]*\.)?fish\.audio(?:[/:]|$)/i;
 
 /**
  * Runs the probe for one configuration and returns per-capability results.
@@ -277,10 +307,19 @@ export async function probeProviderConfiguration(
   const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
   const results: CapabilityProbeResult[] = [];
 
-  // The fish-audio preset speaks a native wire instead of OpenAI-compatible
-  // endpoints, and it has no OpenAI-shaped model list (`GET /model` lists
-  // community voices, not TTS models) — so no model list is ever consumed.
-  const isFishAudioPreset = row.providerType === "preset" && row.providerName === "fish-audio";
+  // Fish-shaped rows speak a native wire instead of OpenAI-compatible
+  // endpoints (same URL test as the runtime TTS adapter), and they have no
+  // OpenAI-shaped model list (`GET /model` lists community voices, not TTS
+  // models) — so no model list is ever consumed.
+  const effectiveBaseUrl =
+    row.providerType === "preset"
+      ? getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null
+      : row.baseUrl;
+  const customBaseUrl = row.providerType === "custom" ? row.baseUrl : null;
+  const isFishAudioPreset =
+    (row.providerType === "preset" && row.providerName === "fish-audio") ||
+    (customBaseUrl !== null && FISH_AUDIO_URL_RE.test(customBaseUrl));
+  const isElevenLabsPreset = row.providerType === "preset" && row.providerName === "elevenlabs";
 
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
@@ -343,22 +382,24 @@ export async function probeProviderConfiguration(
       continue;
     }
 
-    // Base URL: custom rows carry their own; presets resolve via the registry.
-    let baseUrl: string | null = row.baseUrl;
-    if (row.providerType === "preset") {
-      baseUrl = getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
-      if (!PROBEABLE_PRESETS.has(row.providerName)) {
-        results.push({
-          capability,
-          status: "skipped",
-          endpointReachable: false,
-          credentialValid: false,
-          modelsDiscovered: null,
-          selectedModelAccepted: null,
-          detail: "Capability probe requires the provider's M2 adapter.",
-        });
-        continue;
-      }
+    // Base URL: custom rows carry their own; presets resolve via the
+    // registry. A preset without a probeable wire stays skipped — never
+    // silently "validated".
+    const baseUrl = effectiveBaseUrl;
+    if (
+      row.providerType === "preset" &&
+      !PROBEABLE_PRESETS.has(row.providerName)
+    ) {
+      results.push({
+        capability,
+        status: "skipped",
+        endpointReachable: false,
+        credentialValid: false,
+        modelsDiscovered: null,
+        selectedModelAccepted: null,
+        detail: "Capability probe requires the provider's M2 adapter.",
+      });
+      continue;
     }
 
     const urlDecision = evaluateBaseUrl(baseUrl ?? "");
@@ -383,10 +424,11 @@ export async function probeProviderConfiguration(
       // Step 1: model-list discovery (when the provider supports it), on the
       // same wire as model discovery (FR-PROVIDER-009). Auth and rate-limit
       // rejections are real verification failures; a missing list endpoint
-      // (404/405) returns null and is not a capability failure. fish-audio
-      // has no such endpoint, so nothing is requested for it.
+      // (404/405) returns null and is not a capability failure. Fish-shaped
+      // rows (`GET /model` lists community voices, not TTS models) and
+      // ElevenLabs have no such endpoint, so nothing is requested for them.
       let modelsDiscovered: string[] | null = null;
-      if (!isFishAudioPreset) {
+      if (!isFishAudioPreset && !isElevenLabsPreset) {
         modelsDiscovered = await fetchModelList(
           urlDecision.normalizedUrl,
           apiKey,
@@ -396,9 +438,12 @@ export async function probeProviderConfiguration(
       }
 
       // Step 2: capability-specific ping with no real interview content.
-      // Each capability gets its own endpoint and wire shape; the LLM-shaped
-      // ping (chat/completions) serves llm and scorer.
+      // Each capability gets its own endpoint and wire shape on the wire the
+      // RUNTIME uses for this row — the probe must never validate a
+      // configuration through an endpoint the runtime would not hit. The
+      // LLM-shaped ping (chat/completions) serves llm and scorer.
       const root = stripTrailingSlash(urlDecision.normalizedUrl);
+      const isGooglePreset = row.providerType === "preset" && row.providerName === "google";
       let pingUrl: string;
       let pingRequest: RequestInit;
       if (capability === "tts") {
@@ -412,7 +457,41 @@ export async function probeProviderConfiguration(
             headers: { ...headers, "content-type": "application/json", model: settings.modelId },
             body: JSON.stringify({ text: "ping", format: "mp3" }),
           };
+        } else if (isGooglePreset) {
+          // Native Gemini TTS: the Interactions API with the audio output
+          // format (POST /v1beta/interactions, x-goog-api-key). The exact
+          // configured model id is preserved; the prebuilt voice is the
+          // probe's only styling choice (the registry's TTS models are
+          // text-in/audio-out and accept `speech_config`).
+          pingUrl = `${root}/v1beta/interactions`;
+          pingRequest = {
+            method: "POST",
+            headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+            body: JSON.stringify({
+              model: settings.modelId,
+              input: [{ type: "user_input", content: [{ type: "text", text: "ping" }] }],
+              response_format: { type: "audio" },
+              generation_config: { speech_config: [{ voice: "Kore" }] },
+            }),
+          };
+        } else if (isElevenLabsPreset) {
+          // Native ElevenLabs TTS: model id in the PATH, voice in the body —
+          // the TTS model_id is not a voice. The catalog's default voice is
+          // a catalogue constant, not a model substitution. Audio bytes in
+          // the 2xx response prove the model can synthesise.
+          pingUrl = `${root}/v1/text-to-speech/${encodeURIComponent(settings.modelId)}`;
+          pingRequest = {
+            method: "POST",
+            headers: { "xi-api-key": apiKey, "content-type": "application/json" },
+            body: JSON.stringify({
+              text: "ping",
+              model_id: settings.modelId,
+              voice_settings: { stability: 0.5, similarity_boost: 0.75, use_speaker_boost: true },
+            }),
+          };
         } else {
+          // OpenAI-compatible TTS (the `openai` preset and every non-fish
+          // custom row).
           pingUrl = `${root}/audio/speech`;
           pingRequest = {
             method: "POST",
@@ -426,13 +505,69 @@ export async function probeProviderConfiguration(
           };
         }
       } else if (capability === "asr") {
-        pingUrl = `${root}/audio/transcriptions`;
-        const form = new FormData();
-        form.append("model", settings.modelId);
-        form.append("file", new Blob([synthesisedProbeWav()], { type: "audio/wav" }), "probe.wav");
-        pingRequest = { method: "POST", headers, body: form };
+        if (isGooglePreset) {
+          // Native Gemini ASR: the Interactions API with inline audio — the
+          // exact wire (and `models/<id>` resource shape) the runtime ASR
+          // adapter uses. The synthesised probe WAV never comes from a real
+          // interview or microphone.
+          const wavBytes = new Uint8Array(synthesisedProbeWav());
+          pingUrl = `${root}/v1beta/interactions`;
+          pingRequest = {
+            method: "POST",
+            headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+            body: JSON.stringify({
+              model: settings.modelId.startsWith("models/")
+                ? settings.modelId
+                : `models/${settings.modelId}`,
+              input: [
+                { type: "audio", data: Buffer.from(wavBytes).toString("base64"), mime_type: "audio/wav" },
+              ],
+            }),
+          };
+        } else if (isElevenLabsPreset) {
+          // Native ElevenLabs ASR (Scribe): multipart model_id + the
+          // synthesised probe WAV.
+          pingUrl = `${root}/v1/speech-to-text`;
+          const form = new FormData();
+          form.append("model_id", settings.modelId);
+          form.append(
+            "audio",
+            new Blob([synthesisedProbeWav()], { type: "audio/wav" }),
+            "probe.wav",
+          );
+          pingRequest = { method: "POST", headers: { "xi-api-key": apiKey }, body: form };
+        } else {
+          pingUrl = `${root}/audio/transcriptions`;
+          const form = new FormData();
+          form.append("model", settings.modelId);
+          form.append("file", new Blob([synthesisedProbeWav()], { type: "audio/wav" }), "probe.wav");
+          pingRequest = { method: "POST", headers, body: form };
+        }
+      } else if (row.providerType === "preset" && row.providerName === "anthropic") {
+        // Native Anthropic Messages wire: `x-api-key` + the fixed API
+        // version; model, max_tokens and messages match the documented
+        // request shape. It has no model-list endpoint — step 1 ran against
+        // `GET {base}/models` and a 404/405 there is "when supported".
+        pingUrl = `${root}/v1/messages`;
+        pingRequest = {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: settings.modelId,
+            max_tokens: 1,
+            messages: [{ role: "user", content: "ping" }],
+          }),
+        };
       } else {
-        pingUrl = `${root}/chat/completions`;
+        // LLM/scorer ping. Google resolves to its OpenAI-compatible surface
+        // (`/v1beta/openai/...`) — the documented base for OpenAI-shaped
+        // calls, where Bearer auth is the documented credential form.
+        const openAiRoot = isGooglePreset ? `${root}/v1beta/openai` : root;
+        pingUrl = `${openAiRoot}/chat/completions`;
         pingRequest = {
           method: "POST",
           headers: { ...headers, "content-type": "application/json" },
@@ -449,9 +584,10 @@ export async function probeProviderConfiguration(
         throw new ProbeHttpError(pingResponse.status, "capability", (await pingResponse.text().catch(() => undefined))?.slice(0, 500));
       }
 
-      // For fish-audio, modelsDiscovered stays null: with no model list the
-      // ping cannot independently certify the exact model beyond the header
-      // itself, so selectedModelAccepted stays null rather than overclaiming.
+      // For fish-shaped rows and ElevenLabs, modelsDiscovered stays null:
+      // with no model list the ping cannot independently certify the exact
+      // model beyond the wire itself, so selectedModelAccepted stays null
+      // rather than overclaiming.
       results.push({
         capability,
         status: "validated",
@@ -461,7 +597,25 @@ export async function probeProviderConfiguration(
         selectedModelAccepted: modelsDiscovered?.includes(settings.modelId) ?? null,
       });
     } catch (error) {
-      const failure = await classifyProbeFailure(error, fetchImpl);
+      let failure = await classifyProbeFailure(error);
+      if (
+        row.providerType === "preset" &&
+        row.providerName === "anthropic" &&
+        error instanceof ProbeHttpError &&
+        error.stage === "capability" &&
+        error.status === 404
+      ) {
+        // Anthropic's Messages endpoint always exists: a 404 on
+        // POST /v1/messages is an unknown/unsupported model, not a missing
+        // endpoint (the request had already been authenticated to reach
+        // model routing). FR-PROVIDER-006 taxonomy: model_unsupported.
+        failure = {
+          errorCode: "model_unsupported",
+          detail: "The provider rejected the selected model for this capability.",
+          endpointReachable: true,
+          credentialValid: true,
+        };
+      }
       results.push({
         capability,
         status: "failed",
@@ -698,7 +852,7 @@ export async function discoverProviderModels(
   } catch (error) {
     // Provider connectivity problems surface in the probe error taxonomy, not
     // as an unhandled exception (FR-PROVIDER-006).
-    const failure = await classifyProbeFailure(error, fetchImpl);
+    const failure = await classifyProbeFailure(error);
     return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
 }
@@ -750,7 +904,7 @@ export async function discoverCandidateModels(
     );
     return { ok: true, models, source: "provider" };
   } catch (error) {
-    const failure = await classifyProbeFailure(error, fetchImpl);
+    const failure = await classifyProbeFailure(error);
     return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
 }

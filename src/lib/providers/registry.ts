@@ -46,11 +46,13 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "openai",
     displayName: "OpenAI",
     defaultBaseUrl: "https://api.openai.com/v1",
-    // `realtime` = the OpenAI Realtime API on the same documented base URL
-    // (register Option A, "Pre-configured Realtime Agents"). The exact realtime
-    // model ID is fixed by the administrator in `realtime-models.ts` and is
-    // never user-editable or invented here.
-    capabilities: ["asr", "llm", "scorer", "realtime"],
+    // `tts` = the Speech API (`POST /audio/speech`) on the same documented
+    // base URL (owner decision OWNER-020, 2026-11-25). `realtime` = the
+    // OpenAI Realtime API on the same documented base URL (register Option A,
+    // "Pre-configured Realtime Agents"). The exact realtime model ID is fixed
+    // by the administrator in `realtime-models.ts` and is never user-editable
+    // or invented here.
+    capabilities: ["asr", "llm", "scorer", "tts", "realtime"],
   },
   {
     providerName: "anthropic",
@@ -62,11 +64,14 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "google",
     displayName: "Google",
     defaultBaseUrl: "https://generativelanguage.googleapis.com",
+    // `tts` = the Gemini TTS models on the native `POST /v1beta/interactions`
+    // wire with `x-goog-api-key` (owner decision OWNER-020, 2026-11-25;
+    // verified against the official speech-generation docs 2026-11-25).
     // `realtime` = the Gemini Live API on the same documented base URL
     // (register Option A, "Pre-configured Realtime Agents"). The exact realtime
     // model ID is fixed by the administrator in `realtime-models.ts`; this
     // registry never invents or substitutes one.
-    capabilities: ["asr", "llm", "scorer", "realtime"],
+    capabilities: ["asr", "llm", "scorer", "tts", "realtime"],
   },
   {
     providerName: "elevenlabs",
@@ -74,9 +79,8 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     defaultBaseUrl: "https://api.elevenlabs.io",
     // ADR-030's approved ASR preset list includes ElevenLabs (Scribe STT
     // models, retained separately from TTS IDs in the catalogue). The probe
-    // still reports ElevenLabs capabilities skipped until the native-protocol
-    // adapter lands — skip is status-neutral, so this cannot mark a valid
-    // credential invalid.
+    // verifies ElevenLabs natively (`POST /v1/text-to-speech/{model_id}` and
+    // `POST /v1/speech-to-text` with `xi-api-key`).
     capabilities: ["asr", "tts"],
   },
   {
@@ -161,6 +165,15 @@ export const PRESET_MODEL_SUGGESTIONS: Readonly<
       { modelId: "gpt-6.1-terra" },
       { modelId: "gpt-6-luna" },
     ],
+    // Speech API (`POST /audio/speech`); the current TTS family per the
+    // official OpenAI speech guide (2026-11-25), all on a deprecation runway
+    // (shutdown announced for 6 Jan 2027) — the register is owner-maintained
+    // (FR-ADMIN-004) and must be re-verified before the UI exposes TTS.
+    tts: [
+      { modelId: "gpt-4o-mini-tts", note: "Deprecates 6 Jan 2027" },
+      { modelId: "tts-1", note: "Lower latency; deprecates 6 Jan 2027" },
+      { modelId: "tts-1-hd", note: "Higher quality; deprecates 6 Jan 2027" },
+    ],
   },
   anthropic: {
     llm: [
@@ -181,6 +194,14 @@ export const PRESET_MODEL_SUGGESTIONS: Readonly<
       { modelId: "gemini-3.5-flash-lite" },
       { modelId: "gemini-3.1-flash-lite" },
       { modelId: "gemini-3.1-pro-preview", note: "Preview" },
+    ],
+    // Gemini TTS on the native Interactions API wire (v1beta only, verified
+    // against the official speech-generation docs 2026-11-25). Both 3.8
+    // models have free tiers; paid audio output is ~$0.00225/10s
+    // (gemini-3.8-flash-tts) through 31 Dec 2026.
+    tts: [
+      { modelId: "gemini-3.8-flash-tts", note: "Studio fidelity; free tier; paid from Jan 2027" },
+      { modelId: "gemini-3.8-flash-lite-tts", note: "Fast/cost-efficient; free tier" },
     ],
   },
   elevenlabs: {
