@@ -7,8 +7,15 @@
  * the exact prompt/tool contract it uses to do so.
  */
 
-/** LiveKit room data topic for instant captions during generation. */
-export const CAPTION_TOPIC = "aimis-caption";
+import { CAPTION_TOPIC } from "../utils/constants.mjs";
+
+/**
+ * LiveKit room data topic for instant captions during generation.
+ * Re-exported from the shared constants module (OWNER-023: all shared
+ * constants live in `lib/utils/constants.*`); this module keeps exporting
+ * it so existing consumers — including the standalone agent — are unchanged.
+ */
+export { CAPTION_TOPIC };
 
 export const GENERATION_FIELDS = [
   { name: "role", description: "What role would you like to train for?", required: true },

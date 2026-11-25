@@ -5,6 +5,16 @@ import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } f
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
 import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
 import { evaluateBaseUrl } from "./ssrf";
+import {
+  ANTHROPIC_API_VERSION,
+  ANTHROPIC_VERSION_HEADER_NAME,
+  GOOGLE_INTERACTIONS_PATH,
+  GOOGLE_OPENAI_COMPAT_PATH,
+  OPENAI_COMPAT_DEFAULT_VOICE,
+  X_API_KEY_HEADER,
+  X_GOOG_API_KEY_HEADER,
+  XI_API_KEY_HEADER,
+} from "@/lib/utils/constants";
 
 /**
  * Capability probe service (FR-PROVIDER-006): independently verifies, per
@@ -480,10 +490,10 @@ export async function probeProviderConfiguration(
           // configured model id is preserved; the prebuilt voice is the
           // probe's only styling choice (the registry's TTS models are
           // text-in/audio-out and accept `speech_config`).
-          pingUrl = `${root}/v1beta/interactions`;
+          pingUrl = `${root}${GOOGLE_INTERACTIONS_PATH}`;
           pingRequest = {
             method: "POST",
-            headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+            headers: { [X_GOOG_API_KEY_HEADER]: apiKey, "content-type": "application/json" },
             body: JSON.stringify({
               model: settings.modelId,
               input: [{ type: "user_input", content: [{ type: "text", text: "ping" }] }],
@@ -499,7 +509,7 @@ export async function probeProviderConfiguration(
           pingUrl = `${root}/v1/text-to-speech/${encodeURIComponent(settings.modelId)}`;
           pingRequest = {
             method: "POST",
-            headers: { "xi-api-key": apiKey, "content-type": "application/json" },
+            headers: { [XI_API_KEY_HEADER]: apiKey, "content-type": "application/json" },
             body: JSON.stringify({
               text: "ping",
               model_id: settings.modelId,
@@ -516,7 +526,7 @@ export async function probeProviderConfiguration(
             body: JSON.stringify({
               model: settings.modelId,
               input: "ping",
-              voice: "alloy",
+              voice: OPENAI_COMPAT_DEFAULT_VOICE,
               response_format: "mp3",
             }),
           };
@@ -528,10 +538,10 @@ export async function probeProviderConfiguration(
           // adapter uses. The synthesised probe WAV never comes from a real
           // interview or microphone.
           const wavBytes = new Uint8Array(synthesisedProbeWav());
-          pingUrl = `${root}/v1beta/interactions`;
+          pingUrl = `${root}${GOOGLE_INTERACTIONS_PATH}`;
           pingRequest = {
             method: "POST",
-            headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+            headers: { [X_GOOG_API_KEY_HEADER]: apiKey, "content-type": "application/json" },
             body: JSON.stringify({
               model: settings.modelId.startsWith("models/")
                 ? settings.modelId
@@ -552,7 +562,7 @@ export async function probeProviderConfiguration(
             new Blob([synthesisedProbeWav()], { type: "audio/wav" }),
             "probe.wav",
           );
-          pingRequest = { method: "POST", headers: { "xi-api-key": apiKey }, body: form };
+          pingRequest = { method: "POST", headers: { [XI_API_KEY_HEADER]: apiKey }, body: form };
         } else {
           pingUrl = `${root}/audio/transcriptions`;
           const form = new FormData();
@@ -569,8 +579,8 @@ export async function probeProviderConfiguration(
         pingRequest = {
           method: "POST",
           headers: {
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
+            [X_API_KEY_HEADER]: apiKey,
+            [ANTHROPIC_VERSION_HEADER_NAME]: ANTHROPIC_API_VERSION,
             "content-type": "application/json",
           },
           body: JSON.stringify({
@@ -583,7 +593,7 @@ export async function probeProviderConfiguration(
         // LLM/scorer ping. Google resolves to its OpenAI-compatible surface
         // (`/v1beta/openai/...`) — the documented base for OpenAI-shaped
         // calls, where Bearer auth is the documented credential form.
-        const openAiRoot = isGooglePreset ? `${root}/v1beta/openai` : root;
+        const openAiRoot = isGooglePreset ? `${root}${GOOGLE_OPENAI_COMPAT_PATH}` : root;
         pingUrl = `${openAiRoot}/chat/completions`;
         pingRequest = {
           method: "POST",
@@ -762,7 +772,7 @@ async function fetchModelList(
       const pageUrl = pageToken
         ? `${root}${wire.path}?pageToken=${encodeURIComponent(pageToken)}`
         : `${root}${wire.path}`;
-      const response = await fetchImpl(pageUrl, { headers: { "x-goog-api-key": apiKey } });
+      const response = await fetchImpl(pageUrl, { headers: { [X_GOOG_API_KEY_HEADER]: apiKey } });
       if (!response.ok) {
         if (response.status === 404 || response.status === 405) return null;
         throw new ProbeHttpError(

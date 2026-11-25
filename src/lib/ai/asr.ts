@@ -26,6 +26,12 @@
  * Credentials are used only for the outbound call and never appear in errors
  * or logs (NFR-SEC-008).
  */
+import {
+  GOOGLE_INTERACTIONS_PATH,
+  X_GOOG_API_KEY_HEADER,
+  XI_API_KEY_HEADER,
+} from "@/lib/utils/constants";
+
 export interface AsrRoute {
   providerName: string;
   providerType: string;
@@ -153,7 +159,7 @@ export async function transcribeAudio(
     return transcribeMultipart(
       fetchImpl,
       `${base}/v1/speech-to-text`,
-      { "xi-api-key": route.apiKey },
+      { [XI_API_KEY_HEADER]: route.apiKey },
       "model_id",
       route,
       audio,
@@ -187,10 +193,10 @@ export async function transcribeAudio(
 
   let response: Response;
   try {
-    response = await fetchImpl(`${base}/v1beta/interactions`, {
+    response = await fetchImpl(`${base}${GOOGLE_INTERACTIONS_PATH}`, {
       method: "POST",
       headers: {
-        "x-goog-api-key": route.apiKey,
+        [X_GOOG_API_KEY_HEADER]: route.apiKey,
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),

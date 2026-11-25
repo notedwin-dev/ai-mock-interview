@@ -9,7 +9,7 @@ import {
   greeting,
   TOOL_PARAMETERS,
 } from "../src/lib/interview/generation-contract.mjs";
-import { AIMIS_REALTIME_MODEL_ID } from "../src/lib/utils/constants.mjs";
+import { AIMIS_REALTIME_MODEL_ID, AIMIS_WORKER_TOKEN_HEADER } from "../src/lib/utils/constants.mjs";
 
 /**
  * AIMIS single LiveKit agent (Gemini Live). One deployment serves both roles:
@@ -103,7 +103,7 @@ export async function runGeneratorJob(ctx, meta) {
     console.error("generator role missing generation capability");
     return;
   }
-  const headers = { "content-type": "application/json", "x-aimis-worker-token": workerToken };
+  const headers = { "content-type": "application/json", [AIMIS_WORKER_TOKEN_HEADER]: workerToken };
   const publish = captionPublisher(ctx);
   let speaking = false;
 

@@ -26,7 +26,17 @@
  *
  * Credentials are used only for this outbound call; failures are sanitised
  * so no key or provider URL reaches the UI (NFR-SEC-008).
+ *
+ * Wire literals (header names, endpoint paths, the OpenAI-compatible default
+ * voice) come from the shared constants module (`@/lib/utils/constants`) so
+ * the runtime and the probe can never drift apart.
  */
+import {
+  GOOGLE_OPENAI_COMPAT_PATH,
+  OPENAI_COMPAT_DEFAULT_VOICE,
+  XI_API_KEY_HEADER,
+} from "@/lib/utils/constants";
+
 export interface TtsRoute {
   providerName: string;
   providerType: string;
@@ -76,8 +86,8 @@ function isElevenLabs(route: TtsRoute): boolean {
  */
 function googleOpenAiBase(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
-  if (base.includes("/v1beta/openai")) return base;
-  return `${base}/v1beta/openai`;
+  if (base.includes(GOOGLE_OPENAI_COMPAT_PATH)) return base;
+  return `${base}${GOOGLE_OPENAI_COMPAT_PATH}`;
 }
 
 export async function synthesizeSpeech(
@@ -98,7 +108,7 @@ export async function synthesizeSpeech(
     // used (a catalogue voice setting, if one is ever added, must be
     // restricted to premade voices).
     url = `${base}/v1/text-to-speech/${encodeURIComponent(route.modelId)}?output_format=mp3_44100_128`;
-    headers = { "xi-api-key": route.apiKey, "content-type": "application/json" };
+    headers = { [XI_API_KEY_HEADER]: route.apiKey, "content-type": "application/json" };
     body = JSON.stringify({ text, model_id: route.modelId });
   } else if (isFishAudio(route)) {
     url = `${base}/v1/tts`;
@@ -116,7 +126,12 @@ export async function synthesizeSpeech(
       authorization: `Bearer ${route.apiKey}`,
       "content-type": "application/json",
     };
-    body = JSON.stringify({ model: route.modelId, input: text, voice: "alloy", response_format: "mp3" });
+    body = JSON.stringify({
+      model: route.modelId,
+      input: text,
+      voice: OPENAI_COMPAT_DEFAULT_VOICE,
+      response_format: "mp3",
+    });
   }
 
   let response: Response;

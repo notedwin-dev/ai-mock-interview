@@ -1,6 +1,13 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateText, NoObjectGeneratedError, Output, type LanguageModel } from "ai";
 import type { z } from "zod";
+import {
+  ANTHROPIC_API_VERSION,
+  ANTHROPIC_VERSION_HEADER_NAME,
+  GOOGLE_OPENAI_COMPAT_PATH,
+  LLM_TIMEOUT_MS,
+  X_API_KEY_HEADER,
+} from "@/lib/utils/constants";
 
 /**
  * LLM adapter for the agent-led creation flow, the live interview turns and
@@ -65,8 +72,8 @@ function isAnthropicRoute(route: LlmRoute): boolean {
  */
 function googleOpenAiBase(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
-  if (base.includes("/v1beta/openai")) return base;
-  return `${base}/v1beta/openai`;
+  if (base.includes(GOOGLE_OPENAI_COMPAT_PATH)) return base;
+  return `${base}${GOOGLE_OPENAI_COMPAT_PATH}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -75,10 +82,9 @@ function googleOpenAiBase(baseUrl: string): string {
 
 /** Hard output ceiling for structured interview generations (tokens). */
 const ANTHROPIC_MAX_TOKENS = 8192;
-/** Fixed by the provider's documented wire (api.anthropic.com, /v1/messages). */
-const ANTHROPIC_VERSION_HEADER = "2023-06-01";
-/** Hard request ceiling for the native call (still bounded, NFR-REL-002). */
-const ANTHROPIC_REQUEST_TIMEOUT_MS = 90_000;
+// The fixed API version and the hard request ceiling (still bounded,
+// NFR-REL-002) are shared constants: `ANTHROPIC_API_VERSION` and
+// `LLM_TIMEOUT_MS` from `@/lib/utils/constants`.
 
 interface AnthropicResponse {
   content?: Array<{ type?: string; text?: string }>;
@@ -175,8 +181,8 @@ function createAnthropicModel(route: LlmRoute): AnthropicNativeModel {
   const url = `${base}/v1/messages`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-api-key": route.apiKey,
-    "anthropic-version": ANTHROPIC_VERSION_HEADER,
+    [X_API_KEY_HEADER]: route.apiKey,
+    [ANTHROPIC_VERSION_HEADER_NAME]: ANTHROPIC_API_VERSION,
   };
 
   const assertNoTools = (options: { tools?: unknown[] }): void => {
@@ -221,7 +227,7 @@ function createAnthropicModel(route: LlmRoute): AnthropicNativeModel {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(ANTHROPIC_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       });
     } catch {
       throw anthropicTransportError();
@@ -308,7 +314,7 @@ export interface StructuredDeps {
  * real free-tier reasoning model mid-response; 90 s leaves room for thinking
  * tokens without allowing an unbounded provider call.
  */
-export const GENERATION_TIMEOUT_MS = 90_000;
+export const GENERATION_TIMEOUT_MS = LLM_TIMEOUT_MS;
 
 export async function generateStructured<T>(
   route: LlmRoute,

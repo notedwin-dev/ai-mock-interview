@@ -2,6 +2,7 @@ import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib
 import type { TtsRoute } from "@/lib/ai/tts";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
+import { IDEMPOTENCY_KEY_PATTERN } from "@/lib/utils/constants";
 import { z } from "zod";
 
 /**
@@ -150,7 +151,7 @@ export async function runRoomTurn(
         contentText: z.string().trim().min(1).max(5000),
         idempotencyKey: z
           .string()
-          .regex(/^[A-Za-z0-9._:-]{1,100}$/)
+          .regex(IDEMPOTENCY_KEY_PATTERN)
           .optional(),
       })
       .strict()
