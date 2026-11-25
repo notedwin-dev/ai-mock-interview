@@ -45,6 +45,33 @@ export interface InvitationView {
   scheduledAt: Date | null;
 }
 
+/** Shared token-scoped session lookup: validates the token, hashes it and
+ *  excludes revoked links. Both the invitation confirmation view and the room
+ *  store use this so the guard cannot drift between them. */
+export async function findActiveSessionByToken(token: string) {
+  if (!isInvitationToken(token)) return null;
+  return db.interviewSession.findFirst({
+    where: {
+      invitationTokenHash: hashInvitationToken(token),
+      invitationRevokedAt: null,
+    },
+    select: {
+      sessionId: true,
+      userId: true,
+      jobRole: true,
+      jobDescription: true,
+      experienceLevel: true,
+      techStack: true,
+      questionCount: true,
+      categoryNameSnapshot: true,
+      evaluationMode: true,
+      runtimeMode: true,
+      status: true,
+      scheduledAt: true,
+    },
+  });
+}
+
 function parseSessionId(sessionId: string): string {
   const parsed = z.uuid().safeParse(sessionId);
   if (!parsed.success) throw new InvitationError("not_found", "Interview not found.");

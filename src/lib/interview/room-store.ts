@@ -1,6 +1,6 @@
 import { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { hashInvitationToken, isInvitationToken } from "./invitation-token";
+import { findActiveSessionByToken } from "./invitations";
 import { classifyInterviewerUtterance } from "./realtime-transcript";
 import type {
   RealtimeTranscriptMessage,
@@ -147,24 +147,7 @@ async function openNextUnit(tx: Tx, sessionId: string): Promise<string> {
 export function createDefaultRoomStore(): RoomStore {
   return {
     async context(token): Promise<RoomContext | null> {
-      if (!isInvitationToken(token)) return null;
-      const session = await db.interviewSession.findFirst({
-        where: {
-          invitationTokenHash: hashInvitationToken(token),
-          invitationRevokedAt: null,
-        },
-        select: {
-          sessionId: true,
-          userId: true,
-          jobRole: true,
-          jobDescription: true,
-          experienceLevel: true,
-          techStack: true,
-          questionCount: true,
-          evaluationMode: true,
-          status: true,
-        },
-      });
+      const session = await findActiveSessionByToken(token);
       if (!session) return null;
       return {
         ...session,
