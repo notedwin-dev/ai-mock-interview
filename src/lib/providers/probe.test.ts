@@ -179,6 +179,34 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("valid");
   });
 
+  it("validates ElevenLabs realtime via the native client-secret wire (no injected token)", async () => {
+    const fetchImpl = jsonFetch([
+      {
+        match: /api\.elevenlabs\.io\/v1\/convai\/conversation\/client-secret/,
+        status: 200,
+        body: { client_secret: "sk_short_lived_secret" },
+      },
+    ]);
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { realtime: { modelId: "eleven_realtime_v1_mini" } },
+      }),
+      fetchImpl,
+      {}, // no realtimeToken injection — the real minter must run
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "realtime",
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
+    });
+    expect(result.credentialStatus).toBe("valid");
+    expect(JSON.stringify(result)).not.toContain("sk-plaintext-secret");
+  });
+
   it("fails realtime when the provider rejects the native session, without leaking the key", async () => {
     const result = await runProbe(
       configRow({ capabilitiesJson: { realtime: { modelId: "bad-model" } } }),

@@ -331,11 +331,17 @@ export async function probeProviderConfiguration(
       const presetBase =
         row.providerType === "preset" ? getPresetAdapter(row.providerName)?.defaultBaseUrl : null;
       const realtimeBase = presetBase ?? row.baseUrl ?? "";
-      const isGemini =
+      // Gemini Live and ElevenLabs Realtime both mint server-side short-lived
+      // session secrets over their own native wire; both can be validated here.
+      const isElevenLabsRealtime =
+        row.providerName === "elevenlabs" &&
+        (row.providerType === "preset" || realtimeBase.includes("api.elevenlabs.io"));
+      const isNativeRealtime =
         Boolean(deps.realtimeToken) ||
         row.providerName === "google" ||
+        isElevenLabsRealtime ||
         realtimeBase.includes("generativelanguage.googleapis.com");
-      if (!isGemini) {
+      if (!isNativeRealtime) {
         results.push({
           capability,
           status: "skipped",
@@ -343,19 +349,30 @@ export async function probeProviderConfiguration(
           credentialValid: false,
           modelsDiscovered: null,
           selectedModelAccepted: null,
-          detail: "Realtime verification is available for Gemini Live configurations only.",
+          detail: "Realtime verification is available for Gemini Live and ElevenLabs configurations only.",
         });
         continue;
       }
       try {
         const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
-        const session = await (deps.realtimeToken ?? createRealtimeToken)({
-          providerName: row.providerName,
-          providerType: row.providerType,
-          baseUrl: realtimeBase,
-          modelId: settings.modelId,
-          apiKey,
-        });
+        const session = deps.realtimeToken
+          ? await deps.realtimeToken({
+              providerName: row.providerName,
+              providerType: row.providerType,
+              baseUrl: realtimeBase,
+              modelId: settings.modelId,
+              apiKey,
+            })
+          : await createRealtimeToken(
+              {
+                providerName: row.providerName,
+                providerType: row.providerType,
+                baseUrl: realtimeBase,
+                modelId: settings.modelId,
+                apiKey,
+              },
+              { fetchImpl },
+            );
         if (!session.token || !session.url) throw new Error("empty realtime session");
         results.push({
           capability,
