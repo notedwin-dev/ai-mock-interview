@@ -174,11 +174,119 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
+  const streamModeRef = useRef(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamIdRef = useRef<string | null>(null);
+
+  /** Feed a live-transcription result into the interview as a candidate turn. */
+  async function submitLiveTranscript(text: string) {
+    const contentText = text.trim();
+    if (!contentText) return;
+    const response = await fetch(
+      `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contentText, idempotencyKey: `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }),
+      },
+    );
+    const body = (await response.json().catch(() => null)) as {
+      messages?: TranscriptEntry[];
+      endCall?: boolean;
+      audioBase64?: string | null;
+    } | null;
+    if (!response.ok || !body) return;
+    setMessages(body.messages ?? []);
+    if (body.audioBase64) {
+      try { void new Audio(`data:audio/mp3;base64,${body.audioBase64}`).play().catch(() => undefined); } catch { /* text still shown */ }
+    }
+    if (body.endCall) setEnded(true);
+  }
+
+  /** Open the server-side Gemini Live transcription bridge for this mic session. */
+  async function openLiveBridge(): Promise<boolean> {
+    const es = new EventSource(
+      `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`,
+    );
+    eventSourceRef.current = es;
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 12000);
+      es.onmessage = (event) => {
+        const data = JSON.parse(event.data) as { type: string; streamId?: string; text?: string; message?: string };
+        if (data.type === "ready" && data.streamId) {
+          streamIdRef.current = data.streamId;
+          streamModeRef.current = true;
+          clearTimeout(timer);
+          resolve(true);
+        } else if (data.type === "transcript" && data.text) {
+          void submitLiveTranscript(data.text);
+        } else if (data.type === "error") {
+          setVoiceNotice(data.message ?? "Live transcription failed.");
+        }
+      };
+      es.onerror = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+    });
+  }
+
+  /** Capture 16 kHz 16-bit mono PCM from the live microphone stream. */
+  function startPcmRelay(stream: MediaStream, onPcm: (base64: string) => void) {
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
+      }
+      const bytes = new Uint8Array(pcm.buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      onPcm(btoa(binary));
+    };
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    return () => {
+      processor.disconnect();
+      source.disconnect();
+      void ctx.close();
+    };
+  }
+
   async function startMic() {
     setVoiceNotice(null);
     try {
+      const configResponse = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/config`,
+      );
+      const config = configResponse.ok
+        ? (await configResponse.json()) as { mode?: string }
+        : { mode: "batch" };
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
+
+      if (config.mode === "stream" && (await openLiveBridge())) {
+        const stopRelay = startPcmRelay(stream, (base64) => {
+          const id = streamIdRef.current;
+          if (!id) return;
+          void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ streamId: id, audioBase64: base64 }),
+          }).catch(() => undefined);
+        });
+        (stream as MediaStream & { __stopRelay?: () => void }).__stopRelay = stopRelay;
+        streamModeRef.current = true;
+        setMuted(false);
+        return;
+      }
+
       const recorder = new MediaRecorder(stream);
       let pending: Blob[] = [];
       recorder.ondataavailable = (event) => {
@@ -211,7 +319,19 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   function toggleMic() {
     if (!muted) {
       setMuted(true);
-      recorderRef.current?.stop();
+      if (streamModeRef.current) {
+        const id = streamIdRef.current;
+        (streamRef.current as (MediaStream & { __stopRelay?: () => void }) | null)?.__stopRelay?.();
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        streamModeRef.current = false;
+        streamIdRef.current = null;
+        if (id) {
+          void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
+        }
+      } else {
+        recorderRef.current?.stop();
+      }
       streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; });
       return;
     }
