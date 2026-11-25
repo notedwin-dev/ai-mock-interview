@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Loader2, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
-import { InterviewNextSteps } from "@/components/interview/InterviewNextSteps";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { setBrowserMicEnabled } from "@/lib/interview/livekit-mic";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
@@ -43,12 +42,12 @@ export function VoiceGenerationRoom() {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
-  const startedAtRef = useRef(Date.now());
   const agentPresentRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
-  const [confirmed, setConfirmed] = useState<{ invitationPath: string; sessionId: string } | null>(null);
+  const finishedRef = useRef(false);
+  const [callFinished, setCallFinished] = useState(false);
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(false);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
@@ -100,13 +99,38 @@ export function VoiceGenerationRoom() {
           setIsAgentSpeaking(speakers.some((speaker) => speaker.identity !== local));
           setIsUserSpeaking(speakers.some((speaker) => speaker.identity === local));
         });
+        // LiveKit Agents publishes transcriptions on the `lk.transcription`
+        // text stream, synchronised with audio playback. Consume the deltas so
+        // the candidate sees words as they are spoken, not only final lines.
+        room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
+          const speaker = (info.identity || "").startsWith("candidate") ? "candidate" : "agent";
+          try {
+            for await (const delta of reader) {
+              if (!active) break;
+              setLiveCaption((current) => {
+                if (current?.speaker === speaker) {
+                  return { speaker, text: (current.text + delta).slice(-2000) };
+                }
+                return { speaker, text: delta.slice(-2000) };
+              });
+            }
+          } catch {
+            // A cancelled stream is normal when the agent changes turns.
+          }
+        });
         room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
           if (!active || topic !== CAPTION_TOPIC) return;
           try {
             const parsed = JSON.parse(new TextDecoder().decode(payload)) as {
               speaker?: string;
               text?: string;
+              done?: boolean;
             };
+            if (parsed.done) {
+              // The agent has finished playing its closing line.
+              finishGeneration();
+              return;
+            }
             if (parsed.text && (parsed.speaker === "agent" || parsed.speaker === "candidate")) {
               setLiveCaption({ speaker: parsed.speaker, text: parsed.text });
             }
@@ -165,18 +189,17 @@ export function VoiceGenerationRoom() {
         const data = (await response.json()) as GenerationState;
         if (!active) return;
         setGeneration(data);
-        // Only bail out if the agent never joined at all. Once it is in the
-        // room, captions may come via the data channel rather than this poll.
-        if (
-          data.status === "collecting" &&
-          !agentPresentRef.current &&
-          Date.now() - startedAtRef.current > 60000
-        ) {
-          setError("The planner did not join in time. Leave and start a new voice session.");
-        }
-        if (data.status === "completed" && data.invitationPath) {
+        // No join timeout: a cloud agent can take 10-20 s to cold-start, and
+        // captions arrive over the data channel rather than through this poll.
+        // The generation completes when the worker posts its result; the
+        // candidate can leave manually at any time.
+        if (data.status === "completed" && data.invitationPath && !finishedRef.current) {
+          finishedRef.current = true;
           setStatus("completed");
-          void roomRef.current?.disconnect();
+          // Do NOT disconnect yet: the worker posts this status BEFORE it
+          // speaks the closing line. Wait for the agent's done caption (or a
+          // safety timeout for older workers) so the candidate hears it.
+          setTimeout(() => finishGeneration(), 12000);
         }
       } catch {
         // Transient poll failure: the next tick retries.
@@ -223,9 +246,9 @@ export function VoiceGenerationRoom() {
       throw new Error(body?.error?.message ?? "Could not confirm the interview.");
     }
     generationStartedThisLoad = false;
-    // Confirming only applies the details. The candidate decides what happens
-    // next: start now, schedule, or leave and set it later (owner decision).
-    setConfirmed({ invitationPath: body.invitationPath, sessionId: body.sessionId });
+    // Confirming only applies the details. The decision happens on its own
+    // page, not embedded in the voice room.
+    router.push(`/dashboard/interview/${body.sessionId}/ready`);
   }
 
   function repeatLast() {
@@ -239,6 +262,12 @@ export function VoiceGenerationRoom() {
   function leave() {
     void roomRef.current?.disconnect();
     router.push("/dashboard");
+  }
+
+  /** Close the voice call once the agent's closing TTS has finished. */
+  function finishGeneration() {
+    void roomRef.current?.disconnect();
+    setCallFinished(true);
   }
 
   const caption = liveCaption?.text ?? generation?.caption?.text ??
@@ -270,12 +299,7 @@ export function VoiceGenerationRoom() {
         </button>
       </section>
 
-      {confirmed ? (
-        <InterviewNextSteps
-          invitationPath={confirmed.invitationPath}
-          sessionId={confirmed.sessionId}
-        />
-      ) : status === "completed" && generation?.config ? (
+      {status === "completed" && callFinished && generation?.config ? (
         <GenerationConfirmation config={generation.config} onConfirm={confirm} />
       ) : (
         <>

@@ -80,6 +80,12 @@ function captionPublisher(ctx) {
       { topic: CAPTION_TOPIC, reliable: isFinal },
     );
   }
+  publish.done = function done() {
+    void ctx.room.localParticipant.publishData(
+      encoder.encode(JSON.stringify({ done: true })),
+      { topic: CAPTION_TOPIC, reliable: true },
+    );
+  };
   return publish;
 }
 
@@ -120,10 +126,13 @@ export async function runGeneratorJob(ctx, meta) {
         );
         const body = await response.json().catch(() => null);
         if (!response.ok) throw new Error(body?.error?.message ?? "generation failed");
+        // say() waits for playout; only then tell the client the call is over.
         await say(closingLine());
+        publish.done();
       } catch (error) {
         console.error("generation failed", error instanceof Error ? error.message : "unknown");
         await say("I could not save your interview. Please try again.");
+        publish.done();
       } finally {
         await new Promise((resolve) => setTimeout(resolve, 2000));
         ctx.shutdown("generation finished");
