@@ -1,5 +1,9 @@
 import { createGoogle } from "@ai-sdk/google";
-import { AIMIS_ELEVENLABS_REALTIME_MODEL_ID } from "@/lib/utils/constants";
+import {
+  AIMIS_ELEVENLABS_REALTIME_MODEL_ID,
+  X_GOOG_API_KEY_HEADER,
+  XI_API_KEY_HEADER,
+} from "@/lib/utils/constants";
 
 /**
  * Short-lived realtime session credentials for the token-scoped room
@@ -149,7 +153,7 @@ async function mintElevenLabsClientSecret(
       {
         method: "POST",
         headers: {
-          "xi-api-key": route.apiKey,
+          [XI_API_KEY_HEADER]: route.apiKey,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -243,7 +247,7 @@ export async function createRealtimeToken(
       const provider = (
         deps.createProvider ??
         ((apiKey: string) =>
-          createGoogle({ headers: { "x-goog-api-key": apiKey } }) as unknown as RealtimeProvider)
+          createGoogle({ headers: { [X_GOOG_API_KEY_HEADER]: apiKey } }) as unknown as RealtimeProvider)
       )(route.apiKey);
       const result = await provider.experimental_realtime.getToken({
         model: route.modelId,
