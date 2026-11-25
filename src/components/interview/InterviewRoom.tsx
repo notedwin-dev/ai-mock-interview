@@ -176,8 +176,6 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
-  const lastInterviewer = [...messages].reverse().find((m) => m.speakerType === "interviewer");
-
   return (
     <div className="flex min-h-[calc(100vh-2rem)] flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface px-5 py-3">
@@ -191,35 +189,22 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         </button>
       </header>
 
+      {/*
+       * Profile / video frames. A frame shows ONLY the participant's picture
+       * (avatar here; a local camera preview would sit in the same slot).
+       * Speaker state is conveyed by a quiet ring, never by text. Transcripts,
+       * statuses and controls live in their own surfaces: the conversation
+       * overlay and the answer bar below.
+       */}
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
-        <section aria-label="AI interviewer" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className={`flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold ${state === "speaking" ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>A</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
-          <p className="mt-1 text-xs capitalize text-ink-muted">
-            {state === "thinking" ? "thinking…" : state === "speaking" ? "speaking" : "listening"}
-          </p>
-          {lastInterviewer ? (
-            <p className="mt-4 max-w-md text-sm leading-relaxed text-ink-soft">{lastInterviewer.contentText}</p>
-          ) : (
-            <p className="mt-4 max-w-md text-sm text-ink-muted">Introduce yourself to start the interview.</p>
-          )}
+        <section aria-label="AI interviewer" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8">
+          <span aria-hidden className={`flex h-24 w-24 items-center justify-center rounded-full border-2 text-3xl font-bold transition-colors ${state === "speaking" ? "border-emerald-400 bg-emerald-400/15 text-emerald-300 animate-pulse" : "border-line bg-raised text-ink-soft"}`}>A</span>
+          <span className="sr-only">{state === "speaking" ? "AI interviewer is speaking" : "AI interviewer"}</span>
         </section>
 
-        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
-          <button
-            type="button"
-            onClick={toggleMute}
-            aria-pressed={muted}
-            className="btn-ghost mt-4">
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute" : "Mute"}
-          </button>
-          <p className="mt-3 max-w-xs text-xs text-ink-muted">
-            Your camera is never used as AI input. Microphone audio is transcribed only when you press Record answer.
-          </p>
+        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8">
+          <span aria-hidden className="flex h-24 w-24 items-center justify-center rounded-full border-2 border-line bg-raised text-3xl font-bold text-ink-soft">Y</span>
+          <span className="sr-only">You</span>
         </section>
       </div>
 
@@ -228,6 +213,18 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           The interview has ended. Your transcript has been saved.
         </div>
       ) : (
+        <>
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-line bg-surface px-4 py-2">
+          <p className="text-xs text-ink-muted">Your camera is never used as AI input. Transcription happens only while you record an answer.</p>
+          <button
+            type="button"
+            onClick={toggleMute}
+            aria-pressed={muted}
+            className="btn-ghost">
+            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
+            {muted ? "Unmute microphone" : "Mute microphone"}
+          </button>
+        </div>
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
           <input
             value={draft}
@@ -245,7 +242,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             aria-label={recording ? "Stop recording" : "Record answer"}
           >
             {recording ? (
-              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop recording</>
+              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop &amp; transcribe</>
             ) : (
               <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
             )}
@@ -255,6 +252,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             Send
           </button>
         </form>
+        </>
       )}
       {!ended ? (
         <div className="flex justify-center">
