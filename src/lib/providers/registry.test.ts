@@ -54,12 +54,19 @@ describe("provider adapter registry", () => {
     }
   });
 
-  it("declares the realtime capability only on the native realtime agent presets (register Option A)", () => {
+  it("declares the realtime capability on the native realtime agent presets (register Option A)", () => {
     expect(CAPABILITIES).toContain("realtime");
     expect(getPresetAdapter("openai")?.capabilities).toContain("realtime");
     expect(getPresetAdapter("google")?.capabilities).toContain("realtime");
+    expect(getPresetAdapter("elevenlabs")?.capabilities).toContain("realtime");
     for (const preset of PRESET_ADAPTERS) {
-      if (preset.providerName === "openai" || preset.providerName === "google") continue;
+      if (
+        preset.providerName === "openai" ||
+        preset.providerName === "google" ||
+        preset.providerName === "elevenlabs"
+      ) {
+        continue;
+      }
       expect(preset.capabilities, preset.providerName).not.toContain("realtime");
     }
   });

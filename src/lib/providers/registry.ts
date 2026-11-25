@@ -81,7 +81,11 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     // models, retained separately from TTS IDs in the catalogue). The probe
     // verifies ElevenLabs natively (`POST /v1/text-to-speech/{model_id}` and
     // `POST /v1/speech-to-text` with `xi-api-key`).
-    capabilities: ["asr", "tts"],
+    // `realtime` = the OpenAI-compatible Realtime API on the same base
+    // (`wss://api.elevenlabs.io/v1/convai/realtime`; client secret minted
+    // server-side, owner decision 2026-11-25). The exact model is admin-fixed
+    // in `realtime-models.ts`; this registry never invents or substitutes one.
+    capabilities: ["asr", "tts", "realtime"],
   },
   {
     providerName: "fish-audio",

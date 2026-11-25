@@ -5,4 +5,4 @@
  * import the value through a typed surface. The `.mjs` file has no adjacent
  * `.d.mts`, so the literal types below are the declared surface.
  */
-export { AIMIS_REALTIME_MODEL_ID } from "./constants.mjs";
+export { AIMIS_REALTIME_MODEL_ID, AIMIS_ELEVENLABS_REALTIME_MODEL_ID } from "./constants.mjs";

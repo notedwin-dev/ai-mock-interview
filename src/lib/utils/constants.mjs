@@ -20,3 +20,13 @@
  * deployed worker and the candidate-facing configuration can never diverge.
  */
 export const AIMIS_REALTIME_MODEL_ID = "gemini-3.8-live-extended-thinking";
+
+/**
+ * The exact model ID the admin-fixed ElevenLabs realtime entry mints sessions
+ * with (owner decision 2026-11-25, verified against the official docs): the
+ * ElevenLabs Realtime voice-agent model on the OpenAI-compatible Realtime
+ * API. Sourced by the token minter (`src/lib/interview/realtime-token.ts`)
+ * and the admin catalogue (`src/lib/providers/realtime-models.ts`) so the
+ * configured model and the minted session can never diverge.
+ */
+export const AIMIS_ELEVENLABS_REALTIME_MODEL_ID = "eleven_realtime_v1_mini";

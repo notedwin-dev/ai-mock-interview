@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { AIMIS_REALTIME_MODEL_ID } from "./constants";
+import { AIMIS_ELEVENLABS_REALTIME_MODEL_ID, AIMIS_REALTIME_MODEL_ID } from "./constants";
 import { realtimeModelFor } from "@/lib/providers/realtime-models";
 
 /**
@@ -20,6 +20,16 @@ describe("shared admin-fixed realtime model id", () => {
 
   it("matches the admin-fixed Google entry in the app catalogue", () => {
     expect(realtimeModelFor("google")).toBe(AIMIS_REALTIME_MODEL_ID);
+  });
+});
+
+describe("shared admin-fixed ElevenLabs realtime model id", () => {
+  it("is the exact ElevenLabs realtime model", () => {
+    expect(AIMIS_ELEVENLABS_REALTIME_MODEL_ID).toBe("eleven_realtime_v1_mini");
+  });
+
+  it("matches the admin-fixed ElevenLabs entry in the app catalogue", () => {
+    expect(realtimeModelFor("elevenlabs")).toBe(AIMIS_ELEVENLABS_REALTIME_MODEL_ID);
   });
 });
 

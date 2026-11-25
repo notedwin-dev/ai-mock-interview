@@ -377,6 +377,21 @@ d("provider configuration service (integration)", () => {
     expect(realtime.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
   });
 
+  it("accepts the elevenlabs preset for realtime and locks its admin-fixed model", async () => {
+    // Owner decision 2026-11-25: ElevenLabs realtime is a declared preset
+    // capability (OpenAI-compatible Realtime API), so configuration must go
+    // through the same admin-fixed-model rule as google.
+    const userId = await createUser();
+    const realtime = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "elevenlabs",
+      apiKey: "sk_elevenlabs_test_key",
+      capabilities: { realtime: { modelId: "user-invented-model" } },
+    });
+    expect(realtime.capabilities.realtime?.modelId).toBe("eleven_realtime_v1_mini");
+    expect(realtime.credentialStatus).toBe("unvalidated");
+  });
+
   it("does not let a PATCH smuggle in a different realtime model", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, {

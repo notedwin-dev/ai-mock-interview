@@ -4,9 +4,10 @@ import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 
 /**
- * POST .../realtime/token — server-side setup for the Gemini Live WebSocket
- * room (ADR-006 Option A). The link is the only capability; the provider key
- * stays here and only an ephemeral client secret reaches the browser.
+ * POST .../realtime/token — server-side setup for the token-scoped realtime
+ * WebSocket room (Gemini Live / ElevenLabs Realtime; ADR-006 Option A). The
+ * link is the only capability; the provider key stays here and only an
+ * ephemeral client secret (session token / client secret) reaches the browser.
  */
 export async function POST(
   _request: Request,
