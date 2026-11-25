@@ -29,10 +29,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
-  const [recording, setRecording] = useState(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -109,17 +108,26 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   }
 
   useEffect(() => () => {
+    recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  async function submitAudio(blob: Blob, recorderMime: string) {
+  /**
+   * Continuous transcription (owner decision 2026-11-25): while the microphone
+   * is on, AIMIS transcribes what the candidate says. No push-to-talk, no
+   * "record then review" step. Each audio window is sent to the configured ASR
+   * provider and any recognised speech becomes a candidate turn, which also
+   * prompts the interviewer to respond. Turning the microphone off stops the
+   * capture and flushes the final window.
+   */
+  async function submitWindow(blob: Blob, recorderMime: string) {
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 0x8000) {
         binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
       }
-      const response = await fetch(
+      const asr = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/transcribe`,
         {
           method: "POST",
@@ -130,50 +138,84 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           }),
         },
       );
-      const body = (await response.json()) as { text?: string; error?: { message: string } };
-      if (!response.ok) {
-        setVoiceNotice(body.error?.message ?? "The recording could not be transcribed.");
+      const asrBody = (await asr.json().catch(() => null)) as { text?: string; error?: { message: string } } | null;
+      if (!asr.ok || !asrBody?.text?.trim()) return; // silence is normal between turns
+      const contentText = asrBody.text.trim();
+      const response = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contentText, idempotencyKey: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }),
+        },
+      );
+      const body = (await response.json().catch(() => null)) as {
+        messages?: TranscriptEntry[];
+        error?: { message: string };
+        endCall?: boolean;
+        audioBase64?: string | null;
+      } | null;
+      if (!response.ok || !body) {
+        setVoiceNotice(body?.error?.message ?? "The interview could not process that answer.");
         return;
       }
-      // The transcript goes into the input for review — nothing is sent until
-      // the candidate explicitly presses Send.
-      setDraft(body.text ?? "");
-      setVoiceNotice("Voice transcribed — review the text, then press Send.");
+      setMessages(body.messages ?? []);
+      if (body.audioBase64) {
+        try {
+          const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
+          void audio.play().catch(() => undefined);
+        } catch {
+          // Autoplay may be blocked; the transcript is still rendered.
+        }
+      }
+      if (body.endCall) setEnded(true);
     } catch {
-      setVoiceNotice("The recording could not be transcribed.");
+      setVoiceNotice("Transcription failed. Check your connection and try turning the microphone on again.");
     }
   }
 
-  function toggleMute() {
-    const next = !muted;
-    setMuted(next);
-    streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
-  }
-
-  async function startRecording() {
+  async function startMic() {
     setVoiceNotice(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
+      let pending: Blob[] = [];
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
+        if (event.data.size > 0) pending.push(event.data);
+        if (pending.length === 0) return;
+        const window = new Blob(pending, { type: recorder.mimeType || "audio/webm" });
+        pending = [];
+        void submitWindow(window, recorder.mimeType);
       };
       recorder.onstop = () => {
-        void submitAudio(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), recorder.mimeType);
+        if (pending.length > 0) {
+          const window = new Blob(pending, { type: recorder.mimeType || "audio/webm" });
+          pending = [];
+          void submitWindow(window, recorder.mimeType);
+        }
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
-        setRecording(false);
       };
       recorderRef.current = recorder;
-      recorder.start();
-      setRecording(true);
+      // A window every 4 s keeps transcription near-real-time without a
+      // streaming ASR endpoint. Each call is idempotent-keyed.
+      recorder.start(4000);
+      setMuted(false);
     } catch {
       setVoiceNotice("Microphone access was not granted. You can type your answer instead.");
     }
+  }
+
+  function toggleMic() {
+    if (!muted) {
+      setMuted(true);
+      recorderRef.current?.stop();
+      streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; });
+      return;
+    }
+    void startMic();
   }
 
   return (
@@ -215,14 +257,16 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       ) : (
         <>
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-line bg-surface px-4 py-2">
-          <p className="text-xs text-ink-muted">Your camera is never used as AI input. Transcription happens only while you record an answer.</p>
+          <p className="text-xs text-ink-muted">
+            Your camera is never used as AI input. While the microphone is on, your speech is transcribed in real time and shared with the interviewer.
+          </p>
           <button
             type="button"
-            onClick={toggleMute}
-            aria-pressed={muted}
+            onClick={toggleMic}
+            aria-pressed={!muted}
             className="btn-ghost">
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute microphone" : "Mute microphone"}
+            {muted ? <Mic className="h-4 w-4" aria-hidden /> : <MicOff className="h-4 w-4" aria-hidden />}
+            {muted ? "Turn on microphone" : "Turn off microphone"}
           </button>
         </div>
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
@@ -230,23 +274,11 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             className="h-11 flex-1 rounded-full border border-line bg-raised px-5 text-sm text-ink outline-none placeholder:text-ink-muted focus:border-emerald-400/70"
-            placeholder="Type your answer…"
+            placeholder="Or type your answer…"
             maxLength={5000}
             aria-label="Your interview answer"
             disabled={state === "thinking"}
           />
-          <button
-            type="button"
-            onClick={() => (recording ? recorderRef.current?.stop() : void startRecording())}
-            className="btn-ghost"
-            aria-label={recording ? "Stop recording" : "Record answer"}
-          >
-            {recording ? (
-              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop &amp; transcribe</>
-            ) : (
-              <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
-            )}
-          </button>
           <button type="submit" disabled={!draft.trim() || state === "thinking"} className="btn-primary">
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
