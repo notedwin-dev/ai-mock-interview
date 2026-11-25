@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { InvitationConfirmation } from "@/components/interview/InvitationConfirmation";
 import { resolveInvitation } from "@/lib/interview/invitations";
 
+export const instant = false;
+
 /**
  * Invitation entry (FR-SETUP-008): a token resolves exactly one interview's
  * confirmation details. No account session is required and no other data is

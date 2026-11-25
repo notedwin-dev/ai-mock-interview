@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import { InterviewRoom } from "@/components/interview/InterviewRoom";
 import { resolveInvitation } from "@/lib/interview/invitations";
 
+export const instant = false;
+
 /** Live interview room entered only through a valid invitation link. */
 export default async function RoomPage(
   props: PageProps<"/i/[token]/room">,
