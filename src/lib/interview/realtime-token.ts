@@ -74,8 +74,12 @@ export const ELEVENLABS_REALTIME_MODEL_ID = AIMIS_ELEVENLABS_REALTIME_MODEL_ID;
 export const ELEVENLABS_REALTIME_WS_URL = "wss://api.elevenlabs.io/v1/convai/realtime";
 /** Provider API base for the mint call; the model is admin-fixed, never user-editable. */
 export const ELEVENLABS_REALTIME_API_BASE = "https://api.elevenlabs.io";
-/** Short-lived client secret endpoint (xi-api-key header, per the provider docs). */
-const ELEVENLABS_CLIENT_SECRET_PATH = "/v1/convai/conversation/client-secret";
+/**
+ * Short-lived client secret endpoint (xi-api-key header). Verified live
+ * 2026-11-25: POST /v1/convai/realtime/client_secrets with a `session`
+ * (OpenAI-compatible) and `expires_after` body returns `{ value, expires_at, session }`.
+ */
+const ELEVENLABS_CLIENT_SECRET_PATH = "/v1/convai/realtime/client_secrets";
 /** Assumed client-secret TTL; the value is documented, not silently substituted. */
 const CLIENT_SECRET_TTL_SECONDS = 600;
 
@@ -157,8 +161,14 @@ async function mintElevenLabsClientSecret(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model_id: route.modelId,
-          expires_after_seconds: CLIENT_SECRET_TTL_SECONDS,
+          // The provider uses the OpenAI Realtime wire (snake_case), while
+          // SESSION_CONFIG above is camelCase for the Google AI SDK.
+          session: {
+            type: "realtime",
+            model: route.modelId,
+            output_modalities: ["audio"],
+          },
+          expires_after: { seconds: CLIENT_SECRET_TTL_SECONDS },
         }),
       },
     );
@@ -203,9 +213,9 @@ async function mintElevenLabsClientSecret(
     );
   }
 
-  let payload: { client_secret?: unknown };
+  let payload: { value?: unknown; expires_at?: unknown };
   try {
-    payload = JSON.parse(text) as { client_secret?: unknown };
+    payload = JSON.parse(text) as { value?: unknown; expires_at?: unknown };
   } catch {
     throw new RealtimeTokenError(
       route.providerName,
@@ -215,7 +225,9 @@ async function mintElevenLabsClientSecret(
     );
   }
 
-  const clientSecret = payload.client_secret;
+  // The live endpoint returns `{ value, expires_at, session }` (verified
+  // 2026-11-25); accept the documented shape only — no silent fallback.
+  const clientSecret = payload.value;
   if (typeof clientSecret !== "string" || clientSecret.length === 0) {
     throw new RealtimeTokenError(
       route.providerName,
@@ -224,11 +236,15 @@ async function mintElevenLabsClientSecret(
       response.status,
     );
   }
+  const expiresAt =
+    typeof payload.expires_at === "number"
+      ? payload.expires_at * 1000
+      : now() + CLIENT_SECRET_TTL_SECONDS * 1000;
 
   return {
     token: clientSecret,
     url: ELEVENLABS_REALTIME_WS_URL,
-    expiresAt: now() + CLIENT_SECRET_TTL_SECONDS * 1000,
+    expiresAt,
   };
 }
 
