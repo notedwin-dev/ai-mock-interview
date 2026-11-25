@@ -651,6 +651,81 @@ export async function resolveForOutboundCall(
 }
 
 /** Deletes an owned configuration row (credentials destroyed with it). */
+export async function setActiveCapability(
+  userId: string,
+  providerName: string,
+  capability: unknown,
+): Promise<ProviderConfigSummary> {
+  const parsedUser = parseUserId(userId);
+  const parsed = z
+    .object({
+      capability: z.enum(CAPABILITIES, {
+        error: "Unknown capability.",
+      }),
+    })
+    .strict()
+    .safeParse({ capability });
+  if (!parsed.success) {
+    throw new ProviderConfigError(
+      "invalid_input",
+      parsed.error.issues[0]?.message ?? "Unknown capability.",
+    );
+  }
+  const cap = parsed.data.capability;
+
+  return db.$transaction(async (tx) => {
+    const row = await tx.userProviderConfiguration.findFirst({
+      where: { userId: parsedUser, providerName },
+    });
+    if (!row) {
+      throw new ProviderConfigError(
+        "not_found",
+        "Provider configuration not found.",
+      );
+    }
+    const rowCapabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+    if (!rowCapabilities[cap]) {
+      throw new ProviderConfigError(
+        "capability_not_supported",
+        `The configuration does not serve the ${cap} capability.`,
+      );
+    }
+
+    // Deactivate every other enabled row of this user that serves the
+    // capability (the selected row is always enabled afterwards). The
+    // capability check is done in JS against the user's own rows: a row is
+    // one per (user, providerName) so the set is small, and Prisma's JSON
+    // filter has no object-predicates.
+    const candidates = await tx.userProviderConfiguration.findMany({
+      where: { userId: parsedUser, isEnabled: true },
+      select: { userProviderConfigurationId: true, capabilitiesJson: true },
+    });
+    const toDisable = candidates
+      .filter(
+        (candidate) =>
+          candidate.userProviderConfigurationId !== row.userProviderConfigurationId &&
+          cap in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
+      )
+      .map((candidate) => candidate.userProviderConfigurationId);
+    if (toDisable.length > 0) {
+      await tx.userProviderConfiguration.updateMany({
+        where: { userProviderConfigurationId: { in: toDisable } },
+        data: { isEnabled: false },
+      });
+    }
+    await tx.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: row.userProviderConfigurationId },
+      data: { isEnabled: true, configurationVersion: { increment: 1 } },
+    });
+
+    const updated = await tx.userProviderConfiguration.findFirstOrThrow({
+      where: { userProviderConfigurationId: row.userProviderConfigurationId },
+      select: CONFIG_SELECT,
+    });
+    return toSummary(updated);
+  });
+}
+
 export async function deleteProviderConfiguration(
   userId: string,
   providerName: string,
