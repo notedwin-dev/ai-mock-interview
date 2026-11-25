@@ -54,6 +54,11 @@ export function buildInstructions(meta) {
 }
 
 function sessionFor(instructions) {
+  // Gemini Live extended-thinking models require an explicit thinking level;
+  // non-thinking models must omit it entirely (per Gemini Live docs).
+  const thinkingOptions = REALTIME_MODEL.includes("thinking")
+    ? { thinkingConfig: { thinkingLevel: "low" } }
+    : {};
   return new voice.AgentSession({
     llm: new google.beta.realtime.RealtimeModel({
       model: REALTIME_MODEL,
@@ -61,6 +66,7 @@ function sessionFor(instructions) {
       instructions,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
+      ...thinkingOptions,
     }),
   });
 }
