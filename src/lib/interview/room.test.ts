@@ -22,13 +22,19 @@ function fakeStore(initial: RoomContext = context) {
   let unitSeq = 0;
   const messages: TranscriptEntry[] = [];
   const units: Array<{ id: string; status: string }> = [];
+  // Idempotency ledger keyed by (session, key) — mirrors the DB's partial
+  // unique index: the KEY deduplicates, not the message text.
+  const byKey = new Map<string, TranscriptEntry>();
   const store: RoomStore = {
     async context() { return { ...current }; },
     async messages() { return [...messages]; },
+    async findCandidateByKey(sessionId, idempotencyKey) {
+      return byKey.get(`${sessionId}:${idempotencyKey}`) ?? null;
+    },
     async activate() { current.status = "active"; },
     async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
       if (idempotencyKey) {
-        const found = messages.find((m) => m.contentText === contentText);
+        const found = byKey.get(`${sessionId}:${idempotencyKey}`);
         if (found) return { entry: found, created: false };
       }
       const entry = {
@@ -39,6 +45,7 @@ function fakeStore(initial: RoomContext = context) {
         assessmentUnitId,
       };
       messages.push(entry);
+      if (idempotencyKey) byKey.set(`${sessionId}:${idempotencyKey}`, entry);
       return { entry, created: true };
     },
     async appendInterviewer(_sessionId, contentText, messageKind, assessmentUnitId) {
@@ -56,6 +63,15 @@ function fakeStore(initial: RoomContext = context) {
     async openUnit() { const id = `unit-${++unitSeq}`; units.push({ id, status: "open" }); return id; },
     async closeUnit(id) { const unit = units.find((u) => u.id === id); if (unit) unit.status = "closed"; },
     async complete() { current.status = "completed"; },
+    async rollbackCandidate(sessionId, idempotencyKey) {
+      const key = `${sessionId}:${idempotencyKey}`;
+      const entry = byKey.get(key);
+      if (!entry) return false;
+      byKey.delete(key);
+      const index = messages.indexOf(entry);
+      if (index >= 0) messages.splice(index, 1);
+      return true;
+    },
   };
   return { store, messages, units, state: () => current };
 }
@@ -124,6 +140,80 @@ describe("runRoomTurn", () => {
     expect(retry.created).toBe(false);
     expect(retry.messages).toEqual(first.messages);
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates by idempotency key, not by message text", async () => {
+    const { store, messages } = fakeStore();
+    let call = 0;
+    const outputs = [
+      { interviewerText: "Q1?", messageKind: "primary_question" as const, endCall: false },
+      { interviewerText: "Q2?", messageKind: "primary_question" as const, endCall: false },
+      { interviewerText: "Q3?", messageKind: "primary_question" as const, endCall: false },
+    ];
+    const deps = { store, resolveRoute: async () => llmRoute, generate: async () => outputs[call++]! };
+
+    // Identical text under different keys: both turns are accepted.
+    await runRoomTurn(TOKEN, { contentText: "same answer", idempotencyKey: "turn-a" }, deps);
+    await runRoomTurn(TOKEN, { contentText: "same answer", idempotencyKey: "turn-b" }, deps);
+
+    // Changed text under the same key: replayed, no third candidate message.
+    const replay = await runRoomTurn(TOKEN, { contentText: "changed answer", idempotencyKey: "turn-a" }, deps);
+
+    expect(replay.created).toBe(false);
+    const candidateCount = messages.filter((m) => m.speakerType === "candidate").length;
+    expect(candidateCount).toBe(2);
+  });
+
+  it("replays a completed interview only for a known idempotency key", async () => {
+    const { store } = fakeStore({ ...context, status: "completed" });
+    const messages = [
+      { sequenceNumber: 1, speakerType: "candidate", messageKind: "candidate_response", contentText: "a", assessmentUnitId: null },
+      { sequenceNumber: 2, speakerType: "interviewer", messageKind: "primary_question", contentText: "Q", assessmentUnitId: "u1" },
+    ];
+    const knownKey = "turn-1";
+    const finalizedDeps = {
+      store: {
+        ...store,
+        messages: async () => messages,
+        findCandidateByKey: async (_sessionId: string, idempotencyKey: string) =>
+          idempotencyKey === knownKey
+            ? {
+                sequenceNumber: 1, speakerType: "candidate", messageKind: "candidate_response", contentText: "a", assessmentUnitId: null,
+              }
+            : null,
+      },
+      resolveRoute: async () => llmRoute,
+      generate: async () => { throw new Error("must not generate for a replay"); },
+    };
+    const replay = await runRoomTurn(TOKEN, { contentText: "a", idempotencyKey: knownKey }, finalizedDeps);
+    expect(replay).toMatchObject({ endCall: true, created: false });
+
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "new work", idempotencyKey: "brand-new-key" }, finalizedDeps),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+  });
+
+  it("rolls the candidate message back when a concurrent turn wins the unit race", async () => {
+    const { store, messages } = fakeStore();
+    const deps = {
+      store: {
+        ...store,
+        openUnit: async () => {
+          const error = new Error("P2002") as Error & { code?: string };
+          error.code = "P2002";
+          throw error;
+        },
+      },
+      resolveRoute: async () => llmRoute,
+      generate: async () => ({ interviewerText: "Q?", messageKind: "primary_question" as const, endCall: false }),
+    };
+
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "answer", idempotencyKey: "turn-1" }, deps),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    // The persisted candidate message was rolled back — nothing is left
+    // unanswered in the transcript.
+    expect(messages.filter((m) => m.speakerType === "candidate")).toHaveLength(0);
   });
 
   it("rejects unknown links and interviews that are not in a joinable state", async () => {

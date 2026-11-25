@@ -97,14 +97,24 @@ export async function issueInvitation(
     throw new InvitationError("invalid_state", "A running or completed interview has no invitation link.");
   }
   const token = createInvitationToken();
-  await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  // The permitted-status predicate is repeated in the atomic update: an
+  // intervening lifecycle transition (the interview was started or completed
+  // after the read) must not be overwritten back to scheduled. Reissue stays
+  // permitted for every non-running status, as the guard above allows.
+  const updated = await db.interviewSession.updateMany({
+    where: {
+      sessionId: session.sessionId,
+      status: { notIn: ["active", "completed"] },
+    },
     data: {
       invitationTokenHash: hashInvitationToken(token),
       invitationRevokedAt: null,
       status: "scheduled",
     },
   });
+  if (updated.count === 0) {
+    throw new InvitationError("invalid_state", "A running or completed interview has no invitation link.");
+  }
   return { token, path: invitationPath(token) };
 }
 

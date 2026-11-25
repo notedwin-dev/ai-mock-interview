@@ -463,6 +463,27 @@ export function createRoomStore(): RoomStore {
       }));
     },
 
+    async findCandidateByKey(sessionId, idempotencyKey) {
+      const message = await db.conversationMessage.findFirst({
+        where: { sessionId, idempotencyKey, speakerType: "candidate" },
+        select: {
+          sequenceNumber: true,
+          speakerType: true,
+          messageKind: true,
+          contentText: true,
+          assessmentUnitId: true,
+        },
+      });
+      if (!message) return null;
+      return {
+        sequenceNumber: message.sequenceNumber,
+        speakerType: message.speakerType,
+        messageKind: message.messageKind,
+        contentText: message.contentText,
+        assessmentUnitId: message.assessmentUnitId,
+      };
+    },
+
     async activate(sessionId) {
       await db.interviewSession.update({
         where: { sessionId },
@@ -535,6 +556,13 @@ export function createRoomStore(): RoomStore {
         where: { sessionId },
         data: { status: "completed", completedAt: new Date() },
       });
+    },
+
+    async rollbackCandidate(sessionId, idempotencyKey) {
+      const result = await db.conversationMessage.deleteMany({
+        where: { sessionId, idempotencyKey, speakerType: "candidate" },
+      });
+      return result.count > 0;
     },
   };
 }

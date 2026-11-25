@@ -71,7 +71,7 @@ export function InterviewAgent() {
   const [result, setResult] = useState<AgentResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<"turn" | "create" | null>(null);
-  const [created, setCreated] = useState<{ sessionId: string; path: string } | null>(null);
+  const [created, setCreated] = useState<{ sessionId: string; path: string; url: string } | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function send(event: FormEvent) {
@@ -118,13 +118,14 @@ export function InterviewAgent() {
     setCreated({
       sessionId: data.session.sessionId,
       path: data.session.invitation.path,
+      url: `${window.location.origin}${data.session.invitation.path}`,
     });
   }
 
   async function copyLink() {
     if (!created) return;
     try {
-      await navigator.clipboard.writeText(`${window.location.origin}${created.path}`);
+      await navigator.clipboard.writeText(created.url);
       setCopied(true);
     } catch {
       setError("Copy failed — select the link above and copy it manually.");
@@ -170,7 +171,7 @@ export function InterviewAgent() {
         </p>
       ) : null}
 
-      {result?.ready && result.config ? (
+      {result?.ready && result.config && !created ? (
         <section aria-label="Generated interview configuration" className="rounded-2xl border border-emerald-400/40 bg-surface p-4 sm:p-5">
           <h2 className="text-sm font-semibold text-ink">Generated interview configuration</h2>
           <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
@@ -200,8 +201,8 @@ export function InterviewAgent() {
             with your interviewee; you can revoke or replace it from your room.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-full bg-raised px-4 py-2 text-xs text-ink">
-              {created.path}
+            <code className="block min-w-0 max-w-full truncate rounded-full bg-raised px-4 py-2 text-xs text-ink">
+              {created.url}
             </code>
             <button type="button" onClick={() => void copyLink()} className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400">
               {copied ? <Check className="h-4 w-4" aria-hidden /> : <Copy className="h-4 w-4" aria-hidden />}

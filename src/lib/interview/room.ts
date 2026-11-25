@@ -32,6 +32,11 @@ export interface TranscriptEntry {
 export interface RoomStore {
   context(token: string): Promise<RoomContext | null>;
   messages(sessionId: string): Promise<TranscriptEntry[]>;
+  /** Finds an existing candidate message by idempotency key (replay path). */
+  findCandidateByKey(
+    sessionId: string,
+    idempotencyKey: string,
+  ): Promise<TranscriptEntry | null>;
   activate(sessionId: string): Promise<void>;
   appendCandidate(
     sessionId: string,
@@ -49,6 +54,13 @@ export interface RoomStore {
   openUnit(sessionId: string, unitNumber: number): Promise<string>;
   closeUnit(unitId: string): Promise<void>;
   complete(sessionId: string): Promise<void>;
+  /**
+   * Deletes the candidate message identified by (session, idempotency key)
+   * when its turn could not be completed (unit conflict). Returns whether a
+   * row was removed, so the caller can reject instead of persisting an
+   * unanswered candidate message.
+   */
+  rollbackCandidate(sessionId: string, idempotencyKey: string): Promise<boolean>;
 }
 
 export interface RoomTurnInput {
@@ -139,7 +151,17 @@ export async function runRoomTurn(
   const store = deps.store ?? createDefaultRoomStore();
   const context = await store.context(token);
   if (!context) throw new RoomError("invitation_not_found", "This interview link is not available.");
-  if (context.status !== "scheduled" && context.status !== "active") {
+  const finalized = context.status !== "scheduled" && context.status !== "active";
+  // Finalized contexts replay a valid, non-revoked token's existing turn
+  // (idempotent retry after e.g. a network drop at completion time); NEW work
+  // is still rejected. The key uniquely identifies the retried turn.
+  if (finalized) {
+    if (
+      parsed.idempotencyKey &&
+      (await store.findCandidateByKey(context.sessionId, parsed.idempotencyKey))
+    ) {
+      return { messages: await store.messages(context.sessionId), endCall: true, created: false };
+    }
     throw new RoomError("invalid_state", "This interview is not accepting turns.");
   }
 
@@ -151,12 +173,58 @@ export async function runRoomTurn(
     activeUnitId,
   );
   if (!candidate.created) {
-    // A retried finalized submission returns the original transcript unchanged.
-    return { messages: await store.messages(context.sessionId), endCall: false, created: false };
+    // Replay of an already-submitted key. If the interviewer reply for this
+    // candidate message already exists, the turn is finalized: return the
+    // stored transcript unchanged (the stored endCall value, not a fabricated
+    // false). If the reply is missing — the previous attempt failed during
+    // generation — fall through and generate it now so a retry can continue
+    // the conversation instead of returning a dangling candidate message.
+    const history = await store.messages(context.sessionId);
+    const index = history.findIndex((m) => m.sequenceNumber === candidate.entry.sequenceNumber);
+    const next = index >= 0 ? history[index + 1] : undefined;
+    if (next && next.speakerType === "interviewer") {
+      return { messages: history, endCall: context.status === "completed", created: false };
+    }
+    return completeTurn(context, {
+      store,
+      deps,
+      parsed,
+      activeUnitId,
+      primaryCountRefresh: true,
+      created: false,
+    });
   }
 
   if (context.status === "scheduled") await store.activate(context.sessionId);
 
+  return completeTurn(context, {
+    store,
+    deps,
+    parsed,
+    activeUnitId,
+    primaryCountRefresh: false,
+    created: true,
+  });
+}
+
+/**
+ * Shared tail of a room turn: builds history, runs the interviewer LLM,
+ * opens/closes assessment units, appends the reply and completes the session.
+ * On an openUnit conflict the losing turn's candidate message is rolled back
+ * so a persisted candidate message is never left without a reply.
+ */
+async function completeTurn(
+  context: RoomContext,
+  parts: {
+    store: RoomStore;
+    deps: RoomDeps;
+    parsed: RoomTurnInput;
+    activeUnitId: string | null;
+    primaryCountRefresh: boolean;
+    created: boolean;
+  },
+): Promise<RoomTurnResult> {
+  const { store, deps, parsed, activeUnitId, primaryCountRefresh, created } = parts;
   const history = await store.messages(context.sessionId);
   const primaryCount = history.filter((message) => message.messageKind === "primary_question").length;
   const route = await (deps.resolveRoute ?? (async (userId: string) => {
@@ -182,8 +250,30 @@ export async function runRoomTurn(
 
   let unitId = activeUnitId;
   if (output.messageKind === "primary_question") {
+    // A completed interview must not gain a seventh primary question: the
+    // sixth question is askable and answerable, and the NEXT primary closes
+    // the interview (the completion predicate below mirrors it).
+    if (primaryCount >= MAX_PRIMARY_QUESTIONS && !output.endCall) {
+      throw new RoomError(
+        "invalid_state",
+        "The interviewer produced an unexpected follow-up question after the final question.",
+      );
+    }
     if (unitId) await store.closeUnit(unitId);
-    unitId = await store.openUnit(context.sessionId, primaryCount + 1);
+    try {
+      unitId = await store.openUnit(context.sessionId, primaryCount + 1);
+    } catch (error) {
+      // A concurrent turn for the same session opened unit N first (the
+      // (session_id, unit_number) unique). Roll the losing turn's candidate
+      // message back so no persisted candidate is left without a reply.
+      if (!parsed.idempotencyKey) throw error;
+      const rolledBack = await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
+      if (!rolledBack) throw error;
+      throw new RoomError(
+        "invalid_state",
+        "Another response was processed at the same moment. Send your answer again.",
+      );
+    }
   }
   await store.appendInterviewer(
     context.sessionId,
@@ -192,7 +282,10 @@ export async function runRoomTurn(
     unitId,
   );
 
-  const endCall = output.endCall || primaryCount + 1 >= MAX_PRIMARY_QUESTIONS + 1;
+  // The sixth question completes the interview once ANSWERED: when the model
+  // asks primary #6 and endCall arrives with that answer's turn, both the
+  // reply and the completion land atomically here.
+  const endCall = output.endCall || primaryCount + 1 > MAX_PRIMARY_QUESTIONS;
   if (endCall) await store.complete(context.sessionId);
-  return { messages: await store.messages(context.sessionId), endCall, created: true };
+  return { messages: await store.messages(context.sessionId), endCall, created };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -19,13 +19,23 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
+  // Monotonic counter for applied turn results: the initial transcript load
+  // may only overwrite messages when no turn has been applied since it
+  // started, so a slow load can never clobber a completed turn.
+  const appliedTurnsRef = useRef(0);
+  // The idempotency key retained with the unanswered draft: a resubmission of
+  // the SAME answer reuses it (the server deduplicates the turn); a different
+  // answer or a received response discards it.
+  const pendingKeyRef = useRef<{ text: string; key: string } | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let active = true;
+    const loadGeneration = appliedTurnsRef.current;
     const load = async () => {
       try {
         const response = await fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`, { cache: "no-store" });
-        if (response.ok && active) {
+        if (response.ok && active && appliedTurnsRef.current === loadGeneration) {
           const data = (await response.json()) as { messages: TranscriptEntry[] };
           setMessages(data.messages);
         }
@@ -37,18 +47,59 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     return () => { active = false; };
   }, [token]);
 
+  // Conversation overlay focus management: move focus inside when it opens,
+  // keep Tab navigation within it, close on Escape and restore focus to the
+  // opener when it closes.
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = overlayRef.current;
+    const focusables = panel
+      ? Array.from(
+          panel.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          ),
+        )
+      : [];
+    (focusables[0] ?? panel)?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOverlayOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusables.length === 0) return;
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [overlayOpen]);
+
   async function send(event: FormEvent) {
     event.preventDefault();
     const contentText = draft.trim();
     if (!contentText || state === "thinking") return;
-    setDraft("");
     setError(null);
     setState("thinking");
+    const pending = pendingKeyRef.current;
+    const idempotencyKey = pending?.text === contentText ? pending.key : crypto.randomUUID();
+    pendingKeyRef.current = { text: contentText, key: idempotencyKey };
     try {
       const response = await fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contentText, idempotencyKey: crypto.randomUUID() }),
+        body: JSON.stringify({ contentText, idempotencyKey }),
       });
       const body = (await response.json()) as {
         messages?: TranscriptEntry[];
@@ -56,11 +107,16 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         endCall?: boolean;
       };
       if (!response.ok) {
+        // The draft and its idempotency key are preserved so the candidate
+        // can retry the exact same answer.
         setError(body.error?.message ?? "The interviewer could not respond.");
         setState("listening");
         return;
       }
+      appliedTurnsRef.current += 1;
       setMessages(body.messages ?? []);
+      setDraft("");
+      pendingKeyRef.current = null;
       setState(body.endCall ? "listening" : "speaking");
       if (body.endCall) setEnded(true);
     } catch {
@@ -134,7 +190,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-label="Conversation transcript">
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-modal="true" aria-label="Conversation transcript" ref={overlayRef}>
           <button type="button" aria-label="Close conversation" onClick={() => setOverlayOpen(false)} className="absolute inset-0 cursor-default" />
           <div className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5">
             <div className="flex items-center justify-between">
