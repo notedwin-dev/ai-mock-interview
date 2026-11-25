@@ -67,6 +67,15 @@ export async function POST(
       return Response.json({ text });
     } catch (error) {
       if (error instanceof AsrError) {
+        if (error.code === "unsupported") {
+          // Fail closed at the boundary (NFR-REL-002): the enabled provider
+          // cannot serve transcription — never ride a wrong wire silently.
+          return jsonError(
+            422,
+            "voice_unsupported",
+            "The enabled speech-recognition provider cannot transcribe recordings.",
+          );
+        }
         return jsonError(
           error.code === "empty_transcript" ? 422 : 502,
           error.code === "empty_transcript" ? "no_speech" : "provider_failed",

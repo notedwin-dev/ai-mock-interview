@@ -74,4 +74,11 @@ describe("POST /api/v1/interviews/invitations/[token]/transcribe", () => {
     expect(failed.status).toBe(502);
     expect(JSON.stringify(await failed.json())).not.toContain("secret-key");
   });
+
+  it("maps an unsupported ASR provider to a 422, never a silent wrong-wire call", async () => {
+    mocks.transcribeAudio.mockRejectedValueOnce(new AsrError("unsupported", "unsupported endpoint"));
+    const response = await POST(request(validBody), ctx);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: "voice_unsupported" } });
+  });
 });
