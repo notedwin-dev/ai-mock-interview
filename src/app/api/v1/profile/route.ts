@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { getOwnProfile, saveOwnProfile } from "@/lib/profile/service";
 
 /** GET /api/v1/profile — the caller's own profile (null before first save). */
@@ -20,7 +20,7 @@ export async function PUT(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const body = await request.json();
+    const body = await parseJsonBody(request);
     const profile = await saveOwnProfile(account.account.userId, body);
     return Response.json({ profile });
   } catch (error) {

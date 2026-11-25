@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { submitTypedTurn } from "@/lib/interview/service";
 
 /**
@@ -16,7 +16,7 @@ export async function POST(
 
   try {
     const { sessionId } = await ctx.params;
-    const body = await request.json();
+    const body = await parseJsonBody(request);
     const { message, created } = await submitTypedTurn(account.account.userId, sessionId, body);
     return Response.json({ message, created }, { status: created ? 201 : 200 });
   } catch (error) {

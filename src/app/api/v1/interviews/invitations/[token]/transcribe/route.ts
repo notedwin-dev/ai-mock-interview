@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { jsonError } from "@/lib/api/respond";
+import { jsonError, parseJsonBody } from "@/lib/api/respond";
 import { AsrError, transcribeAudio, type AsrRoute } from "@/lib/ai/asr";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
@@ -30,7 +30,7 @@ export async function POST(
 
     let body: z.infer<typeof bodySchema>;
     try {
-      body = bodySchema.parse(await request.json());
+      body = bodySchema.parse(await parseJsonBody(request));
     } catch {
       return jsonError(400, "invalid_input", "A valid audio recording is required.");
     }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { requireApiAccount } from "@/lib/auth/guard";
 import {
   getActiveRuntimeMode,
@@ -26,7 +26,7 @@ export async function PATCH(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const { mode } = runtimeModeSchema.parse(await request.json());
+    const { mode } = runtimeModeSchema.parse(await parseJsonBody(request));
     await setActiveRuntimeMode(account.account.userId, mode);
     return Response.json({ mode });
   } catch (error) {

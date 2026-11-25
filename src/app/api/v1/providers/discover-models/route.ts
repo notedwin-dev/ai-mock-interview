@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { discoverCandidateModels } from "@/lib/providers/probe";
 
 /**
@@ -28,7 +28,7 @@ export async function POST(request: Request): Promise<Response> {
 
   let body: z.infer<typeof bodySchema>;
   try {
-    body = bodySchema.parse(await request.json());
+    body = bodySchema.parse(await parseJsonBody(request));
   } catch {
     return jsonError(
       400,

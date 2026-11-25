@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { createInterviewSession } from "@/lib/interview/service";
 
 /**
@@ -12,7 +12,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const body = await request.json();
+    const body = await parseJsonBody(request);
     const session = await createInterviewSession(account.account.userId, body);
     return Response.json({ session }, { status: 201 });
   } catch (error) {

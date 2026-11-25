@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { setProfileVisibility } from "@/lib/profile/service";
 
 /**
@@ -11,7 +11,7 @@ export async function PUT(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const body = (await request.json()) as { visibility?: unknown };
+    const body = (await parseJsonBody(request)) as { visibility?: unknown };
     const profile = await setProfileVisibility(account.account.userId, body?.visibility);
     return Response.json({ profile });
   } catch (error) {

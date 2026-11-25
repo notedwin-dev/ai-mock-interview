@@ -1,4 +1,4 @@
-import { jsonError } from "@/lib/api/respond";
+import { jsonError, parseJsonBody } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { synthesizeSpeech, type TtsRoute } from "@/lib/ai/tts";
 import { resolveForOutboundCall } from "@/lib/providers/config";
@@ -53,7 +53,7 @@ export async function POST(
     const { token } = await ctx.params;
     let body: unknown;
     try {
-      body = await request.json();
+      body = await parseJsonBody(request);
     } catch {
       return jsonError(400, "invalid_input", "A valid interview turn is required.");
     }
