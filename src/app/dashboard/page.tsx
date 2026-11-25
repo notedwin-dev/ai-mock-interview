@@ -30,12 +30,14 @@ interface RecentSessionRow {
   categoryNameSnapshot: string;
   evaluationMode: string;
   status: string;
+  scheduledAt: Date | null;
+  invitationPath: string | null;
   createdAt: Date;
   completedAt: Date | null;
 }
 
-function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
-  return db.interviewSession.findMany({
+async function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
+  const sessions = await db.interviewSession.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
     take: 6,
@@ -45,10 +47,20 @@ function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
       categoryNameSnapshot: true,
       evaluationMode: true,
       status: true,
+      scheduledAt: true,
       createdAt: true,
       completedAt: true,
     },
   });
+  return Promise.all(
+    sessions.map(async (session) => {
+      const generation = await db.interviewGeneration.findFirst({
+        where: { sessionId: session.sessionId },
+        select: { invitationPath: true },
+      });
+      return { ...session, invitationPath: generation?.invitationPath ?? null };
+    }),
+  );
 }
 
 interface UpcomingSessionRow {
@@ -173,7 +185,12 @@ async function DashboardContent() {
               Your session list could not be loaded. Try again in a moment.
             </p>
           ) : (
-            <PastInterviews sessions={recentSessions} />
+            <PastInterviews
+              sessions={recentSessions.map((session) => ({
+                ...session,
+                scheduledAt: session.scheduledAt?.toISOString() ?? null,
+              }))}
+            />
           )}
         </div>
       </section>

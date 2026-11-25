@@ -127,6 +127,13 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
           {interview.jobRole} · {interview.categoryNameSnapshot} ·{" "}
           {evaluationModeLabel(interview.evaluationMode)} mode
         </p>
+        {interview.scheduledAt ? (
+          <p className="mt-1 text-sm text-ink-muted">
+            Scheduled for {new Intl.DateTimeFormat("en-GB", {
+              day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+            }).format(new Date(interview.scheduledAt))} · you can still join now or come back later.
+          </p>
+        ) : null}
       </div>
 
       <div className="grid items-start gap-8 md:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
@@ -258,9 +265,9 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             Join now
           </button>
           <Link
-            href={`/interview/${token}`}
+            href="/dashboard"
             className="flex h-11 w-full items-center justify-center rounded-full border border-line bg-surface px-6 text-sm font-medium text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400">
-            Back to interview details
+            Back to Dashboard
           </Link>
         </div>
       </div>

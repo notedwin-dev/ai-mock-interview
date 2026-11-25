@@ -42,6 +42,7 @@ export interface InvitationView {
   /** The one runtime this session runs (ADR-006): exactly one room UI is shown. */
   runtimeMode: string;
   status: string;
+  scheduledAt: Date | null;
 }
 
 function parseSessionId(sessionId: string): string {
@@ -99,6 +100,7 @@ export async function resolveInvitation(token: string): Promise<InvitationView |
       evaluationMode: true,
       runtimeMode: true,
       status: true,
+      scheduledAt: true,
     },
   });
   if (!session) return null;
