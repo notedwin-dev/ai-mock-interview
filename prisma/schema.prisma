@@ -3,7 +3,7 @@
  *
  * Conventions (Notion "Data Model & Security", ADR-020):
  * - Tables and columns are lowercase snake_case via @@map/@map; Prisma-side names
- *   are camelCase per docs/CONVENTIONS.md.
+ *   are camelCase (the AIMIS naming convention).
  * - Column types, sizes, nullability, PK/FK targets and ON DELETE rules follow the
  *   v0.4 dictionary exactly (TIMESTAMPTZ, JSONB, BYTEA, NUMERIC(3,2), NUMERIC(5,4),
  *   SMALLINT, BIGINT, VARCHAR sizes).
@@ -18,7 +18,10 @@
  *     visibility          private | public (profiles are private by default)
  *     evaluation_mode     supportive | balanced | rigorous (FR-SETUP-004)
  *     runtime_mode        preset_realtime | custom (FR-SETUP-005)
- *     session status      created | active | completed | failed
+ *     session status      scheduled | active | completed | failed
+  *                         (`created` is a legacy value retained by the
+  *                         scheduled_invitations migration for pre-schedule
+  *                         sessions; new sessions are born `scheduled`)
  *     speaker_type        interviewer | candidate (FR-TRANSCRIPT-001/002)
  *     message_kind        primary_question | follow_up_question | candidate_response
  *                         | acknowledgement (FR-INTERVIEW-007/008)
@@ -186,8 +189,15 @@ model InterviewSession {
   runtimeMode             String    @map("runtime_mode") @db.VarChar(30)
   providerRouteSnapshot   Json      @map("provider_route_snapshot") @db.JsonB
   interviewerPromptVersion String   @map("interviewer_prompt_version") @db.VarChar(50)
-  status                  String    @default("created") @map("status") @db.VarChar(20)
+  status                  String    @default("scheduled") @map("status") @db.VarChar(20)
   failureCode             String?   @map("failure_code") @db.VarChar(60)
+  /// SHA-256 of the invitation capability; the raw token exists only in the shared link.
+  invitationTokenHash     String?   @unique @map("invitation_token_hash") @db.VarChar(64)
+  invitationRevokedAt     DateTime? @map("invitation_revoked_at") @db.Timestamptz(6)
+  /// Candidate-supplied key that makes interview creation idempotent across
+  /// retries. A partial unique index on (user_id, creation_idempotency_key)
+  /// lives in the idempotent_turns migration (Prisma cannot express it here).
+  creationIdempotencyKey  String?   @map("creation_idempotency_key") @db.VarChar(100)
   createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   startedAt               DateTime? @map("started_at") @db.Timestamptz(6)
   completedAt             DateTime? @map("completed_at") @db.Timestamptz(6)

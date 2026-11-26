@@ -8,6 +8,14 @@ import {
 import { db } from "@/lib/db";
 import { ProviderConfigError, resolveForOutboundCall } from "@/lib/providers/config";
 import {
+  createInvitationToken,
+  hashInvitationToken,
+  invitationPath,
+} from "./invitation-token";
+import type { RoomStore } from "./room";
+import { findActiveSessionByToken, issueInvitation, type IssuedInvitation } from "./invitations";
+import { UnitConflictError } from "./unit-conflict";
+import {
   interviewSetupSchema,
   typedTurnSchema,
   type InterviewSetupInput,
@@ -62,6 +70,9 @@ export interface ProviderRouteSnapshot {
   baseUrl: string;
   modelId: string;
 }
+
+/** Creation returns the one-time shareable link alongside the key-free summary. */
+export type CreatedInterview = SessionSummary & { invitation: IssuedInvitation };
 
 export interface SessionSummary {
   sessionId: string;
@@ -191,6 +202,60 @@ async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot>
   }
 }
 
+/** Normalizes and validates a candidate-supplied creation idempotency key. */
+function normalizeCreationKey(idempotencyKey?: string): string | null {
+  const key = idempotencyKey?.trim() || null;
+  if (key && (key.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(key))) {
+    throw new InterviewError("invalid_input", "Invalid creation idempotency key.");
+  }
+  return key;
+}
+
+/** True when a P2002 came from the (user, creation idempotency key) index. */
+function isCreationKeyConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+    return false;
+  }
+  const target = JSON.stringify(error.meta ?? {});
+  return (
+    target.includes("creation_idempotency_key") ||
+    target.includes("creationIdempotencyKey")
+  );
+}
+
+/**
+ * Loads the session that already owns (userId, key) and reissues its link.
+ * The raw token is deliberately never stored, so a replay issues a fresh
+ * capability for the SAME session instead of creating a duplicate.
+ */
+async function replayCreatedInterview(
+  userId: string,
+  key: string,
+): Promise<CreatedInterview | null> {
+  const existing = await db.interviewSession.findFirst({
+    where: { userId, creationIdempotencyKey: key },
+  });
+  if (!existing) return null;
+  const reissued = await issueInvitation(userId, existing.sessionId);
+  return {
+    ...toSessionSummary(existing, existing.providerRouteSnapshot as unknown as ProviderRouteSnapshot),
+    invitation: reissued,
+  };
+}
+
+/**
+ * Replay lookup for callers that must decide whether a request would create a
+ * new session before applying creation-only preconditions (the agent checks
+ * category availability only for NEW sessions).
+ */
+export async function findExistingInterviewCreation(
+  userId: string,
+  idempotencyKey?: string,
+): Promise<CreatedInterview | null> {
+  const key = normalizeCreationKey(idempotencyKey);
+  return key ? replayCreatedInterview(userId, key) : null;
+}
+
 /**
  * Creates a session from the candidate's setup (FR-SETUP-001..005,
  * FR-INTERVIEW-001). The category is snapshotted by value and the provider
@@ -201,7 +266,8 @@ async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot>
 export async function createInterviewSession(
   userId: string,
   input: unknown,
-): Promise<SessionSummary> {
+  idempotencyKey?: string,
+): Promise<CreatedInterview> {
   if (!/^[0-9a-f-]{36}$/i.test(userId)) {
     throw new InterviewError("invalid_input", "Invalid user id.");
   }
@@ -216,6 +282,15 @@ export async function createInterviewSession(
     );
   }
 
+  // Idempotent creation: a retried "create" request returns the original
+  // session (and a freshly issued link) instead of a duplicate. The raw token
+  // is deliberately never stored, so a replay reissues it for the SAME session.
+  const key = normalizeCreationKey(idempotencyKey);
+  if (key) {
+    const existing = await replayCreatedInterview(userId, key);
+    if (existing) return existing;
+  }
+
   const category: InterviewCategory | null = await db.interviewCategory.findUnique({
     where: { categoryId: parsed.categoryId },
   });
@@ -225,40 +300,70 @@ export async function createInterviewSession(
 
   const providerRouteSnapshot = await loadRouteSnapshot(userId);
 
-  const session = await db.interviewSession.create({
-    data: {
-      userId,
-      jobRole: parsed.jobRole,
-      jobDescription: parsed.jobDescription ?? null,
-      categoryId: category.categoryId,
-      categoryCodeSnapshot: category.categoryCode,
-      categoryNameSnapshot: category.categoryName,
-      evaluationMode: parsed.evaluationMode,
-      runtimeMode: parsed.runtimeMode,
-      providerRouteSnapshot:
-        providerRouteSnapshot as unknown as Prisma.InputJsonValue,
-      interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,
-    },
-  });
-  return toSessionSummary(session, providerRouteSnapshot);
+  // FR-SETUP-007/008: the interview is born scheduled/ready, with a
+  // revocable link whose raw capability is never stored (only its hash).
+  const invitationToken = createInvitationToken();
+  let session: InterviewSession;
+  try {
+    session = await db.interviewSession.create({
+      data: {
+        userId,
+        jobRole: parsed.jobRole,
+        jobDescription: parsed.jobDescription ?? null,
+        categoryId: category.categoryId,
+        categoryCodeSnapshot: category.categoryCode,
+        categoryNameSnapshot: category.categoryName,
+        evaluationMode: parsed.evaluationMode,
+        runtimeMode: parsed.runtimeMode,
+        providerRouteSnapshot:
+          providerRouteSnapshot as unknown as Prisma.InputJsonValue,
+        interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,
+        status: "scheduled",
+        invitationTokenHash: hashInvitationToken(invitationToken),
+        creationIdempotencyKey: key,
+      },
+    });
+  } catch (error) {
+    // A concurrent request with the same key won the partial unique index:
+    // replay the winner instead of surfacing a spurious conflict. Any other
+    // database failure propagates unchanged.
+    if (isCreationKeyConflict(error) && key) {
+      const winner = await replayCreatedInterview(userId, key);
+      if (winner) return winner;
+    }
+    throw error;
+  }
+  return {
+    ...toSessionSummary(session, providerRouteSnapshot),
+    invitation: { token: invitationToken, path: invitationPath(invitationToken) },
+  };
 }
 
 /**
- * Marks a created session active (FR-INTERVIEW-001). kept separate from
+ * Marks a scheduled session active (FR-INTERVIEW-001). kept separate from
  * creation so a runtime setup failure (M2) can land the session in
- * `failed` without ever having started.
+ * `failed` without ever having started. `created` is a legacy status retained
+ * for sessions made before the default changed to `scheduled`.
  */
 export async function startInterviewSession(
   userId: string,
   sessionId: string,
 ): Promise<SessionSummary> {
   const session = await loadOwnedSession(userId, sessionId);
-  if (session.status !== "created") {
-    throw new InterviewError("invalid_state", "Only a created interview can be started.");
+  if (session.status !== "scheduled" && session.status !== "created") {
+    throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
   }
-  const started = await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  // Atomic lifecycle predicate: a concurrent completion/start cannot be
+  // overwritten back to active, and a double-start cannot reset startedAt.
+  const updated = await db.interviewSession.updateMany({
+    where: { sessionId: session.sessionId, status: { in: ["scheduled", "created"] } },
     data: { status: "active", startedAt: new Date() },
+  });
+  if (updated.count === 0) {
+    throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
+  }
+  const started = await db.interviewSession.findUniqueOrThrow({
+    where: { sessionId: session.sessionId },
   });
   return toSessionSummary(
     started,
@@ -289,20 +394,115 @@ export async function endInterviewSession(
   );
 }
 
-async function nextSequenceNumber(sessionId: string): Promise<number> {
-  const aggregate = await db.conversationMessage.aggregate({
-    where: { sessionId },
-    _max: { sequenceNumber: true },
-  });
-  return (aggregate._max.sequenceNumber ?? 0) + 1;
+/**
+ * Shared message insertion with conflict handling (FR-TRANSCRIPT-001,
+ * NFR-REL-002). Retried submissions with the same idempotency key return the
+ * original message instead of duplicating it (the partial unique index on
+ * (session_id, idempotency_key)); a sequence-number collision (concurrent
+ * turns) is retried once against a fresh max before surfacing as a conflict.
+ * Shared by the typed turn path (submitTypedTurn) and the token-scoped room
+ * store so both stay safe under concurrent inserts.
+ */
+async function appendMessage(
+  sessionId: string,
+  data: {
+    speakerType: string;
+    messageKind: string;
+    contentText: string;
+    candidateInputMode?: string | null;
+    idempotencyKey?: string | null;
+    assessmentUnitId?: string | null;
+  },
+  options: { requireActiveSession?: boolean } = {},
+): Promise<{ message: ConversationMessage; created: boolean }> {
+  if (data.idempotencyKey) {
+    const existing = await db.conversationMessage.findFirst({
+      where: { sessionId, idempotencyKey: data.idempotencyKey },
+    });
+    if (existing) return { message: existing, created: false };
+  }
+
+  const insert = async (
+    client: Pick<Prisma.TransactionClient, "conversationMessage">,
+  ) => {
+    const aggregate = await client.conversationMessage.aggregate({
+      where: { sessionId },
+      _max: { sequenceNumber: true },
+    });
+    return client.conversationMessage.create({
+      data: {
+        sessionId,
+        sequenceNumber: (aggregate._max.sequenceNumber ?? 0) + 1,
+        speakerType: data.speakerType,
+        messageKind: data.messageKind,
+        contentText: data.contentText,
+        candidateInputMode: data.candidateInputMode ?? null,
+        idempotencyKey: data.idempotencyKey ?? null,
+        assessmentUnitId: data.assessmentUnitId ?? null,
+      },
+    });
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const message = options.requireActiveSession
+        ? await db.$transaction(async (tx) => {
+            // Lock the parent session row so completion is ordered against this
+            // insert: either the insert sees an active session and wins, or a
+            // concurrent completion commits first and this is rejected without
+            // writing a row.
+            await tx.$queryRaw`SELECT session_id FROM interview_session WHERE session_id = ${sessionId}::uuid FOR UPDATE`;
+            const session = await tx.interviewSession.findUnique({
+              where: { sessionId },
+              select: { status: true },
+            });
+            if (session?.status !== "active") {
+              throw new InterviewError(
+                "invalid_state",
+                "This interview is not accepting turns.",
+              );
+            }
+            return insert(tx);
+          })
+        : await insert(db);
+      return { message, created: true };
+    } catch (error) {
+      const isDuplicate =
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+      // The partial unique index on (session_id, idempotency_key) carries
+      // "idempotency" in its name; sequence violations carry "sequence".
+      const violation = JSON.stringify(
+        error instanceof Error && "meta" in error ? (error as { meta?: unknown }).meta : "",
+      );
+      const duplicateIdempotency = isDuplicate && violation.includes("idempotency");
+      if (duplicateIdempotency) {
+        // A concurrent duplicate insert: return the winner instead of a 500.
+        const existing = await db.conversationMessage.findFirst({
+          where: { sessionId, idempotencyKey: data.idempotencyKey ?? undefined },
+        });
+        if (existing) return { message: existing, created: false };
+      }
+      const duplicateSequence = isDuplicate && violation.includes("sequence");
+      if (attempt === 0 && duplicateSequence) {
+        continue; // recompute max sequence after a concurrent insert
+      }
+      if (duplicateSequence) {
+        throw new InterviewError(
+          "invalid_state",
+          "The response could not be ordered. Try again.",
+        );
+      }
+      // Not a sequence collision (connection, other constraint, timeout): let
+      // the database failure propagate as a genuine server error (review fix).
+      throw error;
+    }
+  }
+  throw new InterviewError("invalid_state", "The response could not be ordered. Try again.");
 }
 
 /**
- * Persists one typed candidate response (FR-INTERVIEW-004). Retried
- * finalized submissions with the same idempotency key return the original
- * message instead of duplicating it (NFR-REL-002 partial unique index);
- * a sequence-number collision (concurrent turns) is retried once against a
- * fresh max before surfacing as a conflict.
+ * Persists one typed candidate response (FR-INTERVIEW-004) on the shared
+ * appendMessage conflict path.
  */
 export async function submitTypedTurn(
   userId: string,
@@ -329,58 +529,200 @@ export async function submitTypedTurn(
     );
   }
 
-  if (parsed.idempotencyKey) {
-    const existing = await db.conversationMessage.findFirst({
-      where: { sessionId: session.sessionId, idempotencyKey: parsed.idempotencyKey },
-    });
-    if (existing) {
-      return { message: toMessageSummary(existing), created: false };
-    }
-  }
+  const result = await appendMessage(
+    session.sessionId,
+    {
+      speakerType: "candidate",
+      messageKind: "candidate_response",
+      contentText: parsed.contentText,
+      candidateInputMode: parsed.inputMode,
+      idempotencyKey: parsed.idempotencyKey ?? null,
+    },
+    { requireActiveSession: true },
+  );
+  return { message: toMessageSummary(result.message), created: result.created };
+}
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const message = await db.conversationMessage.create({
-        data: {
-          sessionId: session.sessionId,
-          sequenceNumber: await nextSequenceNumber(session.sessionId),
-          speakerType: "candidate",
-          messageKind: "candidate_response",
-          contentText: parsed.contentText,
-          candidateInputMode: parsed.inputMode,
-          idempotencyKey: parsed.idempotencyKey ?? null,
+/**
+ * Persistence for the token-scoped room (FR-INTERVIEW-004), sharing
+ * appendMessage with the typed path. The token is resolved to the owning
+ * session by invitations.findActiveSessionByToken — no account session.
+ */
+export function createRoomStore(): RoomStore {
+  return {
+    async context(token) {
+      const session = await findActiveSessionByToken(token);
+      if (!session) return null;
+      return {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        jobRole: session.jobRole,
+        jobDescription: session.jobDescription,
+        evaluationMode: session.evaluationMode,
+        status: session.status,
+      };
+    },
+
+    async messages(sessionId) {
+      const rows = await db.conversationMessage.findMany({
+        where: { sessionId },
+        orderBy: { sequenceNumber: "asc" },
+        select: {
+          sequenceNumber: true,
+          speakerType: true,
+          messageKind: true,
+          contentText: true,
+          assessmentUnitId: true,
         },
       });
-      return { message: toMessageSummary(message), created: true };
-    } catch (error) {
-      const isDuplicate =
-        error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
-      // The partial unique index on (session_id, idempotency_key) carries
-      // "idempotency" in its name; sequence violations carry "sequence".
-      const violation = JSON.stringify(error instanceof Error && "meta" in error ? (error as { meta?: unknown }).meta : "");
-      const duplicateIdempotency = isDuplicate && violation.includes("idempotency");
-      if (duplicateIdempotency) {
-        const existing = await db.conversationMessage.findFirst({
-          where: { sessionId: session.sessionId, idempotencyKey: parsed.idempotencyKey },
+      return rows.map((message) => ({
+        sequenceNumber: message.sequenceNumber,
+        speakerType: message.speakerType,
+        messageKind: message.messageKind,
+        contentText: message.contentText,
+        assessmentUnitId: message.assessmentUnitId,
+      }));
+    },
+
+    async findCandidateByKey(sessionId, idempotencyKey) {
+      const message = await db.conversationMessage.findFirst({
+        where: { sessionId, idempotencyKey, speakerType: "candidate" },
+        select: {
+          sequenceNumber: true,
+          speakerType: true,
+          messageKind: true,
+          contentText: true,
+          assessmentUnitId: true,
+        },
+      });
+      if (!message) return null;
+      return {
+        sequenceNumber: message.sequenceNumber,
+        speakerType: message.speakerType,
+        messageKind: message.messageKind,
+        contentText: message.contentText,
+        assessmentUnitId: message.assessmentUnitId,
+      };
+    },
+
+    async activate(sessionId) {
+      // Atomic admission: only scheduled/created transitions to active, and the
+      // startedAt timestamp is only written on the transition. An already-active
+      // interview is a no-op (NOT a startedAt reset); a completed one is refused
+      // before any candidate row can be inserted (review fix).
+      const updated = await db.interviewSession.updateMany({
+        where: { sessionId, status: { in: ["scheduled", "created"] } },
+        data: { status: "active", startedAt: new Date() },
+      });
+      if (updated.count === 1) return "activated" as const;
+
+      const current = await db.interviewSession.findUnique({
+        where: { sessionId },
+        select: { status: true },
+      });
+      if (!current) return "rejected" as const;
+      return current.status === "active" ? ("already_active" as const) : ("rejected" as const);
+    },
+
+    async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
+      const result = await appendMessage(
+        sessionId,
+        {
+          speakerType: "candidate",
+          messageKind: "candidate_response",
+          contentText,
+          idempotencyKey: idempotencyKey ?? null,
+          assessmentUnitId,
+        },
+        { requireActiveSession: true },
+      );
+      return {
+        entry: {
+          sequenceNumber: result.message.sequenceNumber,
+          speakerType: result.message.speakerType,
+          messageKind: result.message.messageKind,
+          contentText: result.message.contentText,
+          assessmentUnitId: result.message.assessmentUnitId,
+        },
+        created: result.created,
+      };
+    },
+
+    async appendInterviewer(sessionId, contentText, messageKind, assessmentUnitId) {
+      const result = await appendMessage(sessionId, {
+        speakerType: "interviewer",
+        messageKind,
+        contentText,
+        assessmentUnitId,
+      });
+      return {
+        sequenceNumber: result.message.sequenceNumber,
+        speakerType: result.message.speakerType,
+        messageKind: result.message.messageKind,
+        contentText: result.message.contentText,
+        assessmentUnitId: result.message.assessmentUnitId,
+      };
+    },
+
+    async activeUnit(sessionId) {
+      const unit = await db.interviewAssessmentUnit.findFirst({
+        where: { sessionId, status: "open" },
+        orderBy: { unitNumber: "desc" },
+        select: { assessmentUnitId: true },
+      });
+      return unit?.assessmentUnitId ?? null;
+    },
+
+    async openUnit(sessionId, unitNumber) {
+      try {
+        const unit = await db.interviewAssessmentUnit.create({
+          data: { sessionId, unitNumber },
+          select: { assessmentUnitId: true },
         });
-        if (existing) {
-          return { message: toMessageSummary(existing), created: false };
+        return unit.assessmentUnitId;
+      } catch (error) {
+        // Both unique indexes on this table are unit assignments: (session,
+        // unit number) and the one-open-unit partial index. A P2002 from this
+        // insert is a concurrency conflict; other failures propagate (review fix).
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          throw new UnitConflictError();
         }
+        throw error;
       }
-      const duplicateSequence = isDuplicate && violation.includes("sequence");
-      if (attempt === 0 && duplicateSequence) {
-        continue; // recompute max sequence after a concurrent insert
-      }
-      if (duplicateSequence) {
-        throw new InterviewError(
-          "invalid_state",
-          "The response could not be ordered. Try again.",
-        );
-      }
-      throw error;
-    }
-  }
-  throw new InterviewError("invalid_state", "The response could not be ordered. Try again.");
+    },
+
+    async closeUnit(unitId) {
+      await db.interviewAssessmentUnit.update({
+        where: { assessmentUnitId: unitId },
+        data: { status: "closed", closedAt: new Date() },
+      });
+    },
+
+    async rollbackUnit(unitId) {
+      await db.interviewAssessmentUnit.delete({ where: { assessmentUnitId: unitId } });
+    },
+
+    async complete(sessionId) {
+      // Conditional write: only an active interview completes, and the row lock
+      // this update takes is ordered against the candidate-insert transaction,
+      // so a completion that wins rejects the insert instead of the insert
+      // landing on an already-completed session.
+      await db.interviewSession.updateMany({
+        where: { sessionId, status: "active" },
+        data: { status: "completed", completedAt: new Date() },
+      });
+    },
+
+    async rollbackCandidate(sessionId, idempotencyKey) {
+      const result = await db.conversationMessage.deleteMany({
+        where: { sessionId, idempotencyKey, speakerType: "candidate" },
+      });
+      return result.count > 0;
+    },
+  };
 }
 
 /**

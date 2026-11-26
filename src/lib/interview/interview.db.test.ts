@@ -3,8 +3,11 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaClient } from "@/generated/prisma/client";
 import { createProviderConfiguration } from "@/lib/providers/config";
+import { hashInvitationToken } from "./invitation-token";
+import { resolveInvitation } from "./invitations";
 import {
   createInterviewSession,
+  createRoomStore,
   endInterviewSession,
   getOwnInterviewTranscript,
   INTERVIEWER_PROMPT_VERSION,
@@ -13,6 +16,7 @@ import {
   startInterviewSession,
   submitTypedTurn,
 } from "./service";
+import { UnitConflictError } from "./unit-conflict";
 
 /**
  * Integration tests for the typed vertical slice (backlog slice 7) against
@@ -129,7 +133,13 @@ d("interview session service (integration)", () => {
     const categoryId = await createCategory();
 
     const session = await createInterviewSession(userId, setupInput(categoryId));
-    expect(session.status).toBe("created");
+    expect(session.status).toBe("scheduled");
+    // Each scheduled interview carries a ready-to-share, working invitation.
+    expect(session.invitation.path).toBe(`/i/${session.invitation.token}`);
+    const resolved = await resolveInvitation(session.invitation.token);
+    expect(resolved).toMatchObject({ sessionId: session.sessionId, status: "scheduled" });
+    const storedRow = await db.interviewSession.findUniqueOrThrow({ where: { sessionId: session.sessionId } });
+    expect(storedRow.invitationTokenHash).toBe(hashInvitationToken(session.invitation.token));
     expect(session.startedAt).toBeNull();
     expect(session.categoryCodeSnapshot).toBe("general");
     expect(session.categoryNameSnapshot).toBe("General");
@@ -176,7 +186,89 @@ d("interview session service (integration)", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
-  it("runs the lifecycle created → active → completed with timestamps", async () => {
+  it("replays an idempotent creation instead of creating a duplicate", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const first = await createInterviewSession(userId, setupInput(categoryId), "create-1");
+    const replay = await createInterviewSession(userId, setupInput(categoryId), "create-1");
+
+    expect(replay.sessionId).toBe(first.sessionId);
+    expect(replay.invitation.token).not.toBe(first.invitation.token);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("replays an existing creation after its category is deactivated", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const first = await createInterviewSession(userId, setupInput(categoryId), "create-2");
+    await db.interviewCategory.update({
+      where: { categoryId },
+      data: { isActive: false },
+    });
+
+    const replay = await createInterviewSession(userId, setupInput(categoryId), "create-2");
+    expect(replay.sessionId).toBe(first.sessionId);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("deduplicates concurrent creation with the same idempotency key", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const [first, second] = await Promise.all([
+      createInterviewSession(userId, setupInput(categoryId), "create-3"),
+      createInterviewSession(userId, setupInput(categoryId), "create-3"),
+    ]);
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("refuses a candidate row once the interview is completed", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    await store.complete(sessionId);
+    await expect(
+      store.appendCandidate(sessionId, "late answer", undefined, null),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    expect(await db.conversationMessage.count({ where: { sessionId } })).toBe(0);
+  });
+
+  it("accepts a candidate row while active and completes afterwards", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    const appended = await store.appendCandidate(sessionId, "answer", undefined, null);
+    expect(appended.created).toBe(true);
+    await store.complete(sessionId);
+
+    const row = await db.interviewSession.findUniqueOrThrow({ where: { sessionId } });
+    expect(row.status).toBe("completed");
+    expect(await db.conversationMessage.count({ where: { sessionId } })).toBe(1);
+  });
+
+  it("rejects a second open assessment unit for the same session", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    await store.openUnit(sessionId, 1);
+    // Different unit number, so only the partial unique index can reject this.
+    await expect(store.openUnit(sessionId, 2)).rejects.toBeInstanceOf(UnitConflictError);
+    expect(
+      await db.interviewAssessmentUnit.count({ where: { sessionId, status: "open" } }),
+    ).toBe(1);
+  });
+
+  it("runs the lifecycle scheduled → active → completed with timestamps", async () => {
     const userId = await createUser();
     await createLlmConfig(userId);
     const categoryId = await createCategory();

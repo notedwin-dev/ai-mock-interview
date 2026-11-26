@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration for AIMIS.
+# The project uses a stacked PR flow: feature/* -> fix/* surgical branches ->
+# staging -> main. By default CodeRabbit only auto-reviews PRs targeting the
+# default branch (main), so every stacked PR was skipped. This config makes
+# it review PRs targeting ALL base branches.
+language: en-US
+reviews:
+  profile: chill
+  auto_review:
+    enabled: true
+    # Regex (unanchored) matches every base branch, not just main.
+    base_branches:
+      - ".*"
+    # Re-review on each push so iterative fixes get fresh reviews.
+    auto_incremental_review: true
+    # Pause after 10 reviewed commits (default 5 is low for long slices).
+    auto_pause_after_reviewed_commits: 10
+  # CI verify already gates lint/typecheck/tests; keep review output focused.
+  high_level_summary: true
+  review_status: true
