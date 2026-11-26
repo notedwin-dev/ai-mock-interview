@@ -20,16 +20,21 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   // or unmounting invalidates them so a late-resolving stream is stopped
   // instead of leaking device lights and microphone access.
   const previewGenerationRef = useRef(0);
+  // Mute is read inside async mic-replacement callbacks: a ref avoids the
+  // stale closure that used the value captured before the switch began.
+  const mutedRef = useRef(false);
+  // Each exact-device switch gets an ID; only the latest may install its track.
+  const micSwitchIdRef = useRef(0);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [muted, setMuted] = useState(false);
   const [micId, setMicId] = useState("");
-  const [speakerId, setSpeakerId] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   function stopPreview() {
     previewGenerationRef.current += 1;
+    micSwitchIdRef.current += 1;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
@@ -38,7 +43,12 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
 
   useEffect(() => () => {
     previewGenerationRef.current += 1;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    micSwitchIdRef.current += 1;
+    const stream = streamRef.current;
+    stream?.getTracks().forEach((track) => track.stop());
+    // Null the ref so a late mic-replacement continuation's identity check
+    // discards (and stops) its track instead of installing it on unmount.
+    streamRef.current = null;
   }, []);
 
   async function enablePreview() {
@@ -58,14 +68,16 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
       }
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
+      const acquiredMicId = stream.getAudioTracks()[0]?.getSettings().deviceId;
+      stream.getAudioTracks().forEach((track) => { track.enabled = !mutedRef.current; });
       const all = await navigator.mediaDevices.enumerateDevices();
       if (generation !== previewGenerationRef.current) return;
       setDevices(all);
-      const input = all.find((device) => device.kind === "audioinput");
-      const output = all.find((device) => device.kind === "audiooutput");
-      if (input?.deviceId) setMicId(input.deviceId);
-      if (output?.deviceId) setSpeakerId(output.deviceId);
+      if (acquiredMicId) setMicId(acquiredMicId);
+      else {
+        const input = all.find((device) => device.kind === "audioinput");
+        if (input?.deviceId) setMicId(input.deviceId);
+      }
       setCameraOn(true);
     } catch {
       // Enumeration or acquisition failed: an acquired stream must not keep
@@ -80,35 +92,51 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   }
 
   function toggleMute() {
-    const next = !muted;
+    const next = !mutedRef.current;
+    mutedRef.current = next; // synchronous: the next mic swap reads this value
     setMuted(next);
     streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
   }
 
-  function changeMicrophone(nextMicId: string) {
-    setMicId(nextMicId);
-    // Swap the active preview's audio track to the selected device while
-    // preserving the current mute setting; the old track is stopped.
+  async function changeMicrophone(nextMicId: string) {
     const stream = streamRef.current;
-    if (!stream || !nextMicId) return;
-    const replacement = navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: { exact: nextMicId } },
-    });
-    void replacement.then((next) => {
-      if (streamRef.current !== stream) {
+    if (!stream || !nextMicId) {
+      setMicId(nextMicId);
+      return;
+    }
+    const switchId = ++micSwitchIdRef.current;
+    try {
+      // Only adopt the exact device once getUserMedia succeeds; on rejection
+      // the current selection and its working track stay untouched.
+      const next = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: nextMicId } },
+      });
+      const superseded =
+        switchId !== micSwitchIdRef.current || streamRef.current !== stream;
+      if (superseded) {
         next.getTracks().forEach((track) => track.stop());
         return;
       }
       const audioTrack = next.getAudioTracks()[0];
-      if (!audioTrack) return;
-      audioTrack.enabled = !muted;
+      if (!audioTrack) {
+        next.getTracks().forEach((track) => track.stop());
+        setNotice("The selected microphone has no audio track. The current one stays active.");
+        return;
+      }
+      audioTrack.enabled = !mutedRef.current;
       stream.getAudioTracks().forEach((track) => {
         stream.removeTrack(track);
         track.stop();
       });
       stream.addTrack(audioTrack);
       if (videoRef.current) videoRef.current.srcObject = stream;
-    });
+      setMicId(nextMicId);
+      setNotice(null);
+    } catch {
+      if (switchId === micSwitchIdRef.current) {
+        setNotice("The selected microphone could not be used — the current one stays active.");
+      }
+    }
   }
 
   function join() {
@@ -151,14 +179,6 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 <select value={micId} onChange={(event) => changeMicrophone(event.target.value)} className="h-10 rounded-full border border-line bg-raised px-4 text-sm text-ink">
                   {devices.filter((d) => d.kind === "audioinput").map((d) => (
                     <option key={d.deviceId} value={d.deviceId}>{d.label || "Microphone"}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-ink-muted">
-                Speaker
-                <select value={speakerId} onChange={(event) => setSpeakerId(event.target.value)} className="h-10 rounded-full border border-line bg-raised px-4 text-sm text-ink">
-                  {devices.filter((d) => d.kind === "audiooutput").map((d) => (
-                    <option key={d.deviceId} value={d.deviceId}>{d.label || "Speaker"}</option>
                   ))}
                 </select>
               </label>

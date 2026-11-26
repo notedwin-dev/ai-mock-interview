@@ -127,7 +127,7 @@ describe("createInterviewFromAgentConfig", () => {
       categoryId: "category-uuid",
       evaluationMode: "rigorous",
       runtimeMode: "custom",
-    });
+    }, undefined);
     expect(session).toMatchObject({ sessionId: "new-session" });
   });
 

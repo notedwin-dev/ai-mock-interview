@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { Check, Copy, Loader2, RotateCcw, Send } from "lucide-react";
 import type { AgentConfig } from "@/lib/interview/agent";
@@ -73,6 +73,9 @@ export function InterviewAgent() {
   const [pending, setPending] = useState<"turn" | "create" | null>(null);
   const [created, setCreated] = useState<{ sessionId: string; path: string; url: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  // Stable per-configuration key: retries of the SAME create request reuse it
+  // so the server returns the original session instead of a duplicate.
+  const creationKeyRef = useRef<{ config: string; key: string } | null>(null);
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -90,6 +93,10 @@ export function InterviewAgent() {
     const response = await postAgent({ action: "turn", messages: nextMessages });
     setPending(null);
     if (!response.ok) {
+      // Restore the pre-submission transcript and the submitted text so a
+      // failed turn is not shown as delivered and the answer is not lost.
+      setMessages(messages);
+      setDraft(content);
       setError(response.message);
       return;
     }
@@ -102,10 +109,17 @@ export function InterviewAgent() {
     if (!result?.config || !result.ready || pending !== null) return;
     setError(null);
     setPending("create");
+    const configSignature = JSON.stringify(result.config);
+    const creationKey =
+      creationKeyRef.current?.config === configSignature
+        ? creationKeyRef.current.key
+        : crypto.randomUUID();
+    creationKeyRef.current = { config: configSignature, key: creationKey };
     const response = await postAgent({
       action: "create",
       config: result.config,
       missingFields: result.missingFields,
+      idempotencyKey: creationKey,
     });
     setPending(null);
     if (!response.ok) {

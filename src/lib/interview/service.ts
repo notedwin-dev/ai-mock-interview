@@ -13,7 +13,8 @@ import {
   invitationPath,
 } from "./invitation-token";
 import type { RoomStore } from "./room";
-import { findActiveSessionByToken, type IssuedInvitation } from "./invitations";
+import { findActiveSessionByToken, issueInvitation, type IssuedInvitation } from "./invitations";
+import { UnitConflictError } from "./unit-conflict";
 import {
   interviewSetupSchema,
   typedTurnSchema,
@@ -211,6 +212,7 @@ async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot>
 export async function createInterviewSession(
   userId: string,
   input: unknown,
+  idempotencyKey?: string,
 ): Promise<CreatedInterview> {
   if (!/^[0-9a-f-]{36}$/i.test(userId)) {
     throw new InterviewError("invalid_input", "Invalid user id.");
@@ -224,6 +226,26 @@ export async function createInterviewSession(
       "invalid_input",
       error instanceof Error ? error.message : "Invalid interview setup.",
     );
+  }
+
+  // Idempotent creation: a retried "create" request returns the original
+  // session (and a freshly issued link) instead of a duplicate. The raw token
+  // is deliberately never stored, so a replay reissues it for the SAME session.
+  const key = idempotencyKey?.trim() || null;
+  if (key && (key.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(key))) {
+    throw new InterviewError("invalid_input", "Invalid creation idempotency key.");
+  }
+  if (key) {
+    const existing = await db.interviewSession.findFirst({
+      where: { userId, creationIdempotencyKey: key },
+    });
+    if (existing) {
+      const reissued = await issueInvitation(userId, existing.sessionId);
+      return {
+        ...toSessionSummary(existing, existing.providerRouteSnapshot as unknown as ProviderRouteSnapshot),
+        invitation: reissued,
+      };
+    }
   }
 
   const category: InterviewCategory | null = await db.interviewCategory.findUnique({
@@ -253,6 +275,7 @@ export async function createInterviewSession(
       interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,
       status: "scheduled",
       invitationTokenHash: hashInvitationToken(invitationToken),
+      creationIdempotencyKey: key,
     },
   });
   return {
@@ -275,9 +298,17 @@ export async function startInterviewSession(
   if (session.status !== "scheduled" && session.status !== "created") {
     throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
   }
-  const started = await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  // Atomic lifecycle predicate: a concurrent completion/start cannot be
+  // overwritten back to active, and a double-start cannot reset startedAt.
+  const updated = await db.interviewSession.updateMany({
+    where: { sessionId: session.sessionId, status: { in: ["scheduled", "created"] } },
     data: { status: "active", startedAt: new Date() },
+  });
+  if (updated.count === 0) {
+    throw new InterviewError("invalid_state", "Only a scheduled interview can be started.");
+  }
+  const started = await db.interviewSession.findUniqueOrThrow({
+    where: { sessionId: session.sessionId },
   });
   return toSessionSummary(
     started,
@@ -374,10 +405,15 @@ async function appendMessage(
       if (attempt === 0 && duplicateSequence) {
         continue; // recompute max sequence after a concurrent insert
       }
-      throw new InterviewError(
-        "invalid_state",
-        "The response could not be ordered. Try again.",
-      );
+      if (duplicateSequence) {
+        throw new InterviewError(
+          "invalid_state",
+          "The response could not be ordered. Try again.",
+        );
+      }
+      // Not a sequence collision (connection, other constraint, timeout): let
+      // the database failure propagate as a genuine server error (review fix).
+      throw error;
     }
   }
   throw new InterviewError("invalid_state", "The response could not be ordered. Try again.");
@@ -485,10 +521,22 @@ export function createRoomStore(): RoomStore {
     },
 
     async activate(sessionId) {
-      await db.interviewSession.update({
-        where: { sessionId },
+      // Atomic admission: only scheduled/created transitions to active, and the
+      // startedAt timestamp is only written on the transition. An already-active
+      // interview is a no-op (NOT a startedAt reset); a completed one is refused
+      // before any candidate row can be inserted (review fix).
+      const updated = await db.interviewSession.updateMany({
+        where: { sessionId, status: { in: ["scheduled", "created"] } },
         data: { status: "active", startedAt: new Date() },
       });
+      if (updated.count === 1) return "activated" as const;
+
+      const current = await db.interviewSession.findUnique({
+        where: { sessionId },
+        select: { status: true },
+      });
+      if (!current) return "rejected" as const;
+      return current.status === "active" ? ("already_active" as const) : ("rejected" as const);
     },
 
     async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
@@ -537,11 +585,24 @@ export function createRoomStore(): RoomStore {
     },
 
     async openUnit(sessionId, unitNumber) {
-      const unit = await db.interviewAssessmentUnit.create({
-        data: { sessionId, unitNumber },
-        select: { assessmentUnitId: true },
-      });
-      return unit.assessmentUnitId;
+      try {
+        const unit = await db.interviewAssessmentUnit.create({
+          data: { sessionId, unitNumber },
+          select: { assessmentUnitId: true },
+        });
+        return unit.assessmentUnitId;
+      } catch (error) {
+        // Both unique indexes on this table are unit assignments: (session,
+        // unit number) and the one-open-unit partial index. A P2002 from this
+        // insert is a concurrency conflict; other failures propagate (review fix).
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          throw new UnitConflictError();
+        }
+        throw error;
+      }
     },
 
     async closeUnit(unitId) {

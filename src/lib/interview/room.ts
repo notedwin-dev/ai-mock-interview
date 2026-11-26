@@ -1,5 +1,6 @@
 import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib/ai/llm";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
+import { UnitConflictError } from "@/lib/interview/unit-conflict";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { z } from "zod";
 
@@ -37,7 +38,7 @@ export interface RoomStore {
     sessionId: string,
     idempotencyKey: string,
   ): Promise<TranscriptEntry | null>;
-  activate(sessionId: string): Promise<void>;
+  activate(sessionId: string): Promise<"activated" | "already_active" | "rejected">;
   appendCandidate(
     sessionId: string,
     contentText: string,
@@ -74,7 +75,11 @@ export interface RoomTurnResult {
   created: boolean;
 }
 
-export type RoomErrorCode = "invitation_not_found" | "invalid_state" | "invalid_input";
+export type RoomErrorCode =
+  | "invitation_not_found"
+  | "invalid_state"
+  | "invalid_input"
+  | "turn_pending";
 
 export class RoomError extends Error {
   readonly code: RoomErrorCode;
@@ -110,6 +115,35 @@ export interface RoomDeps {
 }
 
 export const MAX_PRIMARY_QUESTIONS = 6;
+
+/**
+ * In-process claim for a (session, idempotency key) turn currently generating.
+ * It prevents two concurrent submissions of the same key from both generating
+ * and persisting a reply. The loser gets `turn_pending` and retries later (then
+ * replaying the finalized turn, or resuming if the owner failed and released the
+ * claim). Multi-process deployments need a shared lease instead — noted in the
+ * slice report.
+ */
+const TURN_CLAIM_TTL_MS = 120_000;
+const turnClaims = new Map<string, { token: number; startedAt: number }>();
+let turnClaimSequence = 0;
+
+function claimTurn(sessionId: string, idempotencyKey: string): number | null {
+  const key = `${sessionId}:${idempotencyKey}`;
+  const existing = turnClaims.get(key);
+  if (existing) {
+    if (Date.now() - existing.startedAt < TURN_CLAIM_TTL_MS) return null;
+    // A crashed owner's lease expired: take it over and resume.
+  }
+  const token = ++turnClaimSequence;
+  turnClaims.set(key, { token, startedAt: Date.now() });
+  return token;
+}
+
+function releaseTurnClaim(sessionId: string, idempotencyKey: string, token: number): void {
+  const key = `${sessionId}:${idempotencyKey}`;
+  if (turnClaims.get(key)?.token === token) turnClaims.delete(key);
+}
 
 function roomInstructions(context: RoomContext, primaryCount: number): string {
   return [
@@ -165,46 +199,68 @@ export async function runRoomTurn(
     throw new RoomError("invalid_state", "This interview is not accepting turns.");
   }
 
-  const activeUnitId = await store.activeUnit(context.sessionId);
-  const candidate = await store.appendCandidate(
-    context.sessionId,
-    parsed.contentText,
-    parsed.idempotencyKey,
-    activeUnitId,
-  );
-  if (!candidate.created) {
-    // Replay of an already-submitted key. If the interviewer reply for this
-    // candidate message already exists, the turn is finalized: return the
-    // stored transcript unchanged (the stored endCall value, not a fabricated
-    // false). If the reply is missing — the previous attempt failed during
-    // generation — fall through and generate it now so a retry can continue
-    // the conversation instead of returning a dangling candidate message.
-    const history = await store.messages(context.sessionId);
-    const index = history.findIndex((m) => m.sequenceNumber === candidate.entry.sequenceNumber);
-    const next = index >= 0 ? history[index + 1] : undefined;
-    if (next && next.speakerType === "interviewer") {
-      return { messages: history, endCall: context.status === "completed", created: false };
+  const existing = parsed.idempotencyKey
+    ? await store.findCandidateByKey(context.sessionId, parsed.idempotencyKey)
+    : null;
+
+  // Claim this turn before generating. A concurrent request with the same key
+  // must wait (retryable pending) instead of producing a duplicate reply.
+  const claim = parsed.idempotencyKey
+    ? claimTurn(context.sessionId, parsed.idempotencyKey)
+    : null;
+  if (parsed.idempotencyKey && claim === null) {
+    throw new RoomError(
+      "turn_pending",
+      "Another response for this answer is still being generated. Try again in a moment.",
+    );
+  }
+
+  try {
+    // Atomic admission BEFORE the candidate row is inserted: a concurrent
+    // completion must win (no candidate row), and an already-active interview
+    // must not have startedAt reset by this retry.
+    if (context.status === "scheduled" || context.status === "active") {
+      const admitted = await store.activate(context.sessionId);
+      if (admitted === "rejected") {
+        if (existing) {
+          return { messages: await store.messages(context.sessionId), endCall: true, created: false };
+        }
+        throw new RoomError("invalid_state", "This interview is not accepting turns.");
+      }
     }
-    return completeTurn(context, {
+
+    const activeUnitId = await store.activeUnit(context.sessionId);
+    const candidate = await store.appendCandidate(
+      context.sessionId,
+      parsed.contentText,
+      parsed.idempotencyKey,
+      activeUnitId,
+    );
+    if (!candidate.created) {
+      // Replay of an already-submitted key. If the interviewer reply for this
+      // candidate message already exists, the turn is finalized: return the
+      // stored transcript unchanged. Otherwise the previous attempt failed
+      // during generation — resume it so no candidate message is dangling.
+      const history = await store.messages(context.sessionId);
+      const index = history.findIndex((m) => m.sequenceNumber === candidate.entry.sequenceNumber);
+      const next = index >= 0 ? history[index + 1] : undefined;
+      if (next && next.speakerType === "interviewer") {
+        return { messages: history, endCall: false, created: false };
+      }
+    }
+
+    return await completeTurn(context, {
       store,
       deps,
       parsed,
       activeUnitId,
-      primaryCountRefresh: true,
-      created: false,
+      created: candidate.created,
     });
+  } finally {
+    if (parsed.idempotencyKey && claim !== null) {
+      releaseTurnClaim(context.sessionId, parsed.idempotencyKey, claim);
+    }
   }
-
-  if (context.status === "scheduled") await store.activate(context.sessionId);
-
-  return completeTurn(context, {
-    store,
-    deps,
-    parsed,
-    activeUnitId,
-    primaryCountRefresh: false,
-    created: true,
-  });
 }
 
 /**
@@ -220,11 +276,10 @@ async function completeTurn(
     deps: RoomDeps;
     parsed: RoomTurnInput;
     activeUnitId: string | null;
-    primaryCountRefresh: boolean;
     created: boolean;
   },
 ): Promise<RoomTurnResult> {
-  const { store, deps, parsed, activeUnitId, primaryCountRefresh, created } = parts;
+  const { store, deps, parsed, activeUnitId, created } = parts;
   const history = await store.messages(context.sessionId);
   const primaryCount = history.filter((message) => message.messageKind === "primary_question").length;
   const route = await (deps.resolveRoute ?? (async (userId: string) => {
@@ -263,10 +318,10 @@ async function completeTurn(
     try {
       unitId = await store.openUnit(context.sessionId, primaryCount + 1);
     } catch (error) {
-      // A concurrent turn for the same session opened unit N first (the
-      // (session_id, unit_number) unique). Roll the losing turn's candidate
-      // message back so no persisted candidate is left without a reply.
-      if (!parsed.idempotencyKey) throw error;
+      // Only a unit-number collision is a concurrency conflict. Other failures
+      // (connection, timeout, constraint) propagate untouched and must NOT roll
+      // the candidate message back — cleanup is specific to the conflict.
+      if (!(error instanceof UnitConflictError) || !parsed.idempotencyKey) throw error;
       const rolledBack = await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
       if (!rolledBack) throw error;
       throw new RoomError(

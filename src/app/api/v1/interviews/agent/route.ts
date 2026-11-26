@@ -33,6 +33,11 @@ const requestSchema = z.discriminatedUnion("action", [
     action: z.literal("create"),
     config: agentConfigSchema,
     missingFields: z.array(z.enum(AGENT_FIELDS)),
+    idempotencyKey: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9._:-]{1,100}$/)
+      .optional(),
   }),
 ]);
 
@@ -73,6 +78,7 @@ export async function POST(request: Request): Promise<Response> {
     const session = await createInterviewFromAgentConfig(account.account.userId, {
       config: body.config,
       missingFields: body.missingFields,
+      idempotencyKey: body.idempotencyKey,
     });
     return Response.json({ session }, { status: 201 });
   } catch (error) {

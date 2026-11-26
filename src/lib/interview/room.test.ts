@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RoomError, runRoomTurn, type RoomContext, type RoomStore, type TranscriptEntry } from "./room";
+import { UnitConflictError } from "./unit-conflict";
 
 /**
  * Hermetic tests for the token-scoped interview room (FR-INTERVIEW-002/004,
@@ -31,7 +32,12 @@ function fakeStore(initial: RoomContext = context) {
     async findCandidateByKey(sessionId, idempotencyKey) {
       return byKey.get(`${sessionId}:${idempotencyKey}`) ?? null;
     },
-    async activate() { current.status = "active"; },
+    async activate() {
+      if (current.status === "completed") return "rejected" as const;
+      if (current.status === "active") return "already_active" as const;
+      current.status = "active";
+      return "activated" as const;
+    },
     async appendCandidate(sessionId, contentText, idempotencyKey, assessmentUnitId) {
       if (idempotencyKey) {
         const found = byKey.get(`${sessionId}:${idempotencyKey}`);
@@ -199,9 +205,7 @@ describe("runRoomTurn", () => {
       store: {
         ...store,
         openUnit: async () => {
-          const error = new Error("P2002") as Error & { code?: string };
-          error.code = "P2002";
-          throw error;
+          throw new UnitConflictError();
         },
       },
       resolveRoute: async () => llmRoute,
@@ -214,6 +218,32 @@ describe("runRoomTurn", () => {
     // The persisted candidate message was rolled back — nothing is left
     // unanswered in the transcript.
     expect(messages.filter((m) => m.speakerType === "candidate")).toHaveLength(0);
+  });
+
+  it("rejects a same-key retry while request A is still generating", async () => {
+    const { store, messages } = fakeStore();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const generate = vi.fn(async () => {
+      signalStarted();
+      await gate;
+      return { interviewerText: "Q1?", messageKind: "primary_question" as const, endCall: false };
+    });
+    const deps = { store, resolveRoute: async () => llmRoute, generate };
+
+    const first = runRoomTurn(TOKEN, { contentText: "answer", idempotencyKey: "same" }, deps);
+    await started;
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "answer", idempotencyKey: "same" }, deps),
+    ).rejects.toMatchObject({ code: "turn_pending" });
+    release();
+    await first;
+
+    // A single interviewer reply was persisted; the retry never generated.
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(messages.filter((m) => m.speakerType === "interviewer")).toHaveLength(1);
   });
 
   it("rejects unknown links and interviews that are not in a joinable state", async () => {

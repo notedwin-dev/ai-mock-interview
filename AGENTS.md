@@ -137,8 +137,9 @@ Refer to Notion for complete implementation requirements.
     codebase refactoring and updates to existing features.
 - **PR flow: feature branch → `staging` → `main`.** Open feature/bugfix/refactor PRs
   against `staging`; promotion from `staging` to `main` is a separate reviewed PR.
-- Run `pnpm verify` before opening any PR (see §7); merge gates and owner review
-  rules in `docs/CONVENTIONS.md` still apply.
+- Run `pnpm verify` before opening any PR (see §7). Merge gates: a passing
+  CI `verify` run, CodeRabbit review resolved, and owner approval. No direct
+  pushes to `main` or `staging`.
 
 ## 10. Completion Report
 

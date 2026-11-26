@@ -152,6 +152,11 @@ export const agentCreationInputSchema = z
   .object({
     config: agentConfigSchema,
     missingFields: z.array(z.enum(AGENT_FIELDS)),
+    idempotencyKey: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9._:-]{1,100}$/)
+      .optional(),
   })
   .strict();
 
@@ -160,6 +165,7 @@ export interface AgentCreationDeps {
   createSession?: (
     userId: string,
     input: InterviewSetupInput,
+    idempotencyKey?: string,
   ) => Promise<SessionSummary>;
 }
 
@@ -215,5 +221,5 @@ export async function createInterviewFromAgentConfig(
     categoryId: category.categoryId,
     evaluationMode: parsed.config.strictness,
     runtimeMode: "custom",
-  });
+  }, parsed.idempotencyKey);
 }

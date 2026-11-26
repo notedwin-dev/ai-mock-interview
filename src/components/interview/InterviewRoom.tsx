@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
+import { Loader2, MessageSquare, Send, X } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
@@ -16,7 +16,6 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
-  const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
   // Monotonic counter for applied turn results: the initial transcript load
@@ -157,11 +156,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
           <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "microphone muted" : "microphone ready"}</p>
-          <button type="button" onClick={() => setMuted((value) => !value)} className="btn-ghost mt-4">
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute" : "Mute"}
-          </button>
+          <p className="mt-1 text-xs text-ink-muted">Type your answers below.</p>
           <p className="mt-3 text-xs text-ink-muted">Camera and microphone are never used as AI input.</p>
         </section>
       </div>
