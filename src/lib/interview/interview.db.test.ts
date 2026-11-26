@@ -7,6 +7,7 @@ import { hashInvitationToken } from "./invitation-token";
 import { resolveInvitation } from "./invitations";
 import {
   createInterviewSession,
+  createRoomStore,
   endInterviewSession,
   getOwnInterviewTranscript,
   INTERVIEWER_PROMPT_VERSION,
@@ -182,6 +183,75 @@ d("interview session service (integration)", () => {
     await expect(
       createInterviewSession(userId, setupInput(inactive.categoryId)),
     ).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  it("replays an idempotent creation instead of creating a duplicate", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const first = await createInterviewSession(userId, setupInput(categoryId), "create-1");
+    const replay = await createInterviewSession(userId, setupInput(categoryId), "create-1");
+
+    expect(replay.sessionId).toBe(first.sessionId);
+    expect(replay.invitation.token).not.toBe(first.invitation.token);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("replays an existing creation after its category is deactivated", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const first = await createInterviewSession(userId, setupInput(categoryId), "create-2");
+    await db.interviewCategory.update({
+      where: { categoryId },
+      data: { isActive: false },
+    });
+
+    const replay = await createInterviewSession(userId, setupInput(categoryId), "create-2");
+    expect(replay.sessionId).toBe(first.sessionId);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("deduplicates concurrent creation with the same idempotency key", async () => {
+    const userId = await createUser();
+    await createLlmConfig(userId);
+    const categoryId = await createCategory();
+
+    const [first, second] = await Promise.all([
+      createInterviewSession(userId, setupInput(categoryId), "create-3"),
+      createInterviewSession(userId, setupInput(categoryId), "create-3"),
+    ]);
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(await db.interviewSession.count({ where: { userId } })).toBe(1);
+  });
+
+  it("refuses a candidate row once the interview is completed", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    await store.complete(sessionId);
+    await expect(
+      store.appendCandidate(sessionId, "late answer", undefined, null),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    expect(await db.conversationMessage.count({ where: { sessionId } })).toBe(0);
+  });
+
+  it("accepts a candidate row while active and completes afterwards", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    const appended = await store.appendCandidate(sessionId, "answer", undefined, null);
+    expect(appended.created).toBe(true);
+    await store.complete(sessionId);
+
+    const row = await db.interviewSession.findUniqueOrThrow({ where: { sessionId } });
+    expect(row.status).toBe("completed");
+    expect(await db.conversationMessage.count({ where: { sessionId } })).toBe(1);
   });
 
   it("runs the lifecycle scheduled → active → completed with timestamps", async () => {

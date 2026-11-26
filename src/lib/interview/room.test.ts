@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RoomError, runRoomTurn, type RoomContext, type RoomStore, type TranscriptEntry } from "./room";
+import { InterviewError } from "./service";
 import { UnitConflictError } from "./unit-conflict";
 
 /**
@@ -244,6 +245,26 @@ describe("runRoomTurn", () => {
     // A single interviewer reply was persisted; the retry never generated.
     expect(generate).toHaveBeenCalledTimes(1);
     expect(messages.filter((m) => m.speakerType === "interviewer")).toHaveLength(1);
+  });
+
+  it("maps a completion-won candidate rejection to invalid_state", async () => {
+    const { store } = fakeStore();
+    const deps = {
+      store: {
+        ...store,
+        appendCandidate: async () => {
+          throw new InterviewError("invalid_state", "This interview is not accepting turns.");
+        },
+      },
+      resolveRoute: async () => llmRoute,
+      generate: async () => {
+        throw new Error("must not generate after completion wins");
+      },
+    };
+
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "late", idempotencyKey: "late-turn" }, deps),
+    ).rejects.toMatchObject({ code: "invalid_state" });
   });
 
   it("rejects unknown links and interviews that are not in a joinable state", async () => {

@@ -2,7 +2,11 @@ import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib
 import { db } from "@/lib/db";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { z } from "zod";
-import { createInterviewSession, type SessionSummary } from "./service";
+import {
+  createInterviewSession,
+  findExistingInterviewCreation,
+  type SessionSummary,
+} from "./service";
 import type { InterviewSetupInput } from "./validation";
 
 /**
@@ -162,6 +166,10 @@ export const agentCreationInputSchema = z
 
 export interface AgentCreationDeps {
   findCategory?: (code: string) => Promise<{ categoryId: string } | null>;
+  findExisting?: (
+    userId: string,
+    idempotencyKey: string,
+  ) => Promise<SessionSummary | null>;
   createSession?: (
     userId: string,
     input: InterviewSetupInput,
@@ -197,6 +205,16 @@ export async function createInterviewFromAgentConfig(
     );
   }
 
+  const idempotencyKey = parsed.idempotencyKey?.trim() || undefined;
+  // A retry must replay the original session even if its category has since
+  // been deactivated: only requests that would create a NEW session need the
+  // active-category check.
+  if (idempotencyKey) {
+    const findExisting = deps.findExisting ?? findExistingInterviewCreation;
+    const existing = await findExisting(userId, idempotencyKey);
+    if (existing) return existing;
+  }
+
   const findCategory =
     deps.findCategory ??
     (async (code: string) =>
@@ -221,5 +239,5 @@ export async function createInterviewFromAgentConfig(
     categoryId: category.categoryId,
     evaluationMode: parsed.config.strictness,
     runtimeMode: "custom",
-  }, parsed.idempotencyKey);
+  }, idempotencyKey);
 }

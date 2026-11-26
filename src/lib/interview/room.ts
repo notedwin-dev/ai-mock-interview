@@ -2,6 +2,7 @@ import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { UnitConflictError } from "@/lib/interview/unit-conflict";
 import { resolveForOutboundCall } from "@/lib/providers/config";
+import { InterviewError } from "./service";
 import { z } from "zod";
 
 /**
@@ -230,12 +231,21 @@ export async function runRoomTurn(
     }
 
     const activeUnitId = await store.activeUnit(context.sessionId);
-    const candidate = await store.appendCandidate(
-      context.sessionId,
-      parsed.contentText,
-      parsed.idempotencyKey,
-      activeUnitId,
-    );
+    const candidate = await store
+      .appendCandidate(
+        context.sessionId,
+        parsed.contentText,
+        parsed.idempotencyKey,
+        activeUnitId,
+      )
+      .catch((error: unknown) => {
+        // The shared append path rejects a candidate row when completion won
+        // the race; keep the room's stable invalid_state contract.
+        if (error instanceof InterviewError && error.code === "invalid_state") {
+          throw new RoomError("invalid_state", error.message);
+        }
+        throw error;
+      });
     if (!candidate.created) {
       // Replay of an already-submitted key. If the interviewer reply for this
       // candidate message already exists, the turn is finalized: return the

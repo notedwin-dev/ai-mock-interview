@@ -131,6 +131,43 @@ describe("createInterviewFromAgentConfig", () => {
     expect(session).toMatchObject({ sessionId: "new-session" });
   });
 
+  it("replays an existing session before checking category availability", async () => {
+    const existing = {
+      sessionId: "existing-session",
+      invitation: { token: "token", path: "/i/token" },
+    };
+    const findExisting = vi.fn(async () => existing as never);
+    const findCategory = vi.fn(async () => null);
+    const createSession = vi.fn(async () => ({ sessionId: "should-not-exist" }) as never);
+
+    const session = await createInterviewFromAgentConfig(
+      USER_ID,
+      { config, missingFields: [], idempotencyKey: "create-1" },
+      { findExisting, findCategory, createSession },
+    );
+
+    expect(findExisting).toHaveBeenCalledWith(USER_ID, "create-1");
+    expect(findCategory).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(session).toBe(existing);
+  });
+
+  it("checks the category and creates when no session matches the key", async () => {
+    const findExisting = vi.fn(async () => null);
+    const findCategory = vi.fn(async () => ({ categoryId: "category-uuid" }));
+    const createSession = vi.fn(async () => ({ sessionId: "new-session" }) as never);
+
+    await createInterviewFromAgentConfig(
+      USER_ID,
+      { config, missingFields: [], idempotencyKey: "create-2" },
+      { findExisting, findCategory, createSession },
+    );
+
+    expect(findExisting).toHaveBeenCalledWith(USER_ID, "create-2");
+    expect(findCategory).toHaveBeenCalledWith("technical");
+    expect(createSession).toHaveBeenCalledWith(USER_ID, expect.anything(), "create-2");
+  });
+
   it("refuses to create anything while fields are missing", async () => {
     const createSession = vi.fn(async () => ({ sessionId: "should-not-exist" }) as never);
 
