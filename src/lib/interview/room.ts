@@ -1,7 +1,9 @@
-import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib/ai/llm";
+import { generateStructured, type StructuredOptions } from "@/lib/ai/llm";
+import { assertTtsWireSupported, TtsError } from "@/lib/ai/tts";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { UnitConflictError } from "@/lib/interview/unit-conflict";
 import { resolveForOutboundCall } from "@/lib/providers/config";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { InterviewError } from "./service";
 import { z } from "zod";
 
@@ -69,6 +71,13 @@ export interface RoomStore {
    * unanswered candidate message.
    */
   rollbackCandidate(sessionId: string, idempotencyKey: string): Promise<boolean>;
+  /** Appends one finalized Gemini Live message (idempotent on clientId). */
+  appendRealtimeMessage(
+    sessionId: string,
+    speaker: "candidate" | "interviewer",
+    contentText: string,
+    clientId: string,
+  ): Promise<TranscriptEntry>;
 }
 
 export interface RoomTurnInput {
@@ -80,6 +89,8 @@ export interface RoomTurnResult {
   messages: TranscriptEntry[];
   endCall: boolean;
   created: boolean;
+  /** MP3 bytes of the interviewer turn, base64 — null when no voice is configured. */
+  audioBase64: string | null;
 }
 
 export type RoomErrorCode =
@@ -112,13 +123,20 @@ export const roomLlmOutputSchema = z
   .strict();
 export type RoomLlmOutput = z.infer<typeof roomLlmOutputSchema>;
 
+/** Voice is opt-in at the route boundary: no TTS config means no audio, not a failure. */
+export interface RoomTtsDeps {
+  resolveRoute: (userId: string) => Promise<ProviderRoute | null>;
+  synthesize: (route: ProviderRoute, text: string) => Promise<Uint8Array>;
+}
+
 export interface RoomDeps {
   store?: RoomStore;
-  resolveRoute?: (userId: string) => Promise<LlmRoute>;
+  resolveRoute?: (userId: string) => Promise<ProviderRoute>;
   generate?: (
-    route: LlmRoute,
+    route: ProviderRoute,
     options: StructuredOptions<RoomLlmOutput>,
   ) => Promise<RoomLlmOutput>;
+  tts?: RoomTtsDeps;
 }
 
 export const MAX_PRIMARY_QUESTIONS = 6;
@@ -164,6 +182,27 @@ function roomInstructions(context: RoomContext, primaryCount: number): string {
   ].join(" ");
 }
 
+/**
+ * Session instructions for the native realtime (Gemini Live) interviewer
+ * (FR-INTERVIEW-003, TT-9). The live model must be configured exactly like
+ * the typed-path interviewer: same role, same context, same question budget.
+ * The SDK delivers the config twice — baked into the server-minted client
+ * secret and sent as a `session-update` by the browser (both paths verified
+ * in the AI SDK source) — so this one builder is the single source of truth
+ * for what the live interviewer is told. The turn-schema vocabulary
+ * (primary_question/follow_up_question/endCall) is typed-path specific and
+ * deliberately absent here.
+ */
+export function buildLiveInterviewInstructions(context: RoomContext): string {
+  return [
+    "You are the AIMIS AI interviewer conducting a live voice mock interview.",
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    "This is a mock interview: interview the candidate about the target role, not a real hiring decision.",
+    "Ask short, focused questions one at a time and never invent facts about the candidate.",
+    `Ask at most ${MAX_PRIMARY_QUESTIONS} main questions in total. Close the interview briefly once you have asked them.`,
+  ].join(" ");
+}
+
 /** Runs one candidate turn and the interviewer's response, atomically in order. */
 export async function runRoomTurn(
   token: string,
@@ -201,7 +240,12 @@ export async function runRoomTurn(
       parsed.idempotencyKey &&
       (await store.findCandidateByKey(context.sessionId, parsed.idempotencyKey))
     ) {
-      return { messages: await store.messages(context.sessionId), endCall: true, created: false };
+      return {
+        messages: await store.messages(context.sessionId),
+        endCall: true,
+        created: false,
+        audioBase64: null,
+      };
     }
     throw new RoomError("invalid_state", "This interview is not accepting turns.");
   }
@@ -222,6 +266,18 @@ export async function runRoomTurn(
     );
   }
 
+  // Voice resolution and wire pre-flight happen BEFORE any write
+  // (fail closed, FR-PROVIDER-006): when the configured voice provider has
+  // no implemented wire, the turn is rejected with a typed error — nothing
+  // is persisted, so the candidate loses nothing. A MISSING tts
+  // configuration is not an error: the turn runs text-only (FR-INTERVIEW-003
+  // — audio is an enhancement, never a blocker).
+  let ttsRoute: ProviderRoute | null = null;
+  if (deps.tts) {
+    ttsRoute = await deps.tts.resolveRoute(context.userId);
+    if (ttsRoute) assertTtsWireSupported(ttsRoute);
+  }
+
   try {
     // Atomic admission BEFORE the candidate row is inserted: a concurrent
     // completion must win (no candidate row), and an already-active interview
@@ -230,7 +286,12 @@ export async function runRoomTurn(
       const admitted = await store.activate(context.sessionId);
       if (admitted === "rejected") {
         if (existing) {
-          return { messages: await store.messages(context.sessionId), endCall: true, created: false };
+          return {
+        messages: await store.messages(context.sessionId),
+        endCall: true,
+        created: false,
+        audioBase64: null,
+      };
         }
         throw new RoomError("invalid_state", "This interview is not accepting turns.");
       }
@@ -272,6 +333,7 @@ export async function runRoomTurn(
           messages: await store.messages(context.sessionId),
           endCall: closing,
           created: false,
+          audioBase64: null,
         };
       }
     }
@@ -282,6 +344,7 @@ export async function runRoomTurn(
       parsed,
       activeUnitId,
       created: candidate.created,
+      ttsRoute,
     });
   } finally {
     if (parsed.idempotencyKey && claim !== null) {
@@ -304,9 +367,10 @@ async function completeTurn(
     parsed: RoomTurnInput;
     activeUnitId: string | null;
     created: boolean;
+    ttsRoute: ProviderRoute | null;
   },
 ): Promise<RoomTurnResult> {
-  const { store, deps, parsed, activeUnitId, created } = parts;
+  const { store, deps, parsed, activeUnitId, created, ttsRoute } = parts;
   const history = await store.messages(context.sessionId);
   const primaryCount = history.filter((message) => message.messageKind === "primary_question").length;
   const route = await (deps.resolveRoute ?? (async (userId: string) => {
@@ -317,7 +381,7 @@ async function completeTurn(
       baseUrl: resolved.baseUrl,
       modelId: resolved.modelId,
       apiKey: resolved.apiKey,
-    };
+    } satisfies ProviderRoute;
   }))(context.userId);
   const generate = deps.generate ?? generateStructured;
   const output = roomLlmOutputSchema.parse(
@@ -379,10 +443,24 @@ async function completeTurn(
     throw error;
   }
 
+  // Voice is an enhancement on top of the persisted transcript: a failing
+  // TTS call never blocks the conversation (FR-INTERVIEW-003). The provider
+  // wire was pre-checked above; only a transport/provider failure is caught.
+  let audioBase64: string | null = null;
+  if (deps.tts && ttsRoute) {
+    try {
+      const audio = await deps.tts.synthesize(ttsRoute, output.interviewerText);
+      audioBase64 = Buffer.from(audio).toString("base64");
+    } catch (error) {
+      if (error instanceof TtsError && error.code === "unsupported_provider") throw error;
+      audioBase64 = null;
+    }
+  }
+
   // The sixth question completes the interview once ANSWERED: when the model
   // asks primary #6 and endCall arrives with that answer's turn, both the
   // reply and the completion land atomically here.
   const endCall = output.endCall || primaryCount + 1 > MAX_PRIMARY_QUESTIONS;
   if (endCall) await store.complete(context.sessionId);
-  return { messages: await store.messages(context.sessionId), endCall, created };
+  return { messages: await store.messages(context.sessionId), endCall, created, audioBase64 };
 }

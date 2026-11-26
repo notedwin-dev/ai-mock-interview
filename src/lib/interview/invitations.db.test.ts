@@ -121,6 +121,19 @@ d("invitation links (TT-21)", () => {
     await expect(revokeInvitation(otherId, session.sessionId)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("persists realtime messages in approved kinds and is idempotent on client ids", async () => {
+    const session = await makeSession();
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
+    const second = await store.appendRealtimeMessage(session.sessionId, "interviewer", "tell me more", "evt-i");
+    const replay = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
+
+    expect(first.messageKind).toBe("candidate_response");
+    expect(second.messageKind).toBe("primary_question"); // approved message_kind domain
+    expect(replay.sequenceNumber).toBe(first.sequenceNumber);
+    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
+  });
+
   it("runs a token-scoped turn against the real store: transcript, unit and active state", async () => {
     const session = await makeSession();
     const invitation = await issueInvitation(ownerId, session.sessionId);

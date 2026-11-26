@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { LlmRoute } from "@/lib/ai/llm";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import {
   agentTurnInputSchema,
   createInterviewFromAgentConfig,
@@ -14,7 +14,7 @@ import {
  * from the seeded reference data and evaluation design.
  */
 const USER_ID = "33333333-3333-4333-8333-333333333333";
-const route: LlmRoute = {
+const route: ProviderRoute = {
   providerName: "openai",
   providerType: "preset",
   baseUrl: "https://api.example.com/v1",
@@ -31,7 +31,7 @@ const llmOutput: AgentLlmOutput = {
 describe("runAgentTurn", () => {
   it("uses the configured LLM route and returns the agent's validated conversational reply", async () => {
     const resolveRoute = vi.fn(async () => route);
-    const generate = vi.fn(async (_route: LlmRoute, options: { instructions: string; prompt: string }) => {
+    const generate = vi.fn(async (_route: ProviderRoute, options: { instructions: string; prompt: string }) => {
       expect(options.instructions).toContain("purpose");
       expect(options.instructions).toContain("job description");
       expect(options.instructions).toContain("strictness");

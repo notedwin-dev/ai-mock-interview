@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RoomError, runRoomTurn, type RoomContext, type RoomStore, type TranscriptEntry } from "./room";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { InterviewError } from "./service";
 import { UnitConflictError } from "./unit-conflict";
 
@@ -80,11 +81,24 @@ function fakeStore(initial: RoomContext = context) {
       if (index >= 0) messages.splice(index, 1);
       return true;
     },
+    // Minimal stand-in: the DB-backed default store has its own tests
+    // (invitations.db.test.ts) covering the realtime unit-joining rules.
+    async appendRealtimeMessage(_sessionId, speaker, contentText) {
+      const entry: TranscriptEntry = {
+        sequenceNumber: ++seq,
+        speakerType: speaker,
+        messageKind: speaker === "candidate" ? "candidate_response" : "primary_question",
+        contentText,
+        assessmentUnitId: null,
+      };
+      messages.push(entry);
+      return entry;
+    },
   };
   return { store, messages, units, state: () => current };
 }
 
-const llmRoute = {
+const llmRoute: ProviderRoute = {
   providerName: "openai", providerType: "preset", baseUrl: "https://x/v1", modelId: "m", apiKey: "k",
 };
 
@@ -421,6 +435,30 @@ describe("runRoomTurn", () => {
     await expect(
       runRoomTurn(TOKEN, { contentText: "late", idempotencyKey: "late-turn" }, deps),
     ).rejects.toMatchObject({ code: "invalid_state" });
+  });
+
+  it("attaches interviewer audio and never lets a voice failure break the turn", async () => {
+    const { store } = fakeStore();
+    const base = {
+      store,
+      resolveRoute: async () => llmRoute,
+      generate: async () => ({ interviewerText: "Tell me more.", messageKind: "follow_up_question" as const, endCall: false }),
+    };
+    const ttsRoute: ProviderRoute = { providerName: "fish-audio", providerType: "preset", baseUrl: "https://api.fish.audio", modelId: "s2.1-pro-free", apiKey: "k" };
+
+    const withAudio = await runRoomTurn(TOKEN, { contentText: "my answer" }, {
+      ...base,
+      tts: { resolveRoute: async () => ttsRoute, synthesize: async () => new Uint8Array([1, 2, 3]) },
+    });
+    expect(withAudio.audioBase64).toBe(Buffer.from([1, 2, 3]).toString("base64"));
+    expect(withAudio.messages).toHaveLength(2);
+
+    const failedVoice = await runRoomTurn(TOKEN, { contentText: "another answer" }, {
+      ...base,
+      tts: { resolveRoute: async () => ttsRoute, synthesize: async () => { throw new Error("voice down"); } },
+    });
+    expect(failedVoice.audioBase64).toBeNull();
+    expect(failedVoice.messages).toHaveLength(4); // turn text still persisted
   });
 
   it("rejects unknown links and interviews that are not in a joinable state", async () => {

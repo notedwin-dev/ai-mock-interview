@@ -1,8 +1,11 @@
 import { jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
+import { synthesizeSpeech } from "@/lib/ai/tts";
+import { resolveForOutboundCall } from "@/lib/providers/config";
 import { resolveInvitation } from "@/lib/interview/invitations";
 import { RoomError, runRoomTurn } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
+import { TtsError } from "@/lib/ai/tts";
 
 /**
  * Token-scoped room transcript (FR-INTERVIEW-004/008): the link is the only
@@ -18,6 +21,11 @@ function mapError(error: unknown): Response {
   }
   if (error instanceof LlmError) {
     return llmErrorProviderResponse(error);
+  }
+  if (error instanceof TtsError && error.code === "unsupported_provider") {
+    // A configuration problem (voice provider without an implemented wire),
+    // not a provider outage: typed 409 with the actionable message.
+    return jsonError(409, "tts_provider_unsupported", error.message);
   }
   return jsonError(500, "internal_error", "Something went wrong. Try again.");
 }
@@ -51,7 +59,22 @@ export async function POST(
     } catch {
       return jsonError(400, "invalid_input", "A valid interview turn is required.");
     }
-    return Response.json(await runRoomTurn(token, body));
+    return Response.json(
+      await runRoomTurn(token, body, {
+        // The room engine receives the speaker route only here, at the server
+        // boundary. A missing TTS configuration simply means text-only turns.
+        tts: {
+          resolveRoute: async (userId: string) => {
+            try {
+              return await resolveForOutboundCall(userId, "tts");
+            } catch {
+              return null;
+            }
+          },
+          synthesize: synthesizeSpeech,
+        },
+      }),
+    );
   } catch (error) {
     return mapError(error);
   }

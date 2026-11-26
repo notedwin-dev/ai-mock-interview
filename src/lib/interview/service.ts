@@ -664,6 +664,79 @@ export function createRoomStore(): RoomStore {
       };
     },
 
+    /**
+     * Appends one finalized realtime (Gemini Live) message, idempotent on the
+     * provider's client id. Kept here because `room-store.ts` now re-exports
+     * this store; the unit-assignment rules mirror the reviewed room engine.
+     */
+    async appendRealtimeMessage(sessionId, speaker, contentText, clientId) {
+      const existing = await db.conversationMessage.findFirst({
+        where: { sessionId, idempotencyKey: clientId },
+      });
+      if (existing) {
+        return {
+          sequenceNumber: existing.sequenceNumber,
+          speakerType: existing.speakerType as "candidate" | "interviewer",
+          messageKind: existing.messageKind as
+            | "candidate_response"
+            | "primary_question"
+            | "follow_up_question",
+          contentText: existing.contentText,
+          assessmentUnitId: existing.assessmentUnitId,
+        };
+      }
+
+      const openUnit = await db.interviewAssessmentUnit.findFirst({
+        where: { sessionId, status: "open" },
+        orderBy: { unitNumber: "desc" },
+        select: { assessmentUnitId: true },
+      });
+      let messageKind: "candidate_response" | "primary_question" | "follow_up_question";
+      let assessmentUnitId: string | null = openUnit?.assessmentUnitId ?? null;
+      if (speaker === "candidate") {
+        messageKind = "candidate_response";
+      } else if (openUnit) {
+        messageKind = "follow_up_question";
+      } else {
+        messageKind = "primary_question";
+        const maxUnit = await db.interviewAssessmentUnit.aggregate({
+          where: { sessionId },
+          _max: { unitNumber: true },
+        });
+        const unit = await db.interviewAssessmentUnit.create({
+          data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
+          select: { assessmentUnitId: true },
+        });
+        assessmentUnitId = unit.assessmentUnitId;
+      }
+
+      const aggregate = await db.conversationMessage.aggregate({
+        where: { sessionId },
+        _max: { sequenceNumber: true },
+      });
+      const message = await db.conversationMessage.create({
+        data: {
+          sessionId,
+          sequenceNumber: (aggregate._max.sequenceNumber ?? 0) + 1,
+          speakerType: speaker,
+          messageKind,
+          contentText,
+          idempotencyKey: clientId,
+          assessmentUnitId,
+        },
+      });
+      return {
+        sequenceNumber: message.sequenceNumber,
+        speakerType: message.speakerType as "candidate" | "interviewer",
+        messageKind: message.messageKind as
+          | "candidate_response"
+          | "primary_question"
+          | "follow_up_question",
+        contentText: message.contentText,
+        assessmentUnitId: message.assessmentUnitId,
+      };
+    },
+
     async activeUnit(sessionId) {
       const unit = await db.interviewAssessmentUnit.findFirst({
         where: { sessionId, status: "open" },
