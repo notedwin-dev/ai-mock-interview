@@ -4,6 +4,14 @@ import { listActiveInterviewCategories } from "@/lib/interview/service";
 import { listProviderConfigurations } from "@/lib/providers/config";
 import { SetupForm } from "@/components/interview/SetupForm";
 
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
+export const instant = false;
+
 /**
  * Interview setup (FR-SETUP-001..005, FR-INTERVIEW-001), reference-design-adapted:
  * one centred card, plain question-style labels, select controls where a
@@ -25,7 +33,7 @@ export default async function Page() {
       <div className="w-full max-w-xl">
         <Link
           href="/dashboard"
-          className="text-sm text-ink-soft transition-colors hover:text-ink"
+          className="back-link"
         >
           ← Back to dashboard
         </Link>

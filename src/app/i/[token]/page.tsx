@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { InvitationConfirmation } from "@/components/interview/InvitationConfirmation";
 import { resolveInvitation } from "@/lib/interview/invitations";
 
+// Token lookup is request-specific; render per request so the stream settles.
 export const instant = false;
 
 /**

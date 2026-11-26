@@ -2,6 +2,14 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
 
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
+export const instant = false;
+
 /**
  * Profile page (round 5): identity now, with provider management moved to the
  * dedicated AI configuration experience (/dashboard/configuration) — the
@@ -51,11 +59,11 @@ export default function ProfilePage() {
     <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-ink-soft transition-colors hover:text-ink"
+        className="back-link"
       >
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
+      <h1 className="page-title">
         Profile
       </h1>
       <Suspense fallback={<p className="mt-1 text-sm text-ink-muted">Loading…</p>}>

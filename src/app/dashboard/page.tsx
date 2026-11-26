@@ -11,6 +11,14 @@ import {
 } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
 
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
+export const instant = false;
+
 /**
  * Candidate dashboard (TT-6, reference-design-adapted): a hero banner with the
  * primary action over a signal-chain strip, then "Your past interviews" as a

@@ -34,6 +34,22 @@
   --font-display: var(--font-display);
 }
 
+/*
+ * Component classes for the dashboard page templates (AGENTS.md §10: repeated
+ * class sets live here via @apply, not as duplicated strings).
+ */
+@layer components {
+  .back-link {
+    @apply text-sm text-ink-soft transition-colors hover:text-ink;
+  }
+  .page-title {
+    @apply mt-4 font-display text-2xl font-semibold tracking-tight text-ink;
+  }
+  .page-lede {
+    @apply mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted;
+  }
+}
+
 html {
   background: var(--app);
 }

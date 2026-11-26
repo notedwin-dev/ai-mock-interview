@@ -12,6 +12,13 @@ import { TopBar } from "@/components/dashboard/TopBar";
  * validation via the blocking-route pattern for auth-gated layouts: the page
  * renders on every request and the navigation blocks until the guard
  * completes (docs: messages/blocking-prerender-dynamic → allow-blocking-route).
+ *
+ * The per-page `instant = false` exports in the dashboard tree are retained
+ * alongside this one: an ancestor's `false` only exempts navigations into the
+ * segment from outside — navigations between sibling segments below it are
+ * still validated, and each of those pages blocks on the same guard
+ * (instant.md: "Navigations between sibling segments below are still
+ * validated").
  */
 export const instant = false;
 

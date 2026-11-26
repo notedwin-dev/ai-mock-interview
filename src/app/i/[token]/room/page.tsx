@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { InterviewRoom } from "@/components/interview/InterviewRoom";
 import { resolveInvitation } from "@/lib/interview/invitations";
 
+// Token lookup is request-specific; render per request so the stream settles.
 export const instant = false;
 
 /** Live interview room entered only through a valid invitation link. */

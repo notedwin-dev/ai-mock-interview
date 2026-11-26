@@ -7,6 +7,14 @@ import {
 } from "@/lib/providers/config";
 import { ProviderConfigurator } from "@/components/dashboard/ProviderConfigurator";
 
+// Opt out of instant-navigation validation so this segment is allowed to
+// block on the server while the auth guard (connection()-based) resolves —
+// the documented auth migration pattern (instant.md "Disabling instant";
+// authentication-with-cache-components.md "Migrating an existing app").
+// Sibling navigation under the dashboard layout is still validated, so each
+// page states its own opt-out.
+export const instant = false;
+
 /**
  * AI configuration page (FR-PROVIDER-001..009; ADR-028/029/030; owner mockup
  * + directive 2026-11-16): the dedicated configuration experience mirroring
@@ -46,14 +54,14 @@ export default function ConfigurationPage() {
     <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-8 lg:py-12">
       <Link
         href="/dashboard"
-        className="text-sm text-ink-soft transition-colors hover:text-ink"
+        className="back-link"
       >
         ← Back to dashboard
       </Link>
-      <h1 className="mt-4 font-display text-2xl font-semibold tracking-tight text-ink">
+      <h1 className="page-title">
         AI configuration
       </h1>
-      <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted">
+      <p className="page-lede">
         Choose how your interviews run: a pre-configured realtime agent that
         handles voice, understanding and speech natively — or a custom pipeline
         where you pick the provider, API key and exact model for each

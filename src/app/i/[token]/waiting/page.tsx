@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { WaitingRoom } from "@/components/interview/WaitingRoom";
 import { resolveInvitation } from "@/lib/interview/invitations";
 
+// Token lookup is request-specific; render per request so the stream settles.
 export const instant = false;
 
 /** Token-scoped waiting room (FR-SETUP-007/008, TT-8 room re-layer). */
