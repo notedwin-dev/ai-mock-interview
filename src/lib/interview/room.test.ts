@@ -69,6 +69,7 @@ function fakeStore(initial: RoomContext = context) {
     async activeUnit() { return units.find((u) => u.status === "open")?.id ?? null; },
     async openUnit() { const id = `unit-${++unitSeq}`; units.push({ id, status: "open" }); return id; },
     async closeUnit(id) { const unit = units.find((u) => u.id === id); if (unit) unit.status = "closed"; },
+    async rollbackUnit(id) { const index = units.findIndex((u) => u.id === id); if (index >= 0) units.splice(index, 1); },
     async complete() { current.status = "completed"; },
     async rollbackCandidate(sessionId, idempotencyKey) {
       const key = `${sessionId}:${idempotencyKey}`;
@@ -219,6 +220,161 @@ describe("runRoomTurn", () => {
     // The persisted candidate message was rolled back — nothing is left
     // unanswered in the transcript.
     expect(messages.filter((m) => m.speakerType === "candidate")).toHaveLength(0);
+  });
+
+  it("asks the sixth primary question and completes once it is answered", async () => {
+    const { store, messages, units, state } = fakeStore();
+    let call = 0;
+    const generate = async () => {
+      call += 1;
+      return call <= 6
+        ? { interviewerText: `Q${call}?`, messageKind: "primary_question" as const, endCall: false }
+        : { interviewerText: "Thanks — that's everything.", messageKind: "follow_up_question" as const, endCall: false };
+    };
+    const deps = { store, resolveRoute: async () => llmRoute, generate };
+
+    for (let turn = 0; turn < 6; turn++) {
+      const result = await runRoomTurn(
+        TOKEN,
+        { contentText: `answer ${turn}`, idempotencyKey: `turn-${turn}` },
+        deps,
+      );
+      expect(result.endCall).toBe(false);
+    }
+    // Six primary questions, each in its own unit, and still open.
+    expect(messages.filter((m) => m.messageKind === "primary_question")).toHaveLength(6);
+    expect(units).toHaveLength(6);
+    expect(state().status).toBe("active");
+
+    const closing = await runRoomTurn(
+      TOKEN,
+      { contentText: "answer 6", idempotencyKey: "turn-6" },
+      deps,
+    );
+    expect(closing.endCall).toBe(true);
+    expect(state().status).toBe("completed");
+  });
+
+  it("rejects a non-closing seventh primary question and rolls the answer back", async () => {
+    const { store, messages } = fakeStore();
+    let call = 0;
+    const generate = async () => {
+      call += 1;
+      return {
+        interviewerText: `Q${call}?`,
+        messageKind: "primary_question" as const,
+        endCall: false,
+      };
+    };
+    const deps = { store, resolveRoute: async () => llmRoute, generate };
+
+    for (let turn = 0; turn < 6; turn++) {
+      await runRoomTurn(
+        TOKEN,
+        { contentText: `answer ${turn}`, idempotencyKey: `turn-${turn}` },
+        deps,
+      );
+    }
+
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "answer 6", idempotencyKey: "turn-6" }, deps),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    // The rejected answer is not left dangling in the transcript.
+    expect(messages.filter((m) => m.speakerType === "candidate")).toHaveLength(6);
+    expect(messages.filter((m) => m.messageKind === "primary_question")).toHaveLength(6);
+  });
+
+  it("resumes a pending turn after the reply fails and removes its orphaned unit", async () => {
+    const { store, messages, units } = fakeStore();
+    let failAppend = true;
+    const appendInterviewer = store.appendInterviewer;
+    const deps = {
+      store: {
+        ...store,
+        appendInterviewer: async (...args: Parameters<RoomStore["appendInterviewer"]>) => {
+          if (failAppend) {
+            failAppend = false;
+            throw new Error("reply write failed");
+          }
+          return appendInterviewer(...args);
+        },
+      },
+      resolveRoute: async () => llmRoute,
+      generate: async () => ({
+        interviewerText: "Q1?",
+        messageKind: "primary_question" as const,
+        endCall: false,
+      }),
+    };
+
+    await expect(
+      runRoomTurn(TOKEN, { contentText: "hello", idempotencyKey: "turn-1" }, deps),
+    ).rejects.toThrow("reply write failed");
+    // The candidate message is kept for the retry, but the empty unit is not.
+    expect(messages.filter((m) => m.speakerType === "candidate")).toHaveLength(1);
+    expect(units).toHaveLength(0);
+
+    const retry = await runRoomTurn(
+      TOKEN,
+      { contentText: "hello", idempotencyKey: "turn-1" },
+      deps,
+    );
+    expect(retry.created).toBe(false);
+    expect(retry.messages.map((m) => `${m.speakerType}:${m.messageKind}`)).toEqual([
+      "candidate:candidate_response",
+      "interviewer:primary_question",
+    ]);
+    expect(units).toHaveLength(1);
+  });
+
+  it("re-asserts completion when replaying a closing turn whose completion failed", async () => {
+    const { store } = fakeStore({ ...context, status: "active" });
+    const candidate: TranscriptEntry = {
+      sequenceNumber: 7,
+      speakerType: "candidate",
+      messageKind: "candidate_response",
+      contentText: "answer",
+      assessmentUnitId: "unit-6",
+    };
+    const history: TranscriptEntry[] = [
+      ...Array.from({ length: 6 }, (_, index) => ({
+        sequenceNumber: index + 1,
+        speakerType: "interviewer",
+        messageKind: "primary_question",
+        contentText: `Q${index + 1}?`,
+        assessmentUnitId: `unit-${index + 1}`,
+      })),
+      candidate,
+      {
+        sequenceNumber: 8,
+        speakerType: "interviewer",
+        messageKind: "follow_up_question",
+        contentText: "Thanks — that's everything.",
+        assessmentUnitId: "unit-6",
+      },
+    ];
+    const complete = vi.fn(store.complete);
+    const deps = {
+      store: {
+        ...store,
+        messages: async () => history,
+        findCandidateByKey: async () => candidate,
+        appendCandidate: async () => ({ entry: candidate, created: false }),
+        complete,
+      },
+      resolveRoute: async () => llmRoute,
+      generate: async () => {
+        throw new Error("must not generate for a finalized reply");
+      },
+    };
+
+    const replay = await runRoomTurn(
+      TOKEN,
+      { contentText: "answer", idempotencyKey: "turn-6" },
+      deps,
+    );
+    expect(replay).toMatchObject({ endCall: true, created: false });
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a same-key retry while request A is still generating", async () => {

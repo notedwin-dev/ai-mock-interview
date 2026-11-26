@@ -55,6 +55,12 @@ export interface RoomStore {
   activeUnit(sessionId: string): Promise<string | null>;
   openUnit(sessionId: string, unitNumber: number): Promise<string>;
   closeUnit(unitId: string): Promise<void>;
+  /**
+   * Deletes a unit opened for a primary question whose reply never persisted,
+   * so the retry can re-open the same unit number instead of colliding with an
+   * empty orphaned unit.
+   */
+  rollbackUnit(unitId: string): Promise<void>;
   complete(sessionId: string): Promise<void>;
   /**
    * Deletes the candidate message identified by (session, idempotency key)
@@ -255,7 +261,18 @@ export async function runRoomTurn(
       const index = history.findIndex((m) => m.sequenceNumber === candidate.entry.sequenceNumber);
       const next = index >= 0 ? history[index + 1] : undefined;
       if (next && next.speakerType === "interviewer") {
-        return { messages: history, endCall: false, created: false };
+        // The reply landed. Re-assert the completion write in case it failed
+        // after the reply persisted: completion is conditional and idempotent,
+        // and a closing turn must not replay as an open one.
+        const closing =
+          history.filter((m) => m.messageKind === "primary_question").length >=
+          MAX_PRIMARY_QUESTIONS;
+        if (closing) await store.complete(context.sessionId);
+        return {
+          messages: await store.messages(context.sessionId),
+          endCall: closing,
+          created: false,
+        };
       }
     }
 
@@ -314,19 +331,26 @@ async function completeTurn(
   );
 
   let unitId = activeUnitId;
+  let openedUnitId: string | null = null;
   if (output.messageKind === "primary_question") {
     // A completed interview must not gain a seventh primary question: the
     // sixth question is askable and answerable, and the NEXT primary closes
     // the interview (the completion predicate below mirrors it).
     if (primaryCount >= MAX_PRIMARY_QUESTIONS && !output.endCall) {
+      // Reject the turn without leaving an unanswered candidate row behind;
+      // the candidate can resubmit and get a proper closing response.
+      if (parsed.idempotencyKey) {
+        await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
+      }
       throw new RoomError(
         "invalid_state",
-        "The interviewer produced an unexpected follow-up question after the final question.",
+        "The interviewer produced an unexpected primary question after the final question.",
       );
     }
     if (unitId) await store.closeUnit(unitId);
     try {
       unitId = await store.openUnit(context.sessionId, primaryCount + 1);
+      openedUnitId = unitId;
     } catch (error) {
       // Only a unit-number collision is a concurrency conflict. Other failures
       // (connection, timeout, constraint) propagate untouched and must NOT roll
@@ -340,12 +364,20 @@ async function completeTurn(
       );
     }
   }
-  await store.appendInterviewer(
-    context.sessionId,
-    output.interviewerText,
-    output.messageKind,
-    unitId,
-  );
+  try {
+    await store.appendInterviewer(
+      context.sessionId,
+      output.interviewerText,
+      output.messageKind,
+      unitId,
+    );
+  } catch (error) {
+    // The reply never persisted: drop the unit opened for it so the retry can
+    // re-open the same unit number instead of colliding with an empty unit.
+    // Cleanup is best-effort; the original failure is what the caller sees.
+    if (openedUnitId) await store.rollbackUnit(openedUnitId).catch(() => {});
+    throw error;
+  }
 
   // The sixth question completes the interview once ANSWERED: when the model
   // asks primary #6 and endCall arrives with that answer's turn, both the

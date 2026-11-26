@@ -701,6 +701,10 @@ export function createRoomStore(): RoomStore {
       });
     },
 
+    async rollbackUnit(unitId) {
+      await db.interviewAssessmentUnit.delete({ where: { assessmentUnitId: unitId } });
+    },
+
     async complete(sessionId) {
       // Conditional write: only an active interview completes, and the row lock
       // this update takes is ordered against the candidate-insert transaction,

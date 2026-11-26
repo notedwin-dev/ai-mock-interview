@@ -16,6 +16,7 @@ import {
   startInterviewSession,
   submitTypedTurn,
 } from "./service";
+import { UnitConflictError } from "./unit-conflict";
 
 /**
  * Integration tests for the typed vertical slice (backlog slice 7) against
@@ -252,6 +253,19 @@ d("interview session service (integration)", () => {
     const row = await db.interviewSession.findUniqueOrThrow({ where: { sessionId } });
     expect(row.status).toBe("completed");
     expect(await db.conversationMessage.count({ where: { sessionId } })).toBe(1);
+  });
+
+  it("rejects a second open assessment unit for the same session", async () => {
+    const userId = await createUser();
+    const { sessionId } = await createStartedSession(userId);
+    const store = createRoomStore();
+
+    await store.openUnit(sessionId, 1);
+    // Different unit number, so only the partial unique index can reject this.
+    await expect(store.openUnit(sessionId, 2)).rejects.toBeInstanceOf(UnitConflictError);
+    expect(
+      await db.interviewAssessmentUnit.count({ where: { sessionId, status: "open" } }),
+    ).toBe(1);
   });
 
   it("runs the lifecycle scheduled → active → completed with timestamps", async () => {
