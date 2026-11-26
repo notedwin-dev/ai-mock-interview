@@ -12,6 +12,8 @@
  *   (multipart `model` + `file`, Bearer key, `{text}` response).
  * - `elevenlabs` preset / api.elevenlabs.io base → Scribe `/v1/speech-to-text`
  *   (multipart `model_id` + `file`, `xi-api-key` header, `{text}` response).
+ * - `fish-audio` preset / fish.audio base       → native `/v1/asr` (Bearer key
+ *   + exact `model` header, multipart `audio`, `{text}` response).
  * - every other target                         → OpenAI-compatible
  *   `/audio/transcriptions`, matching the wire the probe already verified for
  *   custom OpenAI-compatible rows (docs/FEASIBILITY.md, TT-20). Custom rows
@@ -54,7 +56,7 @@ export interface AsrDeps {
   fetchImpl?: typeof fetch;
 }
 
-type AsrWire = "google" | "openai" | "elevenlabs";
+type AsrWire = "google" | "openai" | "elevenlabs" | "fish";
 
 interface InteractionResponse {
   output_text?: string;
@@ -66,6 +68,7 @@ function wireFor(route: AsrRoute): AsrWire | null {
   if (name === "google") return "google";
   if (name === "openai") return "openai";
   if (name === "elevenlabs") return "elevenlabs";
+  if (name === "fish-audio") return "fish";
   let host: string;
   try {
     host = new URL(route.baseUrl).hostname.toLowerCase();
@@ -75,6 +78,7 @@ function wireFor(route: AsrRoute): AsrWire | null {
   if (host === "generativelanguage.googleapis.com") return "google";
   if (host === "api.openai.com") return "openai";
   if (host === "api.elevenlabs.io") return "elevenlabs";
+  if (host === "fish.audio" || host.endsWith(".fish.audio")) return "fish";
   return null;
 }
 
@@ -134,6 +138,49 @@ async function transcribeMultipart(
   return text;
 }
 
+/**
+ * Fish Audio's native ASR wire (Context7-verified): `POST /v1/asr` with the
+ * key in `Authorization` and the EXACT configured model in the `model`
+ * header — omitting or misspelling it silently serves the wrong model. The
+ * multipart field is `audio` (not OpenAI's `file`/`model` pair). The WSS
+ * realtime variant is probed by probe.ts; the runtime uses this documented
+ * batch endpoint, which works for the catalogue's batch models.
+ */
+async function transcribeFish(
+  fetchImpl: typeof fetch,
+  base: string,
+  route: AsrRoute,
+  audio: Uint8Array,
+  mimeType: string,
+): Promise<string> {
+  const bytes = new Uint8Array(audio.length);
+  bytes.set(audio);
+  const form = new FormData();
+  form.append("audio", new Blob([bytes], { type: mimeType }), "audio");
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/v1/asr`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${route.apiKey}`, model: route.modelId },
+      body: form,
+    });
+  } catch {
+    throw new AsrError("generation_failed", "The configured speech provider could not be reached.");
+  }
+  if (!response.ok) {
+    throw new AsrError("generation_failed", "The configured speech provider could not transcribe this audio.");
+  }
+  let body: { text?: unknown };
+  try {
+    body = (await response.json()) as { text?: unknown };
+  } catch {
+    throw new AsrError("generation_failed", "The configured speech provider returned an invalid response.");
+  }
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text) throw new AsrError("empty_transcript", "No speech was recognised in that recording.");
+  return text;
+}
+
 export async function transcribeAudio(
   route: AsrRoute,
   audio: Uint8Array,
@@ -153,6 +200,10 @@ export async function transcribeAudio(
       "unsupported",
       "This speech-recognition provider is not supported by the runtime yet.",
     );
+  }
+
+  if (wire === "fish") {
+    return transcribeFish(fetchImpl, base, route, audio, mimeType);
   }
 
   if (wire === "elevenlabs") {

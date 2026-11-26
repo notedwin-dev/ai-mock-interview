@@ -1,10 +1,14 @@
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { createRealtimeToken } from "@/lib/interview/realtime-token";
+import {
+  createRealtimeToken,
+  ELEVENLABS_REALTIME_WS_URL,
+} from "@/lib/interview/realtime-token";
 import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } from "./config";
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
 import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
 import { evaluateBaseUrl } from "./ssrf";
+import { encodeMsgpack, probeWebSocketSession, type ProbeSocketFactory } from "./stream-probe";
 import {
   ANTHROPIC_API_VERSION,
   ANTHROPIC_VERSION_HEADER_NAME,
@@ -48,16 +52,30 @@ import {
  *   /v1/speech-to-text`, both with `xi-api-key`; it has no model-list
  *   endpoint.
  *
- * Native realtime sessions (the `realtime` capability: Gemini Live, OpenAI
- * Realtime) negotiate the provider's own protocol and are verified through
- * the realtime session-token path above — a non-Gemini realtime
- * configuration is reported skipped until its native runtime lands. Model-list
- * discovery (FR-PROVIDER-009) lives in the same module and shares the wire
- * handling: presets without an override use `GET {base}/models` (Bearer);
- * registry overrides (Google: `GET /v1beta/models` with `x-goog-api-key`)
- * are honoured by both stored-row and candidate discovery. DNS-rebinding/redirect
- * pinning at connect time lands with the M2 adapter transport (see ssrf.ts
- * notes).
+ * Streaming-capable operations (owner directive 2026-11-26) are verified over
+ * their native WebSocket wire and the socket is always closed when the probe
+ * finishes (see stream-probe.ts):
+ * - `realtime`: the minted short-lived session is opened over WSS before the
+ *   capability is reported validated — a token alone proves only the HTTP
+ *   setup call.
+ * - Fish Audio live TTS: `wss://api.fish.audio/v1/tts/live` with the exact
+ *   `model` connection header and a MessagePack `start` frame.
+ * - Fish Audio realtime ASR: `wss://api.fish.audio/v1/asr/realtime` with a
+ *   MessagePack `config` frame; success is the `session_started` frame.
+ * For both Fish capabilities WebSocket is the default; if the socket path
+ * fails, the probe falls back to the documented native HTTP wire and says so
+ * in the result detail (never a silent transport switch).
+ * - Gemini Live transcription (`*-transcribe-live`): the BidiGenerateContent
+ *   WSS endpoint, with a JSON `setup` frame carrying the exact model.
+ * Batch TTS/ASR operations with no documented WebSocket wire keep their HTTP
+ * probe; inventing an endpoint would verify nothing (ADR-029).
+ *
+ * Model-list discovery (FR-PROVIDER-009) lives in the same module and shares
+ * the wire handling: presets without an override use `GET {base}/models`
+ * (Bearer); registry overrides (Google: `GET /v1beta/models` with
+ * `x-goog-api-key`) are honoured by both stored-row and candidate discovery.
+ * DNS-rebinding/redirect pinning at connect time lands with the M2 adapter
+ * transport (see ssrf.ts notes).
  *
  * Network access and row loading are injectable so tests stay hermetic; the
  * default implementation is the database + global fetch.
@@ -109,6 +127,8 @@ export interface ProbeDeps {
     modelId: string;
     apiKey: string;
   }) => Promise<{ token: string; url: string }>;
+  /** Injectable WebSocket constructor for streaming probes (hermetic tests). */
+  socketFactory?: ProbeSocketFactory;
   /**
    * Persists the post-probe credential status (default: the database).
    * `disable` is true exactly when the probe failed — a failed test must
@@ -296,6 +316,22 @@ const PROBEABLE_PRESETS = new Set<string>([
 const FISH_AUDIO_URL_RE = /^https?:\/\/(?:[^/]*\.)?fish\.audio(?:[/:]|$)/i;
 
 /**
+ * Verified native streaming endpoints (owner directive 2026-11-26: probe
+ * streaming-capable models over WebSocket, then close the socket).
+ * - Fish Audio live TTS: official API reference `/api-reference/endpoint/
+ *   websocket/tts-live` (fetched 2026-11-26).
+ * - Google Gemini Live: the exact BidiGenerateContent endpoint the app's
+ *   streaming ASR adapter uses (`src/lib/ai/live-transcribe.ts`).
+ * - ElevenLabs Realtime: `ELEVENLABS_REALTIME_WS_URL` from the token minter.
+ * Batch TTS/ASR operations that have no documented WebSocket wire keep their
+ * HTTP probe — an invented endpoint would verify nothing (ADR-029).
+ */
+const FISH_AUDIO_WS_TTS_PATH = "/v1/tts/live";
+const FISH_AUDIO_WS_ASR_PATH = "/v1/asr/realtime";
+const GOOGLE_LIVE_WS_URL =
+  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService/BidiGenerateContent";
+
+/**
  * Runs the probe for one configuration and returns per-capability results.
  * Nothing here logs or persists credentials; the stored credential status is
  * updated only through the caller-facing status write-back (slice continues).
@@ -307,6 +343,7 @@ export async function probeProviderConfiguration(
 ): Promise<ConfigurationProbeResult> {
   const load = deps.load ?? loadStoredRow;
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const socketFactory = deps.socketFactory;
   const save = deps.save ?? saveStoredStatus;
 
   const row = await load(userId, configurationId);
@@ -384,6 +421,57 @@ export async function probeProviderConfiguration(
               { fetchImpl },
             );
         if (!session.token || !session.url) throw new Error("empty realtime session");
+
+        // A minted token alone proves only the HTTP setup call. Probe the
+        // actual streaming wire with the short-lived secret, then CLOSE the
+        // socket (owner directive 2026-11-26). No interview audio is sent.
+        const isGoogleSession =
+          row.providerName === "google" ||
+          session.url.includes("generativelanguage.googleapis.com");
+        const isElevenLabsSession =
+          row.providerName === "elevenlabs" ||
+          session.url.startsWith(ELEVENLABS_REALTIME_WS_URL);
+        const openFrame = isGoogleSession
+          ? JSON.stringify({
+              setup: {
+                model: settings.modelId.startsWith("models/")
+                  ? settings.modelId
+                  : `models/${settings.modelId}`,
+                generationConfig: { responseModalities: ["AUDIO"] },
+              },
+            })
+          : isElevenLabsSession
+            ? JSON.stringify({
+                type: "session.update",
+                session: { model: settings.modelId, modalities: ["audio"] },
+              })
+            : undefined;
+        const stream = await probeWebSocketSession({
+          url: session.url,
+          ...(isElevenLabsSession
+            ? { headers: { authorization: `Bearer ${session.token}` } }
+            : {}),
+          ...(openFrame ? { openFrame } : {}),
+          awaitServerFrame: true,
+          factory: socketFactory,
+        });
+        if (!stream.ok) {
+          results.push({
+            capability,
+            status: "failed",
+            endpointReachable: stream.endpointReachable,
+            // A quota/provider rejection happened after authentication, so
+            // the credential itself is still proven valid.
+            credentialValid:
+              stream.errorCode === "rate_limited" ||
+              stream.errorCode === "provider_error",
+            modelsDiscovered: null,
+            selectedModelAccepted: null,
+            errorCode: stream.errorCode,
+            detail: stream.detail,
+          });
+          continue;
+        }
         results.push({
           capability,
           status: "validated",
@@ -391,7 +479,7 @@ export async function probeProviderConfiguration(
           credentialValid: true,
           modelsDiscovered: null,
           selectedModelAccepted: null,
-          detail: "Realtime session token accepted; no interview audio was sent.",
+          detail: `${stream.detail} The realtime session token was accepted.`,
         });
       } catch (error) {
         const reason = describeRealtimeError(error);
@@ -444,6 +532,10 @@ export async function probeProviderConfiguration(
       continue;
     }
 
+    // Set only when a streaming probe was attempted but its socket failed;
+    // the documented native HTTP wire is then used and the detail says so.
+    // Declared outside the try so the failure path can describe the fallback.
+    let streamingFallback: string | null = null;
     try {
       const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
       const headers = { authorization: `Bearer ${apiKey}` };
@@ -470,6 +562,40 @@ export async function probeProviderConfiguration(
       // configuration through an endpoint the runtime would not hit. The
       // LLM-shaped ping (chat/completions) serves llm and scorer.
       const root = stripTrailingSlash(urlDecision.normalizedUrl);
+      const wsRoot = root
+        .replace(/^http:\/\//i, "ws://")
+        .replace(/^https:\/\//i, "wss://");
+      // Fish Audio's low-latency TTS is a WebSocket wire (MessagePack frames,
+      // model selected by the connection header). WebSocket is the default;
+      // only if the socket fails do we fall through to the native HTTP POST.
+      // An unknown model silently falls back at the provider, so the exact
+      // model is always sent on the connection rather than guessed.
+      if (capability === "tts" && isFishAudioPreset) {
+        const stream = await probeWebSocketSession({
+          url: `${wsRoot}${FISH_AUDIO_WS_TTS_PATH}`,
+          headers: { authorization: `Bearer ${apiKey}`, model: settings.modelId },
+          openFrame: encodeMsgpack({
+            event: "start",
+            request: { text: "ping", format: "mp3", latency: "balanced" },
+          }),
+          awaitServerFrame: true,
+          factory: socketFactory,
+        });
+        if (stream.ok) {
+          results.push({
+            capability,
+            status: "validated",
+            endpointReachable: true,
+            credentialValid: true,
+            modelsDiscovered: null,
+            selectedModelAccepted: null,
+            detail: stream.detail,
+          });
+          continue;
+        }
+        streamingFallback = stream.detail;
+      }
+
       const isGooglePreset = row.providerType === "preset" && row.providerName === "google";
       let pingUrl: string;
       let pingRequest: RequestInit;
@@ -532,7 +658,125 @@ export async function probeProviderConfiguration(
           };
         }
       } else if (capability === "asr") {
-        if (isGooglePreset) {
+        // Fish Audio realtime transcription (Context7-verified): a MessagePack
+        // `config` frame must be acknowledged with `session_started`. WSS is
+        // the default; the native HTTP /v1/asr wire below is the fallback.
+        if (isFishAudioPreset) {
+          const stream = await probeWebSocketSession({
+            url: `${wsRoot}${FISH_AUDIO_WS_ASR_PATH}`,
+            headers: { authorization: `Bearer ${apiKey}`, model: settings.modelId },
+            openFrame: encodeMsgpack({
+              type: "config",
+              audio: { format: "pcm_s16le", sample_rate: 16000, channels: 1 },
+              turn_detection: { mode: "auto", eager: true },
+              results: { drafts: true },
+            }),
+            awaitServerFrame: true,
+            factory: socketFactory,
+          });
+          if (stream.ok) {
+            results.push({
+              capability,
+              status: "validated",
+              endpointReachable: true,
+              credentialValid: true,
+              modelsDiscovered: null,
+              selectedModelAccepted: null,
+              detail: stream.detail,
+            });
+            continue;
+          }
+          streamingFallback = stream.detail;
+        }
+
+        // ElevenLabs realtime Scribe streams over its own WSS wire (Context7-
+        // verified): `xi-api-key` + exact `model_id` query, and the server
+        // sends `session_started` once the session is accepted. Batch Scribe
+        // models keep the HTTP /v1/speech-to-text wire below as fallback.
+        if (isElevenLabsPreset && /realtime|scribe_v3_live/i.test(settings.modelId)) {
+          const stream = await probeWebSocketSession({
+            url: `${wsRoot}/v1/speech-to-text/realtime?model_id=${encodeURIComponent(settings.modelId)}`,
+            headers: { [XI_API_KEY_HEADER]: apiKey },
+            awaitServerFrame: true,
+            factory: socketFactory,
+          });
+          if (stream.ok) {
+            results.push({
+              capability,
+              status: "validated",
+              endpointReachable: true,
+              credentialValid: true,
+              modelsDiscovered: null,
+              selectedModelAccepted: null,
+              detail: stream.detail,
+            });
+            continue;
+          }
+          streamingFallback = stream.detail;
+        }
+
+        // Gemini Live transcription models speak WebSocket, not the batch
+        // Interactions wire. Open one session with the exact model, then
+        // close it — never leave a live socket running after the probe.
+        if (isGooglePreset && settings.modelId.includes("transcribe-live")) {
+          const stream = await probeWebSocketSession({
+            url: `${GOOGLE_LIVE_WS_URL}?key=${encodeURIComponent(apiKey)}`,
+            openFrame: JSON.stringify({
+              setup: {
+                model: settings.modelId.startsWith("models/")
+                  ? settings.modelId
+                  : `models/${settings.modelId}`,
+                generationConfig: { responseModalities: ["TEXT"] },
+                inputAudioTranscription: {},
+              },
+            }),
+            awaitServerFrame: true,
+            factory: socketFactory,
+          });
+          if (!stream.ok) {
+            results.push({
+              capability,
+              status: "failed",
+              endpointReachable: stream.endpointReachable,
+              // A quota/provider rejection happened after authentication, so
+              // the credential itself is still proven valid.
+              credentialValid:
+                stream.errorCode === "rate_limited" ||
+                stream.errorCode === "provider_error",
+              modelsDiscovered: null,
+              selectedModelAccepted: null,
+              errorCode: stream.errorCode,
+              detail: stream.detail,
+            });
+            continue;
+          }
+          results.push({
+            capability,
+            status: "validated",
+            endpointReachable: true,
+            credentialValid: true,
+            modelsDiscovered,
+            selectedModelAccepted: modelsDiscovered?.includes(settings.modelId) ?? null,
+          });
+          continue;
+        }
+        if (isFishAudioPreset) {
+          // Fallback only: the documented native Fish ASR wire (POST /v1/asr,
+          // Bearer key + exact `model` header, multipart `audio`). Reached
+          // only when the realtime WebSocket probe did not work.
+          pingUrl = `${root}/v1/asr`;
+          const form = new FormData();
+          form.append(
+            "audio",
+            new Blob([synthesisedProbeWav()], { type: "audio/wav" }),
+            "probe.wav",
+          );
+          pingRequest = {
+            method: "POST",
+            headers: { ...headers, model: settings.modelId },
+            body: form,
+          };
+        } else if (isGooglePreset) {
           // Native Gemini ASR: the Interactions API with inline audio — the
           // exact wire (and `models/<id>` resource shape) the runtime ASR
           // adapter uses. The synthesised probe WAV never comes from a real
@@ -622,6 +866,13 @@ export async function probeProviderConfiguration(
         credentialValid: true,
         modelsDiscovered,
         selectedModelAccepted: modelsDiscovered?.includes(settings.modelId) ?? null,
+        // An HTTP fallback is only used after the WS probe failed; make the
+        // transport switch explicit in the result so it is never silent.
+        ...(streamingFallback
+          ? {
+              detail: `WebSocket probe unavailable (${streamingFallback}); validated over the native HTTP fallback.`,
+            }
+          : {}),
       });
     } catch (error) {
       let failure = await classifyProbeFailure(error);
@@ -651,7 +902,9 @@ export async function probeProviderConfiguration(
         modelsDiscovered: null,
         selectedModelAccepted: null,
         errorCode: failure.errorCode,
-        detail: failure.detail,
+        detail: streamingFallback
+          ? `WebSocket probe unavailable (${streamingFallback}); HTTP fallback: ${failure.detail}`
+          : failure.detail,
       });
     }
   }

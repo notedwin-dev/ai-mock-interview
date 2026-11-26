@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { probeProviderConfiguration, discoverProviderModels, discoverCandidateModels, type ProbeDeps } from "./probe";
 import { encryptApiKey } from "./encryption";
+import type { ProbeSocket, ProbeSocketFactory } from "./stream-probe";
 
 /**
  * Unit tests for the capability probe service (FR-PROVIDER-006). Network
@@ -49,6 +50,85 @@ function configRow(overrides: Partial<UserProviderConfiguration> = {}): UserProv
   } as unknown as UserProviderConfiguration;
 }
 
+/** A captured fake socket, with controls for assertions and failure injection. */
+interface CapturedSocket extends ProbeSocket {
+  url: string;
+  headers?: Record<string, string>;
+  sent: unknown[];
+  emit(type: string, payload?: unknown): void;
+  open(): void;
+  message(): void;
+  fail(message?: string): void;
+}
+
+/**
+ * Hermetic WebSocket: opens asynchronously (like Node's global WebSocket),
+ * accepts a probe frame and emits one server frame. `close`/`terminate` both
+ * transition to CLOSED. `failWith` injects a provider error message so the
+ * probe taxonomy can be asserted without a real network.
+ */
+function makeSocketFactory(options: { failWith?: string } = {}) {
+  const sockets: CapturedSocket[] = [];
+  const factory: ProbeSocketFactory = (url, init) => {
+    const listeners = new Map<string, Array<(event: unknown) => void>>();
+    const socket: CapturedSocket = {
+      url,
+      headers: init?.headers,
+      readyState: 0,
+      sent: [],
+      send(data) {
+        this.sent.push(data);
+      },
+      close() {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        this.emit("close");
+      },
+      terminate() {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        this.emit("close");
+      },
+      addEventListener(type, listener) {
+        const list = listeners.get(type) ?? [];
+        list.push(listener);
+        listeners.set(type, list);
+      },
+      removeEventListener(type, listener) {
+        listeners.set(
+          type,
+          (listeners.get(type) ?? []).filter((entry) => entry !== listener),
+        );
+      },
+      emit(type, payload) {
+        for (const listener of listeners.get(type) ?? []) listener(payload);
+      },
+      open() {
+        this.readyState = 1;
+        this.emit("open");
+      },
+      message() {
+        this.emit("message");
+      },
+      fail(message) {
+        this.emit("error", message ? { error: { message } } : undefined);
+      },
+    };
+    sockets.push(socket);
+    queueMicrotask(() => {
+      if (socket.readyState !== 0) return;
+      if (options.failWith !== undefined) {
+        socket.fail(options.failWith);
+        return;
+      }
+      socket.open();
+      socket.message();
+    });
+    return socket;
+  };
+  return { factory, sockets };
+}
+
 /** Runs a probe with hermetic defaults; callers override one behaviour each. */
 function runProbe(
   row: UserProviderConfiguration,
@@ -59,6 +139,7 @@ function runProbe(
     load: async () => row,
     fetchImpl,
     save: async () => {}, // no-op unless a test asserts on persistence
+    socketFactory: makeSocketFactory().factory,
     ...extra,
   });
 }
@@ -177,6 +258,23 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       }),
     );
     expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("opens the minted realtime WebSocket and closes it after the probe", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "gemini-3.1-flash-live-preview" } } }),
+      jsonFetch([]),
+      {
+        realtimeToken: async () => ({ token: "auth_short", url: "wss://live.example/session" }),
+        socketFactory: factory,
+      },
+    );
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.url).toBe("wss://live.example/session");
+    expect(sockets[0]!.readyState).toBe(3); // never left running
+    expect(result.capabilities[0]).toMatchObject({ status: "validated" });
   });
 
   it("validates ElevenLabs realtime via the native client-secret wire (no injected token)", async () => {
@@ -405,20 +503,73 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("valid");
   });
 
-  it("probes the fish-audio preset against its native TTS endpoint with the exact configured model header", async () => {
-    const seen: Array<{ method: string; url: string; headers: Headers; body: string | null }> = [];
-    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      seen.push({
-        method: init?.method ?? "GET",
-        url,
-        headers: new Headers(init?.headers ?? undefined),
-        body: typeof init?.body === "string" ? init.body : null,
-      });
-      if (/\/v1\/tts$/.test(url)) {
-        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 }); // audio bytes
-      }
-      throw new Error(`unexpected fetch: ${url}`);
+  it("probes the fish-audio preset on its native streaming TTS WebSocket with the exact model header", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "fish-audio",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
+      }),
+      jsonFetch([]), // streaming probe must not touch any HTTP wire
+      { socketFactory: factory },
+    );
+
+    // Exactly one WSS connection: the native live-TTS wire. No HTTP model
+    // list or batch POST (fish-audio has no OpenAI-shaped model list).
+    expect(sockets).toHaveLength(1);
+    const socket = sockets[0]!;
+    expect(socket.url).toBe("wss://api.fish.audio/v1/tts/live");
+    expect(socket.headers?.authorization).toBe("Bearer sk-plaintext-secret");
+    // The exact configured model id must travel in the connection header:
+    // Fish silently serves the PAID s2.1-pro when the header is omitted.
+    expect(socket.headers?.model).toBe("s2.1-pro-free");
+    const frame = Buffer.from(socket.sent[0] as Uint8Array).toString("utf8");
+    expect(frame).toContain("start");
+    expect(frame).toContain("ping");
+    expect(socket.readyState).toBe(3); // connection closed after the probe
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
+      modelsDiscovered: null,
+      selectedModelAccepted: null,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("probes Fish Audio realtime transcription over WebSocket and closes the session", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "fish-audio",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "transcribe-stream-1" } },
+      }),
+      jsonFetch([]), // no HTTP wire when the socket works
+      { socketFactory: factory },
+    );
+
+    expect(sockets).toHaveLength(1);
+    const socket = sockets[0]!;
+    expect(socket.url).toBe("wss://api.fish.audio/v1/asr/realtime");
+    expect(socket.headers?.authorization).toBe("Bearer sk-plaintext-secret");
+    expect(socket.headers?.model).toBe("transcribe-stream-1");
+    const frame = Buffer.from(socket.sent[0] as Uint8Array).toString("utf8");
+    expect(frame).toContain("config");
+    expect(frame).toContain("pcm_s16le");
+    expect(socket.readyState).toBe(3); // connection closed after the probe
+    expect(result.capabilities[0]).toMatchObject({ status: "validated", endpointReachable: true });
+  });
+
+  it("falls back to the native HTTP TTS wire only when the Fish WebSocket probe fails", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      return new Response(new Uint8Array([0xff, 0xfb]), { status: 200 });
     }) as typeof fetch;
 
     const result = await runProbe(
@@ -428,48 +579,65 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
         baseUrl: null,
         capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
       }),
-      captureFetch,
+      fetchImpl,
+      { socketFactory: makeSocketFactory({ failWith: "socket unavailable" }).factory },
     );
 
-    // Exactly one network call: the native TTS ping. No OpenAI-shaped
-    // model-list request (fish-audio has none — `GET /model` lists voices).
-    expect(seen).toHaveLength(1);
-    const ping = seen[0]!;
-    expect(ping.url).toBe("https://api.fish.audio/v1/tts");
-    expect(ping.method).toBe("POST");
-    expect(ping.headers.get("authorization")).toBe("Bearer sk-plaintext-secret");
-    // The exact configured model id must travel in the `model` header: Fish
-    // serves the PAID s2.1-pro when the header is omitted.
-    expect(ping.headers.get("model")).toBe("s2.1-pro-free");
-    expect(JSON.parse(ping.body!)).toEqual({ text: "ping", format: "mp3" });
-    expect(result.capabilities[0]).toMatchObject({
-      capability: "tts",
-      status: "validated",
-      endpointReachable: true,
-      credentialValid: true,
-      // Without a model list the ping cannot independently certify the exact
-      // model beyond the header itself, so the claim stays null, not true.
-      modelsDiscovered: null,
-      selectedModelAccepted: null,
-    });
-    expect(result.credentialStatus).toBe("valid");
+    expect(seen).toEqual(["https://api.fish.audio/v1/tts"]);
+    expect(result.capabilities[0]).toMatchObject({ status: "validated" });
+    expect(result.capabilities[0]!.detail).toMatch(/HTTP fallback/);
   });
 
-  it("probes a custom row pointing at fish.audio on the native TTS wire, matching the runtime", async () => {
-    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
-    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      seen.push({
-        url,
-        headers: new Headers(init?.headers ?? undefined),
-        body: typeof init?.body === "string" ? init.body : null,
-      });
-      if (/\/v1\/tts$/.test(url)) {
-        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 });
-      }
-      throw new Error(`unexpected fetch: ${url}`);
+  it("falls back to the native HTTP ASR wire only when Fish realtime WebSocket fails", async () => {
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(input), headers: new Headers(init?.headers ?? undefined) });
+      return new Response(JSON.stringify({ text: "ping" }), { status: 200 });
     }) as typeof fetch;
 
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "fish-audio",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "transcribe-stream-1" } },
+      }),
+      fetchImpl,
+      { socketFactory: makeSocketFactory({ failWith: "socket unavailable" }).factory },
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe("https://api.fish.audio/v1/asr");
+    expect(seen[0]!.headers.get("model")).toBe("transcribe-stream-1");
+    expect(result.capabilities[0]).toMatchObject({ status: "validated" });
+    expect(result.capabilities[0]!.detail).toMatch(/HTTP fallback/);
+  });
+
+  it("probes ElevenLabs realtime Scribe over WebSocket and closes the session", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "scribe_v2_realtime" } },
+      }),
+      jsonFetch([]), // elevenlabs has no model-list endpoint
+      { socketFactory: factory },
+    );
+
+    expect(sockets).toHaveLength(1);
+    const socket = sockets[0]!;
+    expect(socket.url).toBe(
+      "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime",
+    );
+    expect(socket.headers?.["xi-api-key"]).toBe("sk-plaintext-secret");
+    expect(socket.readyState).toBe(3); // closed after the probe
+    expect(result.capabilities[0]).toMatchObject({ status: "validated", endpointReachable: true });
+  });
+
+  it("probes a custom row pointing at fish.audio on the native streaming wire, matching the runtime", async () => {
+    const { factory, sockets } = makeSocketFactory();
     const result = await runProbe(
       configRow({
         providerType: "custom",
@@ -477,16 +645,16 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
         baseUrl: "https://api.fish.audio",
         capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
       }),
-      captureFetch,
+      jsonFetch([]), // no HTTP wire for a fish-shaped row
+      { socketFactory: factory },
     );
 
-    // The runtime TTS adapter routes fish.audio URLs to POST /v1/tts with the
-    // `model` header — the probe must validate the SAME wire it certifies.
-    expect(seen).toHaveLength(1);
-    const ping = seen[0]!;
-    expect(ping.url).toBe("https://api.fish.audio/v1/tts");
-    expect(ping.headers.get("model")).toBe("s2.1-pro-free");
-    expect(JSON.parse(ping.body!)).toEqual({ text: "ping", format: "mp3" });
+    // A fish-shaped custom row uses the same live WSS wire as the preset.
+    expect(sockets).toHaveLength(1);
+    const socket = sockets[0]!;
+    expect(socket.url).toBe("wss://api.fish.audio/v1/tts/live");
+    expect(socket.headers?.model).toBe("s2.1-pro-free");
+    expect(socket.readyState).toBe(3);
     expect(result.capabilities[0]).toMatchObject({ status: "validated" });
     expect(result.credentialStatus).toBe("valid");
   });
@@ -528,7 +696,7 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("invalid");
   });
 
-  it("classifies a fish-audio credit rejection the same way when its native TTS endpoint returns 402", async () => {
+  it("classifies a fish-audio credit rejection on its streaming wire in the quota family", async () => {
     const result = await runProbe(
       configRow({
         providerType: "preset",
@@ -536,13 +704,17 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
         baseUrl: null,
         capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
       }),
+      // WS failure now falls back to the native HTTP TTS wire; the 402 is
+      // returned there after the socket path is unavailable.
       jsonFetch([{ match: /\/v1\/tts$/, status: 402, body: { message: "No credit" } }]),
+      { socketFactory: makeSocketFactory({ failWith: "socket refused" }).factory },
     );
     expect(result.capabilities[0]).toMatchObject({
       capability: "tts",
       status: "failed",
       errorCode: "rate_limited",
       endpointReachable: true,
+      // The key authenticated; the account merely lacks credit/quota.
       credentialValid: true,
     });
     expect(result.capabilities[0]!.detail).toMatch(/credit|payment/i);
@@ -603,6 +775,33 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       selectedModelAccepted: true,
     });
     expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("probes a Gemini Live transcription model over WebSocket and closes the session", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "google",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "gemini-3.5-transcribe-live" } },
+      }),
+      // The model catalogue is still an HTTP call; the capability itself is WSS.
+      jsonFetch([{
+        match: /\/v1beta\/models$/,
+        status: 200,
+        body: { models: [{ name: "models/gemini-3.5-transcribe-live" }] },
+      }]),
+      { socketFactory: factory },
+    );
+
+    expect(sockets).toHaveLength(1);
+    const socket = sockets[0]!;
+    expect(socket.url).toContain("BidiGenerateContent?key=sk-plaintext-secret");
+    const frame = socket.sent[0] as string;
+    expect(frame).toContain("models/gemini-3.5-transcribe-live");
+    expect(socket.readyState).toBe(3);
+    expect(result.capabilities[0]).toMatchObject({ status: "validated", endpointReachable: true });
   });
 
   it("probes google LLM/scorer on the OpenAI-compatible /v1beta/openai surface with Bearer auth", async () => {

@@ -91,12 +91,11 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     providerName: "fish-audio",
     displayName: "Fish Audio",
     defaultBaseUrl: "https://api.fish.audio",
-    // TTS only for now: the approved catalogue also lists Fish ASR models
-    // (transcribe family), but their native wire facts land with the slice-9
-    // ASR adapter — adding the capability without a verified wire would let
-    // the OpenAI-shaped probe hit the wrong endpoint and fail a valid
-    // credential.
-    capabilities: ["tts"],
+    // TTS and ASR (ADR-030). The native wires are verified: TTS uses
+    // POST /v1/tts (WSS /v1/tts/live streaming) and ASR uses POST /v1/asr
+    // (WSS /v1/asr/realtime streaming). Both keep the exact model ID — the
+    // runtime ASR adapter dispatches fish.audio to the native /v1/asr wire.
+    capabilities: ["asr", "tts"],
   },
   // ADR-030 additions (owner decision 2026-11-16). All three speak the
   // OpenAI-compatible wire (verified against provider docs, 2026-11-16) and
@@ -221,6 +220,14 @@ export const PRESET_MODEL_SUGGESTIONS: Readonly<
     ],
   },
   "fish-audio": {
+    // Native ASR catalogue (Context7-verified, 2026-11-26). `transcribe-1-pro`
+    // and `transcribe-1` use the batch POST /v1/asr wire the runtime speaks;
+    // `transcribe-stream-1` is the WSS-only realtime model (probe default).
+    asr: [
+      { modelId: "transcribe-1-pro", note: "Batch; emotion and vocal-event cues" },
+      { modelId: "transcribe-1" },
+      { modelId: "transcribe-stream-1", note: "Realtime WebSocket only" },
+    ],
     tts: [
       { modelId: "s2.1-pro" },
       { modelId: "s2.1-pro-free", note: "Free developer option" },
