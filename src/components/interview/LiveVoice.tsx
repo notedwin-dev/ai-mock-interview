@@ -156,7 +156,11 @@ export function LiveVoice({
       }
 
       if (event.type === "audio-transcript-done" && "itemId" in event) {
-        markOutputTranscriptionDone(token, event.itemId);
+        // Candidate text already collected before this completion belongs to
+        // the previous turn, so it is finalized and displayed here, ahead of
+        // the question whose slot this event reserves.
+        const closed = markOutputTranscriptionDone(token, event.itemId);
+        if (closed.length > 0) setLines((current) => [...current, ...closed]);
       }
     },
     [token],

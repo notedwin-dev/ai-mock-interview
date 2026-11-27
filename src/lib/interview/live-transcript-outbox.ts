@@ -11,6 +11,13 @@
  * Persistence is intentionally fire-and-forget from the event handler: new
  * finalized lines keep arriving while earlier ones are being posted.
  *
+ * The queue holds ready lines AND reservations. A completion-signaled
+ * interviewer item reserves its chronological position immediately, even
+ * though its final delta may still arrive. The drain stops at an unresolved
+ * reservation, so a candidate answer finalized later cannot be stored ahead
+ * of the question it answers. Ordering an already-populated queue would be too
+ * late: the reversal happens when the answer is enqueued, not when it posts.
+ *
  * Provider item ids (and candidate transcription chunks) are scoped to a
  * connection generation: Google's mapper restarts its counters per socket and
  * re-emits cumulative candidate text, so only a finalized, connection-scoped
@@ -22,8 +29,9 @@ export const TRANSCRIPT_SEGMENT_LIMIT = 5000;
 /** Bounded retries for one line; its client id never changes between attempts. */
 const TRANSCRIPT_POST_ATTEMPTS = 3;
 /** Deadline for a single POST. Expiry is a transient failure, retried with the
- * same client id because the server may have committed before the abort. */
-const TRANSCRIPT_POST_TIMEOUT_MS = 10_000;
+ * same client id because the server may have committed before the abort.
+ * Exported so the timeout test can advance through the real deadline. */
+export const TRANSCRIPT_POST_TIMEOUT_MS = 10_000;
 /** Statuses that will not heal on retry (the link is gone or already finished). */
 const TERMINAL_STATUSES: ReadonlySet<number> = new Set([400, 404, 409]);
 /** The transcript route caps client ids at 100 characters. */
@@ -50,6 +58,17 @@ const EMPTY_SNAPSHOT: LiveLineStoreSnapshot = { failed: [], notice: null };
 
 type PostResult = "saved" | "rejected" | "unavailable";
 
+/** A ready line, or a chronological slot held open for late interviewer deltas. */
+type QueueEntry =
+  | { kind: "line"; line: LiveLine }
+  | { kind: "reservation"; key: string };
+
+interface OutputReservation {
+  key: string;
+  itemId: string;
+  connection: number;
+}
+
 interface LineRegistry {
   saved: Set<string>;
   inFlight: Set<string>;
@@ -74,12 +93,13 @@ interface LineRegistry {
    * Interviewer items that reported a completion signal but have not been
    * closed yet. Google's mapper emits `audio-transcript-done` on turnComplete
    * yet may deliver a final `audio-transcript-delta` afterwards for the SAME
-   * item. Keeping the item open until the next item (or connection end)
-   * absorbs those late deltas into one line instead of stranding them.
+   * item. Each item holds a reservation in `queue` at its arrival position:
+   * late deltas are absorbed into that slot instead of stranding them, and no
+   * later line may overtake it while it is still collecting.
    */
-  completedOutput: Map<string, { itemId: string; connection: number }>;
-  /** Finalized lines awaiting persistence, strictly in arrival order. */
-  queue: LiveLine[];
+  outputReservations: Map<string, OutputReservation>;
+  /** Ready lines and unresolved reservations, in chronological order. */
+  queue: QueueEntry[];
   /** Transiently failed lines that a user can still retry. */
   failed: LiveLine[];
   notice: string | null;
@@ -99,7 +119,7 @@ function lineRegistry(token: string): LineRegistry {
     bases: new Set<string>(),
     connection: 0,
     inputTranscripts: new Map(),
-    completedOutput: new Map(),
+    outputReservations: new Map(),
     queue: [],
     failed: [],
     notice: null,
@@ -181,43 +201,61 @@ export function recordTranscriptDelta(token: string, itemId: string, delta: stri
 
 /**
  * Signal that an interviewer item reached turnComplete. The item is NOT
- * finalized here: the mapper can still deliver a final delta for it, so it
- * is closed at the next item boundary (or at connection end) instead.
+ * finalized here: the mapper can still deliver a final delta for it. Instead
+ * its chronological slot is reserved NOW, so a candidate answer finalized
+ * later is queued behind it and can never be stored ahead of it.
+ *
+ * Candidate text already collected before this signal belongs to an earlier
+ * turn: that interviewer line answers it, so it is queued first. Answers that
+ * arrive afterwards stay pending and land behind the reserved question.
+ * Repeats for the same item only finalize leftover candidate text.
  */
-export function markOutputTranscriptionDone(token: string, itemId: string): void {
+export function markOutputTranscriptionDone(token: string, itemId: string): LiveLine[] {
   const reg = lineRegistry(token);
-  reg.completedOutput.set(deltaKey(token, itemId), { itemId, connection: reg.connection });
+  const key = deltaKey(token, itemId);
+  const accepted = flushPendingInputTranscripts(token);
+  if (reg.outputReservations.has(key)) return accepted;
+  reg.outputReservations.set(key, { key, itemId, connection: reg.connection });
+  reg.queue.push({ kind: "reservation", key });
+  return accepted;
 }
 
 /**
- * Close completion-signaled interviewer items. Candidate answers are queued
- * first so the line answering them is never saved ahead of the answer,
- * regardless of the ordering of the two transcription streams.
+ * Close completion-signaled interviewer items by filling their reserved slots
+ * with the accumulated text (including deltas that arrived late). The slot was
+ * reserved when turnComplete arrived, so the line keeps that position no
+ * matter when the last delta lands.
  */
 export function flushCompletedOutputTranscriptions(token: string, exceptKey?: string): LiveLine[] {
   const reg = lineRegistry(token);
-  if (reg.completedOutput.size === 0) return [];
-  const entries = [...reg.completedOutput.entries()].filter(([key]) => key !== exceptKey);
+  const entries = [...reg.outputReservations.values()].filter((r) => r.key !== exceptKey);
   if (entries.length === 0) return [];
-  // Queue candidate answers before the interviewer lines that respond to them.
-  const accepted = flushPendingInputTranscripts(token);
-  for (const [key, pending] of entries) {
-    reg.completedOutput.delete(key);
-    accepted.push(...enqueueFinalizedForConnection(token, {
+  const accepted: LiveLine[] = [];
+
+  for (const reservation of entries) {
+    reg.outputReservations.delete(reservation.key);
+    const segments = finalizeSegmentsForConnection(reg, {
       speaker: "interviewer",
-      text: consumeTranscriptText(key),
-      clientId: `out-${pending.itemId}`,
-    }, pending.connection));
+      text: consumeTranscriptText(reservation.key),
+      clientId: `out-${reservation.itemId}`,
+    }, reservation.connection);
+    // Re-find the slot: candidate inserts above may have shifted its index.
+    const index = reg.queue.findIndex(
+      (entry) => entry.kind === "reservation" && entry.key === reservation.key,
+    );
+    if (index >= 0) reg.queue.splice(index, 1);
+    accepted.push(...queueSegments(token, segments, index >= 0 ? index : undefined));
   }
   return accepted;
 }
 
 /** Flush everything buffered for a token (connection end, close, unmount). */
 export function flushPendingLiveLines(token: string): LiveLine[] {
-  return [
-    ...flushPendingInputTranscripts(token),
-    ...flushCompletedOutputTranscriptions(token),
-  ];
+  // Resolving completions also flushes candidate answers that respond to them.
+  const closed = flushCompletedOutputTranscriptions(token);
+  // Any remaining candidate text belongs to no completion signal and arrives
+  // after the last interviewer line.
+  return [...closed, ...flushPendingInputTranscripts(token)];
 }
 
 /** Consume a turn's accumulated interviewer text; an explicit final text wins. */
@@ -314,12 +352,13 @@ async function post(token: string, line: LiveLine): Promise<PostResult> {
 
 /**
  * Ordered outbox: only the head is posted, and the next line is attempted once
- * that one is acknowledged. A failed head is moved out of the queue rather
- * than left blocking it — a finished link or a temporarily unavailable server
- * must not stop later finalized lines from being persisted. A terminal
- * rejection is dropped with a visible notice; a transient failure is kept in
- * the shared registry so a remounted instance can restore and retry it with
- * its original client id.
+ * that one is acknowledged. An unresolved reservation at the head stops the
+ * drain: its late deltas must be absorbed before any later line is stored.
+ * A failed head is moved out of the queue rather than left blocking it — a
+ * finished link or a temporarily unavailable server must not stop later
+ * finalized lines from being persisted. A terminal rejection is dropped with
+ * a visible notice; a transient failure is kept in the shared registry so a
+ * remounted instance can restore and retry it with its original client id.
  */
 export function drainOutbox(token: string): void {
   const reg = lineRegistry(token);
@@ -328,17 +367,19 @@ export function drainOutbox(token: string): void {
   void (async () => {
     try {
       while (reg.queue.length > 0) {
-        const head = reg.queue.shift()!;
-        const result = await post(token, head);
+        const head = reg.queue[0]!;
+        if (head.kind === "reservation") break;
+        reg.queue.shift();
+        const result = await post(token, head.line);
         if (result === "saved") {
-          reg.saved.add(head.clientId);
+          reg.saved.add(head.line.clientId);
           continue;
         }
         if (result === "rejected") {
           reg.notice = TERMINAL_NOTICE;
         } else {
-          if (!reg.failed.some((line) => line.clientId === head.clientId)) {
-            reg.failed.push(head);
+          if (!reg.failed.some((line) => line.clientId === head.line.clientId)) {
+            reg.failed.push(head.line);
           }
           reg.notice = TRANSIENT_NOTICE;
         }
@@ -350,38 +391,58 @@ export function drainOutbox(token: string): void {
   })();
 }
 
-/** Queue route-ready segments, skipping ids already saved or in flight. */
-export function enqueueLiveLines(token: string, lines: LiveLine[]): LiveLine[] {
+/**
+ * Queue route-ready segments, skipping ids already saved or in flight. With a
+ * `beforeIndex` the segments replace a closed reservation's slot; otherwise
+ * they join the tail. A single splice keeps multi-segment lines contiguous.
+ */
+function queueSegments(token: string, segments: LiveLine[], beforeIndex?: number): LiveLine[] {
   const reg = lineRegistry(token);
   const accepted: LiveLine[] = [];
-  for (const line of lines) {
+  for (const line of segments) {
     if (reg.saved.has(line.clientId) || reg.inFlight.has(line.clientId)) continue;
     reg.inFlight.add(line.clientId);
-    reg.queue.push(line);
     accepted.push(line);
   }
-  if (accepted.length > 0) drainOutbox(token);
+  if (accepted.length === 0) return accepted;
+  const entries = accepted.map((line) => ({ kind: "line", line }) satisfies QueueEntry);
+  if (beforeIndex === undefined) reg.queue.push(...entries);
+  else reg.queue.splice(beforeIndex, 0, ...entries);
+  drainOutbox(token);
   return accepted;
 }
 
+/** Queue route-ready segments at the tail, skipping saved/in-flight ids. */
+export function enqueueLiveLines(token: string, lines: LiveLine[]): LiveLine[] {
+  return queueSegments(token, lines);
+}
+
 /**
- * Finalize one logical line for a specific connection generation: scope its
- * base id, split it, dedupe, start background persistence and return the
- * segments to display. An empty array means a repeated/empty transcript, so
- * neither the UI nor the transcript gains a duplicate.
+ * Split one logical line into route-sized segments for a connection, deduped
+ * by base id. Does not touch the queue so a caller can choose its position.
+ * An empty array means a repeated/empty transcript: no UI or transcript row.
  */
+function finalizeSegmentsForConnection(
+  reg: LineRegistry,
+  base: LiveLine,
+  connection: number,
+): LiveLine[] {
+  const scoped = { ...base, clientId: scopedClientId(connection, base.clientId) };
+  if (reg.bases.has(scoped.clientId)) return [];
+  const segments = toSegmentLines(scoped);
+  if (segments.length === 0) return [];
+  reg.bases.add(scoped.clientId);
+  return segments;
+}
+
+/** Finalize using the connection generation currently active for the token. */
 function enqueueFinalizedForConnection(
   token: string,
   base: LiveLine,
   connection: number,
 ): LiveLine[] {
   const reg = lineRegistry(token);
-  const scoped = { ...base, clientId: scopedClientId(connection, base.clientId) };
-  if (reg.bases.has(scoped.clientId)) return [];
-  const segments = toSegmentLines(scoped);
-  if (segments.length === 0) return [];
-  reg.bases.add(scoped.clientId);
-  return enqueueLiveLines(token, segments);
+  return queueSegments(token, finalizeSegmentsForConnection(reg, base, connection));
 }
 
 /** Finalize using the connection generation currently active for the token. */
@@ -391,17 +452,17 @@ export function enqueueFinalizedLine(token: string, base: LiveLine): LiveLine[] 
 
 function flushPendingInputTranscripts(token: string, exceptKey?: string): LiveLine[] {
   const reg = lineRegistry(token);
-  const accepted: LiveLine[] = [];
+  const segments: LiveLine[] = [];
   for (const [key, pending] of reg.inputTranscripts) {
     if (key === exceptKey) continue;
     reg.inputTranscripts.delete(key);
-    accepted.push(...enqueueFinalizedForConnection(token, {
+    segments.push(...finalizeSegmentsForConnection(reg, {
       speaker: "candidate",
       text: pending.text,
       clientId: `in-${pending.itemId}`,
     }, pending.connection));
   }
-  return accepted;
+  return queueSegments(token, segments);
 }
 
 /**
@@ -455,6 +516,6 @@ export function retryFailedLines(token: string): void {
   reg.failed = [];
   reg.notice = null;
   publish(reg);
-  for (const line of retry) reg.queue.push(line);
+  for (const line of retry) reg.queue.push({ kind: "line", line });
   drainOutbox(token);
 }

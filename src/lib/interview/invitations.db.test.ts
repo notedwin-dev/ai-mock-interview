@@ -136,6 +136,25 @@ d("invitation links (TT-21)", () => {
     expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
   });
 
+  it("assigns a candidate answer to the unit opened by an earlier interviewer line", async () => {
+    // The live outbox reserves the question's position before an answer can be
+    // finalized. Storing them in that order is what puts the answer in an
+    // assessment unit — the answer alone cannot open one.
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const question = await store.appendRealtimeMessage(
+      session.sessionId, "interviewer", "first question", "evt-q",
+    );
+    const answer = await store.appendRealtimeMessage(
+      session.sessionId, "candidate", "my answer", "evt-a",
+    );
+
+    expect(question.messageKind).toBe("primary_question");
+    expect(question.assessmentUnitId).not.toBeNull();
+    expect(answer.messageKind).toBe("candidate_response");
+    expect(answer.assessmentUnitId).toBe(question.assessmentUnitId);
+  });
+
   it("rejects a reused client id carrying different content or a different speaker", async () => {
     const session = await makeSession({ status: "active", startedAt: new Date() });
     const store = (await import("./room-store")).createDefaultRoomStore();

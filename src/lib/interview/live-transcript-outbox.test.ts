@@ -4,6 +4,7 @@ import {
   enqueueFinalizedLine,
   finalizeInputTranscription,
   flushCompletedOutputTranscriptions,
+  flushPendingLiveLines,
   getLiveLineSnapshot,
   markOutputTranscriptionDone,
   recordInputTranscription,
@@ -13,6 +14,7 @@ import {
   subscribeLiveLines,
   takeTranscriptText,
   toSegmentLines,
+  TRANSCRIPT_POST_TIMEOUT_MS,
   TRANSCRIPT_SEGMENT_LIMIT,
   type LiveLine,
 } from "./live-transcript-outbox";
@@ -43,6 +45,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("finalized transcript segmentation", () => {
@@ -184,9 +187,10 @@ describe("interviewer output completion boundary", () => {
     // interviewer line completes first (no ordering guarantee between streams).
     recordInputTranscription(t, "google-input-0", "my answer", false);
     recordTranscriptDelta(t, "google-item-0", "Tell me more.");
-    markOutputTranscriptionDone(t, "google-item-0");
-
-    const closed = flushCompletedOutputTranscriptions(t);
+    // Candidate text collected before the completion is queued first; the
+    // interviewer line that answers it only reserves its slot afterwards.
+    const candidate = markOutputTranscriptionDone(t, "google-item-0");
+    const closed = [...candidate, ...flushCompletedOutputTranscriptions(t)];
     expect(closed.map((line) => line.speaker)).toEqual(["candidate", "interviewer"]);
     expect(closed.map((line) => line.clientId)).toEqual([
       "1:in-google-input-0-1",
@@ -194,6 +198,84 @@ describe("interviewer output completion boundary", () => {
     ]);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(postedClientIds()).toEqual(["1:in-google-input-0-1", "1:out-google-item-0-1"]);
+  });
+
+  it("reserves a completion-signaled question ahead of the answer finishing later", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    // Google's mapper emits `audio-transcript-done` on turnComplete without an
+    // accompanying waitingForInput/IDLE activity signal, so the question has
+    // not been queued when the candidate's answer finishes.
+    recordTranscriptDelta(t, "google-item-0", "What is your experience?");
+    markOutputTranscriptionDone(t, "google-item-0");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    expect(recordInputTranscription(t, "google-input-0", "Five years.", true)).toEqual([
+      { speaker: "candidate", text: "Five years.", clientId: "1:in-google-input-0-1" },
+    ]);
+    // The answer may be queued, but it must not be stored until the earlier
+    // question has been finalized into its reserved slot.
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A late delta joins the reserved question, and the next interviewer item
+    // finally closes it. Both lines are then stored in chronological order.
+    recordTranscriptDelta(t, "google-item-0", " Please be specific.");
+    const closed = recordTranscriptDelta(t, "google-item-1", "Tell me about a project.");
+    expect(closed.map((line) => line.clientId)).toEqual(["1:out-google-item-0-1"]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual([
+      "1:out-google-item-0-1",
+      "1:in-google-input-0-1",
+    ]);
+    const contents = fetchMock.mock.calls.map((call) =>
+      (JSON.parse(String(call[1]?.body)) as {
+        messages: Array<{ content: string }>;
+      }).messages[0]!.content,
+    );
+    expect(contents).toEqual(["What is your experience? Please be specific.", "Five years."]);
+  });
+
+  it("reserves a question whose completion arrives before its first delta", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    // The completion signal owns the slot before any output delta is seen.
+    markOutputTranscriptionDone(t, "google-item-0");
+    expect(recordInputTranscription(t, "google-input-0", "my answer", true)).toEqual([
+      { speaker: "candidate", text: "my answer", clientId: "1:in-google-input-0-1" },
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Deltas arrive later and join the already-reserved slot; the next item's
+    // delta closes it without letting the answer take the earlier position.
+    recordTranscriptDelta(t, "google-item-0", "Question?");
+    const closed = recordTranscriptDelta(t, "google-item-1", "next turn");
+    expect(closed.map((line) => line.clientId)).toEqual(["1:out-google-item-0-1"]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "1:in-google-input-0-1"]);
+  });
+
+  it("stores a reserved question first even when the answer is finalized by a boundary", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    recordTranscriptDelta(t, "google-item-0", "First question");
+    markOutputTranscriptionDone(t, "google-item-0");
+    recordInputTranscription(t, "google-input-0", "my answer", false);
+
+    // No `finished` marker and no activity signal: connection end flushes both
+    // buffered streams, but the question still owns the earlier position.
+    const closed = flushPendingLiveLines(t);
+    expect(closed.map((line) => line.speaker)).toEqual(["interviewer", "candidate"]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "1:in-google-input-0-1"]);
   });
 });
 
@@ -364,7 +446,8 @@ describe("live transcript outbox", () => {
 });
 
 describe("bounded transcript POST", () => {
-  it("passes an abort signal to fetch and retries an aborted attempt with the same client id", async () => {
+  it("aborts at the production deadline and retries with the same client id", async () => {
+    vi.useFakeTimers();
     const t = token();
     const signals: AbortSignal[] = [];
     fetchMock.mockImplementation((_url, init) => {
@@ -378,13 +461,17 @@ describe("bounded transcript POST", () => {
     });
 
     enqueueFinalizedLine(t, { speaker: "candidate", text: "saved after abort", clientId: "in-abort" });
-    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    // Let the background drain reach its first fetch before advancing time.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals).toHaveLength(1);
     expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals[0]!.aborted).toBe(false);
 
-    // Simulate the deadline expiring while the first POST is in flight.
-    signals[0]!.dispatchEvent(new Event("abort"));
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    // The outbox's own deadline aborts the in-flight POST; no manual dispatch.
+    await vi.advanceTimersByTimeAsync(TRANSCRIPT_POST_TIMEOUT_MS);
+    expect(signals[0]!.aborted).toBe(true);
 
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(postedClientIds()).toEqual(["in-abort-1", "in-abort-1"]);
     expect(getLiveLineSnapshot(t)).toEqual({ failed: [], notice: null });
   });
