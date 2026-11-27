@@ -87,6 +87,7 @@ export type ProviderConfigErrorCode =
   | "unknown_preset"
   | "reserved_preset_name"
   | "probe_failed"
+  | "runtime_conflict"
   | "invalid_input";
 
 export class ProviderConfigError extends Error {

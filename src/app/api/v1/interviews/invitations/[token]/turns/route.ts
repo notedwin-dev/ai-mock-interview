@@ -1,11 +1,11 @@
 import { jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { synthesizeSpeech } from "@/lib/ai/tts";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { resolveInvitation } from "@/lib/interview/invitations";
 import { RoomError, runRoomTurn } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
-import { TtsError } from "@/lib/ai/tts";
 
 /**
  * Token-scoped room transcript (FR-INTERVIEW-004/008): the link is the only
@@ -21,11 +21,6 @@ function mapError(error: unknown): Response {
   }
   if (error instanceof LlmError) {
     return llmErrorProviderResponse(error);
-  }
-  if (error instanceof TtsError && error.code === "unsupported_provider") {
-    // A configuration problem (voice provider without an implemented wire),
-    // not a provider outage: typed 409 with the actionable message.
-    return jsonError(409, "tts_provider_unsupported", error.message);
   }
   return jsonError(500, "internal_error", "Something went wrong. Try again.");
 }
@@ -64,9 +59,16 @@ export async function POST(
         // The room engine receives the speaker route only here, at the server
         // boundary. A missing TTS configuration simply means text-only turns.
         tts: {
-          resolveRoute: async (userId: string) => {
+          resolveRoute: async (userId: string): Promise<ProviderRoute | null> => {
             try {
-              return await resolveForOutboundCall(userId, "tts");
+              const resolved = await resolveForOutboundCall(userId, "tts");
+              return {
+                providerName: resolved.providerName,
+                providerType: resolved.providerType,
+                baseUrl: resolved.baseUrl,
+                modelId: resolved.modelId,
+                apiKey: resolved.apiKey,
+              };
             } catch {
               return null;
             }

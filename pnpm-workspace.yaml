@@ -2,9 +2,13 @@ overrides:
   "@types/react": "19.3.0"
   "@types/react-dom": "19.3.0"
 allowBuilds:
+  '@google/genai': true
+  '@livekit/local-inference': true
   '@prisma/engines': true
   prisma: true
+  protobufjs: true
   unrs-resolver: true
 minimumReleaseAgeExclude:
   - "@ai-sdk/gateway@4.0.150"
   - ai@7.0.177
+  - livekit-server-sdk@2.20.1

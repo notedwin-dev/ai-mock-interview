@@ -143,7 +143,6 @@ function classifyHttpFailure(
 
 async function classifyProbeFailure(
   error: unknown,
-  fetchImpl: typeof fetch,
 ): Promise<{ errorCode: ProbeErrorCode; detail: string; endpointReachable: boolean; credentialValid: boolean }> {
   if (error instanceof ProviderCryptoError) {
     // Fail closed (ADR-0005): a credential that cannot be decrypted means the
@@ -357,7 +356,7 @@ export async function probeProviderConfiguration(
         selectedModelAccepted: modelsDiscovered?.includes(settings.modelId) ?? null,
       });
     } catch (error) {
-      const failure = await classifyProbeFailure(error, fetchImpl);
+      const failure = await classifyProbeFailure(error);
       results.push({
         capability,
         status: "failed",
@@ -594,7 +593,7 @@ export async function discoverProviderModels(
   } catch (error) {
     // Provider connectivity problems surface in the probe error taxonomy, not
     // as an unhandled exception (FR-PROVIDER-006).
-    const failure = await classifyProbeFailure(error, fetchImpl);
+    const failure = await classifyProbeFailure(error);
     return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
 }
@@ -646,7 +645,7 @@ export async function discoverCandidateModels(
     );
     return { ok: true, models, source: "provider" };
   } catch (error) {
-    const failure = await classifyProbeFailure(error, fetchImpl);
+    const failure = await classifyProbeFailure(error);
     return { ok: false, errorCode: failure.errorCode, detail: failure.detail };
   }
 }
