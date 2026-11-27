@@ -37,6 +37,30 @@ export function InvitationConfirmation({
           <dt className="text-xs uppercase tracking-wide text-ink-muted">Status</dt>
           <dd className="mt-0.5 text-sm text-ink capitalize">{interview.status}</dd>
         </div>
+        {interview.experienceLevel ? (
+          <div>
+            <dt className="text-xs uppercase tracking-wide text-ink-muted">Experience level</dt>
+            <dd className="mt-0.5 text-sm text-ink">{interview.experienceLevel}</dd>
+          </div>
+        ) : null}
+        {interview.techStack.length > 0 ? (
+          <div className="sm:col-span-2">
+            <dt className="text-xs uppercase tracking-wide text-ink-muted">Topics / tech stack</dt>
+            <dd className="mt-1 flex flex-wrap gap-2">
+              {interview.techStack.map((tech) => (
+                <span key={tech} className="rounded-full border border-line bg-raised px-3 py-1 text-xs text-ink-soft">
+                  {tech}
+                </span>
+              ))}
+            </dd>
+          </div>
+        ) : null}
+        {interview.questionCount ? (
+          <div>
+            <dt className="text-xs uppercase tracking-wide text-ink-muted">Questions</dt>
+            <dd className="mt-0.5 text-sm text-ink">{interview.questionCount}</dd>
+          </div>
+        ) : null}
         {interview.jobDescription ? (
           <div className="sm:col-span-2">
             <dt className="text-xs uppercase tracking-wide text-ink-muted">Job description</dt>
@@ -46,7 +70,7 @@ export function InvitationConfirmation({
       </dl>
       {canJoin ? (
         <Link
-          href={`/i/${token}/waiting`}
+          href={`/interview/${token}/waiting`}
           className="mt-8 inline-flex h-11 items-center rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"
         >
           Continue to waiting room

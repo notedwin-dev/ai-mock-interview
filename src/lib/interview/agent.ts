@@ -2,10 +2,12 @@ import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib
 import { db } from "@/lib/db";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { z } from "zod";
+// Both sides combined: creation idempotency replay from our review fixes plus
+// the generation fields/created-interview shape from the runtime batch.
 import {
   createInterviewSession,
   findExistingInterviewCreation,
-  type SessionSummary,
+  type CreatedInterview,
 } from "./service";
 import type { InterviewSetupInput } from "./validation";
 
@@ -30,6 +32,9 @@ export const agentConfigSchema = z
     purpose: z.string().trim().min(1).max(500),
     jobRole: z.string().trim().min(1).max(150),
     jobDescription: z.string().trim().max(8000).default(""),
+    experienceLevel: z.string().trim().max(120).optional(),
+    techStack: z.array(z.string().trim().min(1).max(80)).max(40).optional(),
+    questionCount: z.number().int().min(1).max(50).optional(),
     strictness: z.enum(AGENT_STRICTNESS),
     category: z.enum(AGENT_CATEGORIES),
   })
@@ -109,6 +114,7 @@ const AGENT_INSTRUCTIONS = [
   "You are the AIMIS AI Interview Agent. Gather interview requirements conversationally.",
   "Ask for the interview purpose, the target job role, the job description context, and the evaluation strictness.",
   "Evaluation strictness must be exactly one of Supportive, Balanced or Rigorous (return lowercase: supportive, balanced, rigorous).",
+  "When the candidate is unsure, explain: Supportive = gentle, encouraging feedback that builds confidence; Balanced = a fair mix of strengths and actionable improvements; Rigorous = direct, demanding critique against a high bar. Do not pick one on their behalf.",
   "Choose the interview category from general, technical or behavioral based on the purpose and role.",
   "Set missingFields to every requirement not yet supplied by the candidate; reply with one short natural question or confirmation.",
   "Set config to null unless all four requirements are present. Resolve empty values by asking, never by inventing them.",
@@ -169,12 +175,12 @@ export interface AgentCreationDeps {
   findExisting?: (
     userId: string,
     idempotencyKey: string,
-  ) => Promise<SessionSummary | null>;
+  ) => Promise<CreatedInterview | null>;
   createSession?: (
     userId: string,
     input: InterviewSetupInput,
     idempotencyKey?: string,
-  ) => Promise<SessionSummary>;
+  ) => Promise<CreatedInterview>;
 }
 
 /**
@@ -188,7 +194,7 @@ export async function createInterviewFromAgentConfig(
   userId: string,
   input: unknown,
   deps: AgentCreationDeps = {},
-): Promise<SessionSummary> {
+): Promise<CreatedInterview> {
   let parsed: z.infer<typeof agentCreationInputSchema>;
   try {
     parsed = agentCreationInputSchema.parse(input);
@@ -235,7 +241,10 @@ export async function createInterviewFromAgentConfig(
   // runtime uses the custom pipeline (native realtime remains a later path).
   return createSession(userId, {
     jobRole: parsed.config.jobRole,
-    jobDescription: parsed.config.jobDescription,
+    jobDescription: parsed.config.jobDescription || undefined,
+    experienceLevel: parsed.config.experienceLevel,
+    techStack: parsed.config.techStack,
+    questionCount: parsed.config.questionCount,
     categoryId: category.categoryId,
     evaluationMode: parsed.config.strictness,
     runtimeMode: "custom",

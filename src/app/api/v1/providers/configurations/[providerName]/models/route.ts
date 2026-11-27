@@ -10,7 +10,7 @@ import { discoverProviderModels } from "@/lib/providers/probe";
  * problems surface as the probe error taxonomy in `error`.
  */
 export async function GET(
-  _request: Request,
+  request: Request,
   ctx: RouteContext<"/api/v1/providers/configurations/[providerName]/models">,
 ): Promise<Response> {
   const account = await requireApiAccount({ role: "candidate" });
@@ -18,8 +18,9 @@ export async function GET(
 
   try {
     const { providerName } = await ctx.params;
+    const configId = new URL(request.url).searchParams.get("configId") ?? undefined;
     const result = await discoverProviderModels(account.account.userId, providerName, {
-      load: (userId, providerNameArg) => findOwnedConfigRow(userId, providerNameArg),
+      load: (userId, providerNameArg) => findOwnedConfigRow(userId, providerNameArg, configId),
     });
     return Response.json(result);
   } catch (error) {

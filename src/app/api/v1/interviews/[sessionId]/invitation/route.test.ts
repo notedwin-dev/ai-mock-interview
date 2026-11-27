@@ -39,7 +39,7 @@ describe("POST /api/v1/interviews/[sessionId]/invitation", () => {
   });
 
   it("reissues a link for the owner", async () => {
-    const issued = { token: "t".repeat(43), path: `/i/${"t".repeat(43)}` };
+    const issued = { token: "t".repeat(43), path: `/interview/${"t".repeat(43)}` };
     mocks.issueInvitation.mockResolvedValue(issued);
     const response = await POST(request({ action: "reissue" }), context);
     expect(response.status).toBe(200);

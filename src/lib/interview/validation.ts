@@ -33,6 +33,9 @@ export const interviewSetupSchema = z
       .trim()
       .max(8000, "Job description must be at most 8000 characters.")
       .optional(),
+    experienceLevel: z.string().trim().max(120).optional(),
+    techStack: z.array(z.string().trim().min(1).max(80)).max(40).optional(),
+    questionCount: z.number().int().min(1).max(50).optional(),
     categoryId: z.uuid("Select a valid interview category."),
     evaluationMode: evaluationModeSchema,
     runtimeMode: runtimeModeSchema,

@@ -4,11 +4,23 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 type Helpers = {
   buildInstructions: (meta: { jobRole?: string; jobDescription?: string | null }) => string;
   itemText: (content: unknown) => string;
+  roleForMetadata: (meta: unknown) => string;
 };
 let helpers: Helpers;
 beforeAll(async () => {
   vi.stubEnv("AIMIS_AGENT_DISABLE_CLI", "1");
-  helpers = (await import("../../../scripts/livekit-interviewer.mjs")) as unknown as Helpers;
+  // Importing the LiveKit SDK is heavy under parallel test workers; give it a
+  // bounded but realistic budget instead of the default 10s hook timeout.
+  helpers = (await import("../../../scripts/livekit-agent.mjs")) as unknown as Helpers;
+}, 30000);
+
+describe("single LiveKit agent routing", () => {
+  it("routes generator and interviewer dispatches by metadata role", () => {
+    expect(helpers.roleForMetadata({ role: "generator" })).toBe("generator");
+    expect(helpers.roleForMetadata({ role: "interviewer" })).toBe("interviewer");
+    expect(helpers.roleForMetadata({})).toBe("interviewer");
+    expect(helpers.roleForMetadata(null)).toBe("interviewer");
+  });
 });
 
 describe("LiveKit interviewer agent", () => {

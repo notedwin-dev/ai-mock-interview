@@ -4,14 +4,15 @@ import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { InterviewError } from "@/lib/interview/service";
 
 /**
- * POST .../realtime/transcript — persists finalized Gemini Live turns to the
- * same chronological transcript as typed turns (FR-TRANSCRIPT-001/002).
- * Client-provided IDs make repeated deliveries idempotent (same speaker and
- * content); a reused ID carrying different content is a visible conflict.
- * Only a RUNNING
- * interview accepts live lines: the link is checked here for a fast 404, and
- * the store re-checks "active" under the session row lock at commit time so a
- * line that arrives after completion is never written.
+ * POST .../realtime/transcript — persists finalized native-realtime turns to the
+ * same chronological transcript as typed turns (FR-TRANSCRIPT-001/002/004):
+ * the store derives each interviewer utterance's kind and assessment unit, so
+ * an acknowledgement is never stored as a primary question. Client-provided IDs
+ * make repeated deliveries idempotent (same speaker and content); a reused ID
+ * carrying different content is a visible conflict. Only a RUNNING interview
+ * accepts live lines: the link is checked here for a fast 404, and the store
+ * re-checks "active" under the session row lock at commit time so a line that
+ * arrives after completion is never written.
  */
 const bodySchema = z
   .object({
@@ -53,12 +54,11 @@ export async function POST(
     }
 
     for (const message of body.messages) {
-      await store.appendRealtimeMessage(
-        interview.sessionId,
-        message.speaker,
-        message.content,
-        message.clientId,
-      );
+      await store.appendRealtimeMessage(interview.sessionId, {
+        speaker: message.speaker,
+        contentText: message.content,
+        clientId: message.clientId,
+      });
     }
     return Response.json({ saved: body.messages.length });
   } catch (error) {

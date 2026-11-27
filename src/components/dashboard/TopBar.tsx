@@ -48,6 +48,10 @@ export function TopBar({ email }: TopBarProps) {
                 <Link
                   key={item.href}
                   href={item.href}
+                  // Provider state changes on every save/probe/mode switch;
+                  // a prefetched RSC payload would show deleted rows and hide
+                  // fresh probe results after navigating back here.
+                  prefetch={false}
                   aria-current={active ? "page" : undefined}
                   className={`shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-emerald-400 ${
                     active

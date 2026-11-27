@@ -2,16 +2,20 @@ import { z } from "zod";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { decryptApiKey, encryptApiKey } from "./encryption";
+// Admin-fixed realtime model IDs are enforced on create and on PATCH (runtime batch).
+import { applyRealtimeModelRules } from "./realtime-models";
 import { CAPABILITIES, getPresetAdapter, type Capability } from "./registry";
 import type { ProviderRoute } from "./provider-route";
 import { evaluateBaseUrl } from "./ssrf";
 
 /**
  * Provider configuration service (approved component → module home,
- * docs/ARCHITECTURE.md §3). One row per (user, providerName); the JSONB
- * `capabilities_json` maps each served capability to its own settings, so
- * ASR/LLM/TTS stay independently configurable (AIMIS rule) even when one
- * provider serves several capabilities.
+ * docs/ARCHITECTURE.md §3). A row holds one provider's credentials plus the
+ * JSONB `capabilities_json` map of the capabilities it serves. The same
+ * provider may have one row per capability (e.g. Google for ASR and Google
+ * for LLM); a duplicate is only rejected when the SAME capability would be
+ * served twice. Runtime exclusivity (realtime vs custom) is high-level only.
+ * When names repeat, callers pin the exact row with its configuration id.
  *
  * Write-only credentials (FR-PROVIDER, ADR-0005): the API key is encrypted on
  * save and never read back through this module's output types. The ONLY
@@ -87,7 +91,6 @@ export type ProviderConfigErrorCode =
   | "unknown_preset"
   | "reserved_preset_name"
   | "probe_failed"
-  | "runtime_conflict"
   | "invalid_input";
 
 export class ProviderConfigError extends Error {
@@ -267,9 +270,18 @@ function toSummary(row: SelectedConfig): ProviderConfigSummary {
   };
 }
 
-async function findOwnedConfig(userId: string, providerName: string) {
+/**
+ * Looks up a row by provider name. When several rows share a name (the same
+ * provider may serve several capabilities), configId pins the exact row;
+ * otherwise the first row is used for backwards-compatible callers.
+ */
+async function findOwnedConfig(userId: string, providerName: string, configId?: string) {
   return db.userProviderConfiguration.findFirst({
-    where: { userId, providerName },
+    where: {
+      userId,
+      providerName,
+      ...(configId ? { userProviderConfigurationId: configId } : {}),
+    },
   });
 }
 
@@ -279,8 +291,44 @@ async function findOwnedConfig(userId: string, providerName: string) {
  * return type carries write-only credential material: it must never be
  * serialised into a client response or a log.
  */
-export async function findOwnedConfigRow(userId: string, providerName: string) {
-  return findOwnedConfig(userId, providerName);
+export async function findOwnedConfigRow(
+  userId: string,
+  providerName: string,
+  configId?: string,
+) {
+  return findOwnedConfig(userId, providerName, configId);
+}
+
+/* --------------------------- runtime mode ----------------------------------- */
+
+export const RUNTIME_MODES = ["realtime", "custom"] as const;
+export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+
+/** The explicitly chosen runtime; null means a legacy account with no choice yet. */
+export async function getActiveRuntimeMode(userId: string): Promise<RuntimeMode | null> {
+  const parsedUser = parseUserId(userId);
+  const account = await db.userAccount.findUnique({
+    where: { userId: parsedUser },
+    select: { activeRuntimeMode: true },
+  });
+  const mode = account?.activeRuntimeMode;
+  return mode === "realtime" || mode === "custom" ? mode : null;
+}
+
+/**
+ * Switching modes never deletes or rewrites saved configurations: it only
+ * records which runtime is active. Rows of the other mode stay in the
+ * database and are simply ignored for the duration of that mode.
+ */
+export async function setActiveRuntimeMode(
+  userId: string,
+  mode: RuntimeMode,
+): Promise<void> {
+  const parsedUser = parseUserId(userId);
+  await db.userAccount.update({
+    where: { userId: parsedUser },
+    data: { activeRuntimeMode: mode },
+  });
 }
 
 /**
@@ -305,6 +353,20 @@ export async function createProviderConfiguration(
   }
   const { normalizedBaseUrl } = validateProviderRules(parsed);
 
+  // Kept from the runtime batch: realtime model IDs are admin-fixed on every
+  // write for PRE-CONFIGURED presets (a PATCH must not smuggle in an arbitrary
+  // model either). Custom OpenAI-compatible rows keep their exact chosen ID.
+  let capabilities = parsed.capabilities;
+  if (parsed.providerType === "preset") {
+    try {
+      capabilities = applyRealtimeModelRules(parsed.capabilities, parsed.providerName);
+    } catch {
+      throw new ProviderConfigError(
+        "invalid_input",
+        "This realtime provider is not available for configuration.",
+      );
+    }
+  }
   if (!parsed.apiKey) {
     throw new ProviderConfigError(
       "missing_credential",
@@ -312,11 +374,27 @@ export async function createProviderConfiguration(
     );
   }
 
-  const existing = await findOwnedConfig(parsedUser, parsed.providerName);
-  if (existing) {
+  // Legacy accounts get their first runtime inferred from the row they add.
+  // An explicit choice is never overwritten — configs of either mode coexist.
+  if ((await getActiveRuntimeMode(parsedUser)) === null) {
+    await setActiveRuntimeMode(parsedUser, capabilities.realtime ? "realtime" : "custom");
+  }
+
+  // Runtime exclusivity is high-level only (realtime vs custom). The same
+  // provider may be configured again for a DIFFERENT capability; only a row
+  // already serving one of the requested capabilities is a duplicate.
+  const existingRows = await db.userProviderConfiguration.findMany({
+    where: { userId: parsedUser, providerName: parsed.providerName },
+    select: { capabilitiesJson: true },
+  });
+  const duplicate = existingRows.some((row) => {
+    const served = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+    return Object.keys(capabilities).some((capability) => capability in served);
+  });
+  if (duplicate) {
     throw new ProviderConfigError(
       "config_exists",
-      `A configuration named "${parsed.providerName}" already exists. Update it instead.`,
+      `"${parsed.providerName}" is already configured for this capability. Update that configuration instead.`,
     );
   }
 
@@ -332,7 +410,7 @@ export async function createProviderConfiguration(
       // Uint8Array, and driver adapters deliver/expect raw byte views.
       encryptedApiKey: new TextEncoder().encode(envelope),
       encryptionKeyVersion,
-      capabilitiesJson: parsed.capabilities,
+      capabilitiesJson: capabilities,
       credentialStatus: "unvalidated",
     },
   });
@@ -350,6 +428,7 @@ export async function updateProviderConfiguration(
   userId: string,
   providerName: string,
   patch: unknown,
+  configId?: string,
 ): Promise<ProviderConfigSummary> {
   const parsedUser = parseUserId(userId);
 
@@ -363,7 +442,7 @@ export async function updateProviderConfiguration(
     );
   }
 
-  const row = await findOwnedConfig(parsedUser, providerName);
+  const row = await findOwnedConfig(parsedUser, providerName, configId);
   if (!row) {
     throw new ProviderConfigError("not_found", "Provider configuration not found.");
   }
@@ -386,17 +465,33 @@ export async function updateProviderConfiguration(
 
   if (parsed.capabilities !== undefined) {
     const nextType = row.providerType as ProviderType;
+    // Admin-fixed realtime models apply on EVERY write to PRE-CONFIGURED
+    // presets; custom rows keep their exact model id.
+    let capabilities: CapabilitiesJson = parsed.capabilities;
+    if (nextType === "preset") {
+      try {
+        capabilities = applyRealtimeModelRules(
+          parsed.capabilities,
+          row.providerName,
+        ) as CapabilitiesJson;
+      } catch {
+        throw new ProviderConfigError(
+          "invalid_input",
+          "This realtime provider is not available for configuration.",
+        );
+      }
+    }
     const rules = validateProviderRules({
       providerType: nextType,
       providerName: row.providerName,
       baseUrl: nextType === "custom" ? (parsed.baseUrl ?? row.baseUrl ?? undefined) : undefined,
-      capabilities: parsed.capabilities,
+      capabilities,
     });
     if (nextType === "custom" && parsed.baseUrl !== undefined) {
       data.baseUrl = rules.normalizedBaseUrl;
     }
-    if (stableStringify(currentCapabilities) !== stableStringify(parsed.capabilities)) {
-      data.capabilitiesJson = parsed.capabilities;
+    if (stableStringify(currentCapabilities) !== stableStringify(capabilities)) {
+      data.capabilitiesJson = capabilities;
       materialChange = true;
     }
   } else if (parsed.baseUrl !== undefined) {
@@ -458,7 +553,9 @@ export async function listProviderConfigurations(
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser },
     select: CONFIG_SELECT,
-    orderBy: { providerName: "asc" },
+    // Most recently changed first: after a mode switch the newest matching
+    // configuration is the one the runtime should prefer.
+    orderBy: { updatedAt: "desc" },
   });
   return rows.map(toSummary);
 }
@@ -479,15 +576,28 @@ export async function resolveForOutboundCall(
   }
 
   // Deterministic when several enabled configurations serve the same
-  // capability: the oldest configuration wins (flagged for owner review —
-  // per-capability priority is not an approved requirement yet).
+  // capability: a validated connection wins over an unvalidated/dummy row,
+  // then the most recently updated wins within the same status, so switching
+  // modes picks up the latest configuration the candidate saved. Our earlier
+  // "oldest wins" rule is superseded by the active-mode migration.
+  const activeMode = await getActiveRuntimeMode(parsedUser);
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser, isEnabled: true },
-    orderBy: { createdAt: "asc" },
+    // Latest configuration first; a validated connection still wins below.
+    orderBy: { updatedAt: "desc" },
   });
-  const row = rows.find(
-    (candidate) => capability in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
-  );
+  const serving = rows.filter((candidate) => {
+    const caps = capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
+    if (!(capability in caps)) return false;
+    if (activeMode === "realtime") return Boolean(caps.realtime);
+    if (activeMode === "custom") return !caps.realtime;
+    return true;
+  });
+  // Owner decision: realtime never falls back to an unvalidated credential.
+  const row =
+    capability === "realtime"
+      ? (serving.find((candidate) => candidate.credentialStatus === "valid") ?? null)
+      : (serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0]);
   if (!row) {
     throw new ProviderConfigError(
       "not_found",
@@ -547,7 +657,7 @@ export async function resolveForOutboundCall(
  * capability (ADR-0005). For the case where the server must know WHICH
  * provider model the candidate has enabled without making an outbound call
  * (e.g. rendering the live-voice room page, which shows the model id):
- * resolves the SAME oldest-enabled row as resolveForOutboundCall and returns
+ * resolves the oldest enabled row serving the capability and returns
  * only the provider name and model id. It never reads or decrypts
  * `encrypted_api_key` (write-only invariant), and the result is not an
  * authorization to call the provider.
@@ -604,10 +714,15 @@ export async function resolveEnabledModel(
 export async function deleteProviderConfiguration(
   userId: string,
   providerName: string,
+  configId?: string,
 ): Promise<void> {
   const parsedUser = parseUserId(userId);
   const result = await db.userProviderConfiguration.deleteMany({
-    where: { userId: parsedUser, providerName },
+    where: {
+      userId: parsedUser,
+      providerName,
+      ...(configId ? { userProviderConfigurationId: configId } : {}),
+    },
   });
   if (result.count === 0) {
     throw new ProviderConfigError("not_found", "Provider configuration not found.");

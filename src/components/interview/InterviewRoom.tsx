@@ -1,21 +1,38 @@
 "use client";
 
+// Combined: our mic-lifecycle hooks (useCallback) plus the runtime batch's UI
+// additions (mute control and the explicit end-interview action).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Loader2, MessageSquare, Mic, Send, X } from "lucide-react";
+import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
+import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
 import type { InvitationView } from "@/lib/interview/invitations";
+import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
 /**
  * Live interview room (FR-INTERVIEW-003/004, TT-8 re-layer): two participant
  * panels with AI states and a chronological transcript in an independently
  * openable OVERLAY (never a sidebar). All turns go through the token-scoped
- * API; the camera is never an AI input (ADR-005).
+ * API; the camera is never an AI input (ADR-005). Microphone audio is sent to
+ * the configured ASR provider only after the candidate presses Record answer.
  */
+const GHOST =
+  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
+
+/** Candidate-facing wording; storage-level message kinds stay out of the UI. */
+function messageKindLabel(message: TranscriptEntry): string {
+  if (message.speakerType === "candidate") return "Answer";
+  if (message.messageKind === "primary_question") return "Question";
+  if (message.messageKind === "follow_up_question") return "Follow-up";
+  return "Interviewer";
+}
+
 export function InterviewRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const [messages, setMessages] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
   // Monotonic counter for applied turn results: the initial transcript load
@@ -176,17 +193,21 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       setDraft("");
       pendingKeyRef.current = null;
       // Voice playback is best-effort: the transcript is the source of truth.
+      let audioPlaying = false;
       if (body.audioBase64) {
         try {
-          void new Audio(`data:audio/mp3;base64,${body.audioBase64}`).play().catch(() => undefined);
+          const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
+          audio.onended = () => setState("listening");
+          void audio.play().catch(() => undefined);
+          audioPlaying = true;
         } catch {
           // Browser blocked autoplay — the text reply is still visible.
         }
       }
-      setState(body.endCall ? "listening" : "speaking");
+      // Only claim "speaking" while audio is actually playing; end wins over
+      // both, and capture is cancelled so no late audio can post a turn.
+      setState(body.endCall || !audioPlaying ? "listening" : "speaking");
       if (body.endCall) {
-        // The interview is over server-side: stop capturing immediately so no
-        // further audio is posted, and mark the room ended.
         releaseRecording(true);
         setRecording(false);
         setEnded(true);
@@ -241,6 +262,12 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
+  function toggleMute() {
+    const next = !muted;
+    setMuted(next);
+    streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
+  }
+
   async function startRecording() {
     // One microphone request at a time: a second activation while the first is
     // still pending is ignored instead of acquiring a second stream (and
@@ -258,6 +285,8 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         return;
       }
+      // Honour the mute preference chosen in the room/waiting room.
+      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
       streamRef.current = stream;
 
       let recorder: MediaRecorder;
@@ -313,7 +342,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface px-5 py-3">
         <div>
           <h1 className="font-display text-lg font-semibold text-ink">Mock interview · {interview.jobRole}</h1>
-          <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {interview.evaluationMode} mode</p>
+          <p className="text-xs text-ink-muted">{interview.categoryNameSnapshot} · {evaluationModeLabel(interview.evaluationMode)} mode</p>
         </div>
         <button type="button" onClick={() => setOverlayOpen((open) => !open)} className="btn-ghost">
           {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
@@ -338,14 +367,25 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
           <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">Type your answers below.</p>
-          <p className="mt-3 text-xs text-ink-muted">Camera is not used. Microphone audio is used only when you start a voice feature.</p>
+          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
+          <button
+            type="button"
+            onClick={toggleMute}
+            aria-pressed={muted}
+            className={`${GHOST} mt-4`}>
+            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
+            {muted ? "Unmute" : "Mute"}
+          </button>
+          <p className="mt-3 text-xs text-ink-muted">Type your answers below.</p>
+          <p className="mt-3 max-w-xs text-xs text-ink-muted">
+            Your camera is never used as AI input. Microphone audio is sent to the configured ASR provider only when you press Record answer.
+          </p>
         </section>
       </div>
 
       {ended ? (
         <div className="rounded-2xl border border-emerald-400/40 bg-surface p-5 text-sm text-ink">
-          The interview has ended. Your transcript and report will be available in your history.
+          The interview has ended. Your transcript has been saved.
         </div>
       ) : (
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
@@ -381,15 +421,31 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           </button>
         </form>
       )}
+      {!ended ? (
+        <div className="flex justify-center">
+          <EndInterviewButton
+            token={token}
+            feedbackHref={`/dashboard/interview/${interview.sessionId}/feedback`}
+            onEnded={() => {
+              setEnded(true);
+              setOverlayOpen(false);
+            }}
+          />
+        </div>
+      ) : null}
       {voiceNotice ? <p className="text-sm text-amber-300" role="status">{voiceNotice}</p> : null}
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-modal="true" aria-label="Conversation transcript" ref={overlayRef}>
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/60" role="dialog" aria-modal="true" aria-labelledby="conversation-heading" aria-label="Conversation transcript">
           <button type="button" aria-label="Close conversation" onClick={() => setOverlayOpen(false)} className="absolute inset-0 cursor-default" />
-          <div className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5">
+          <div
+            ref={overlayRef}
+            tabIndex={-1}
+            className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5 outline-none"
+          >
             <div className="flex items-center justify-between">
-              <h2 className="font-display text-lg font-semibold text-ink">Conversation</h2>
+              <h2 id="conversation-heading" className="font-display text-lg font-semibold text-ink">Conversation</h2>
               <button type="button" onClick={() => setOverlayOpen(false)} className="btn-ghost">Close</button>
             </div>
             {messages.length === 0 ? (
@@ -398,7 +454,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
               messages.map((message) => (
                 <div key={message.sequenceNumber} className={`max-w-[90%] rounded-2xl px-4 py-2 text-sm ${message.speakerType === "candidate" ? "self-end bg-emerald-400/15 text-ink" : "self-start bg-raised text-ink-soft"}`}>
                   <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-ink-muted">
-                    {message.speakerType === "candidate" ? "You" : "AI"} · {message.messageKind.replace(/_/g, " ")}
+                    {message.speakerType === "candidate" ? "You" : "AI"} · {messageKindLabel(message)}
                   </span>
                   {message.contentText}
                 </div>

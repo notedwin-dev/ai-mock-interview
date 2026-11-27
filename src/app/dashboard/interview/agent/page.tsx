@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { requireAccount } from "@/lib/auth/guard";
-import { listProviderConfigurations } from "@/lib/providers/config";
+import {
+  getActiveRuntimeMode,
+  listProviderConfigurations,
+} from "@/lib/providers/config";
 import { listActiveInterviewCategories } from "@/lib/interview/service";
 import { selectRuntime } from "@/lib/interview/runtime";
 import { InterviewAgent } from "@/components/interview/InterviewAgent";
@@ -23,7 +26,10 @@ export const instant = false;
  */
 export default async function AgentPage() {
   const { account } = await requireAccount({ role: "candidate" });
-  const runtime = selectRuntime(await listProviderConfigurations(account.userId));
+  const runtime = selectRuntime(
+    await listProviderConfigurations(account.userId),
+    await getActiveRuntimeMode(account.userId),
+  );
   const categories = await listActiveInterviewCategories();
 
   return (

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { RoomError, runRoomTurn, type RoomContext, type RoomStore, type TranscriptEntry } from "./room";
+import {
+  RoomError,
+  runRoomTurn,
+  type RealtimeTranscriptMessage,
+  type RoomContext,
+  type RoomStore,
+  type TranscriptEntry,
+} from "./room";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { InterviewError } from "./service";
 import { UnitConflictError } from "./unit-conflict";
@@ -15,6 +22,9 @@ const context: RoomContext = {
   userId: "owner-1",
   jobRole: "Backend Engineer",
   jobDescription: "Design APIs",
+  experienceLevel: null,
+  techStack: [],
+  questionCount: null,
   evaluationMode: "balanced",
   status: "scheduled",
 };
@@ -67,8 +77,29 @@ function fakeStore(initial: RoomContext = context) {
       messages.push(entry);
       return entry;
     },
+    async appendInterviewerWithNewUnit(_sessionId, contentText) {
+      units.filter((u) => u.status === "open").forEach((u) => { u.status = "closed"; });
+      const id = `unit-${++unitSeq}`;
+      units.push({ id, status: "open" });
+      const entry = {
+        sequenceNumber: ++seq,
+        speakerType: "interviewer",
+        messageKind: "primary_question",
+        contentText,
+        assessmentUnitId: id,
+      };
+      messages.push(entry);
+      return entry;
+    },
     async activeUnit() { return units.find((u) => u.status === "open")?.id ?? null; },
-    async openUnit() { const id = `unit-${++unitSeq}`; units.push({ id, status: "open" }); return id; },
+    // Both sides combined: explicit unit rollback hooks from our review fixes
+    // plus the runtime batch's atomic appendInterviewerWithNewUnit.
+    async openUnit() {
+      units.filter((u) => u.status === "open").forEach((u) => { u.status = "closed"; });
+      const id = `unit-${++unitSeq}`;
+      units.push({ id, status: "open" });
+      return id;
+    },
     async closeUnit(id) { const unit = units.find((u) => u.id === id); if (unit) unit.status = "closed"; },
     async rollbackUnit(id) { const index = units.findIndex((u) => u.id === id); if (index >= 0) units.splice(index, 1); },
     async complete() { current.status = "completed"; },
@@ -81,9 +112,15 @@ function fakeStore(initial: RoomContext = context) {
       if (index >= 0) messages.splice(index, 1);
       return true;
     },
-    // Minimal stand-in: the DB-backed default store has its own tests
-    // (invitations.db.test.ts) covering the realtime unit-joining rules.
-    async appendRealtimeMessage(_sessionId, speaker, contentText) {
+    // Minimal stand-in: content-aware realtime unit rules have DB-backed tests
+    // in invitations.db.test.ts. Accept both call shapes used across the tree.
+    async appendRealtimeMessage(
+      _sessionId,
+      messageOrSpeaker: RealtimeTranscriptMessage | "candidate" | "interviewer",
+      positionalContent?: string,
+    ) {
+      const speaker = typeof messageOrSpeaker === "string" ? messageOrSpeaker : messageOrSpeaker.speaker;
+      const contentText = typeof messageOrSpeaker === "string" ? (positionalContent ?? "") : messageOrSpeaker.contentText;
       const entry: TranscriptEntry = {
         sequenceNumber: ++seq,
         speakerType: speaker,
@@ -220,7 +257,9 @@ describe("runRoomTurn", () => {
     const deps = {
       store: {
         ...store,
-        openUnit: async () => {
+        // Primary questions now use the atomic open+append seam; the unit
+        // race is simulated there instead of on the legacy openUnit seam.
+        appendInterviewerWithNewUnit: async () => {
           throw new UnitConflictError();
         },
       },
@@ -301,16 +340,20 @@ describe("runRoomTurn", () => {
   it("resumes a pending turn after the reply fails and removes its orphaned unit", async () => {
     const { store, messages, units } = fakeStore();
     let failAppend = true;
-    const appendInterviewer = store.appendInterviewer;
+    const appendWithUnit = store.appendInterviewerWithNewUnit;
     const deps = {
       store: {
         ...store,
-        appendInterviewer: async (...args: Parameters<RoomStore["appendInterviewer"]>) => {
+        // The first reply write fails after the unit was opened; the fake's
+        // atomic seam rolls that unit back before surfacing the failure.
+        appendInterviewerWithNewUnit: async (
+          ...args: Parameters<RoomStore["appendInterviewerWithNewUnit"]>
+        ) => {
           if (failAppend) {
             failAppend = false;
             throw new Error("reply write failed");
           }
-          return appendInterviewer(...args);
+          return appendWithUnit(...args);
         },
       },
       resolveRoute: async () => llmRoute,
@@ -459,6 +502,53 @@ describe("runRoomTurn", () => {
     });
     expect(failedVoice.audioBase64).toBeNull();
     expect(failedVoice.messages).toHaveLength(4); // turn text still persisted
+  });
+
+  it("stores a closing transition as an acknowledgement with no assessment unit", async () => {
+    const { store, messages, units } = fakeStore();
+    const result = await runRoomTurn(
+      TOKEN,
+      { contentText: "Thanks for the interview." },
+      {
+        store,
+        resolveRoute: async () => llmRoute,
+        generate: async () => ({
+          interviewerText: "That is everything — thanks for your time.",
+          messageKind: "transition" as const,
+          endCall: true,
+        }),
+      },
+    );
+
+    const reply = messages[messages.length - 1];
+    // "transition" is not in the message_kind domain: it is stored as a
+    // conversational acknowledgement and never independently evaluated.
+    expect(reply?.messageKind).toBe("acknowledgement");
+    expect(reply?.assessmentUnitId).toBeNull();
+    expect(units).toHaveLength(0);
+    expect(result.endCall).toBe(true);
+  });
+
+  it("opens an assessment unit when the very first reply is a follow-up", async () => {
+    const { store, messages, units } = fakeStore();
+    await runRoomTurn(
+      TOKEN,
+      { contentText: "I have been working as a developer." },
+      {
+        store,
+        resolveRoute: async () => llmRoute,
+        generate: async () => ({
+          interviewerText: "Can you tell me more about that?",
+          messageKind: "follow_up_question" as const,
+          endCall: false,
+        }),
+      },
+    );
+
+    // A follow-up with no active unit would leave the question unassessable.
+    expect(units).toHaveLength(1);
+    expect(messages[messages.length - 1]?.messageKind).toBe("primary_question");
+    expect(messages[messages.length - 1]?.assessmentUnitId).toBe("unit-1");
   });
 
   it("rejects unknown links and interviews that are not in a joinable state", async () => {

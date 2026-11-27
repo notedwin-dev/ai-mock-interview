@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ context: vi.fn(), mint: vi.fn(), dispatch: vi.fn(async () => true) }));
-vi.mock("@/lib/interview/room-store", () => ({ createDefaultRoomStore: () => ({ context: mocks.context }) }));
+const mocks = vi.hoisted(() => ({
+  context: vi.fn(),
+  activate: vi.fn(async () => undefined),
+  mint: vi.fn(),
+  dispatch: vi.fn(async () => true),
+}));
+vi.mock("@/lib/interview/room-store", () => ({
+  createDefaultRoomStore: () => ({ context: mocks.context, activate: mocks.activate }),
+}));
 vi.mock("@/lib/interview/livekit-token", () => ({ mintParticipantToken: mocks.mint }));
 vi.mock("@/lib/interview/livekit-dispatch", () => ({ dispatchInterviewerAgent: mocks.dispatch }));
 vi.mock("@/lib/livekit/env", () => ({
@@ -35,6 +42,9 @@ describe("POST .../webrtc/token", () => {
       expect.objectContaining({ room: "session-1", inviteToken: TOKEN }),
       expect.objectContaining({ apiKey: "key" }),
     );
+    // Joining activates a scheduled session so the End control works before
+    // any LiveKit webhook is configured.
+    expect(mocks.activate).toHaveBeenCalledWith("session-1");
   });
 
   it("refuses invalid links", async () => {

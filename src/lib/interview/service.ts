@@ -6,14 +6,28 @@ import {
   type InterviewSession,
 } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { ProviderConfigError, resolveForOutboundCall } from "@/lib/providers/config";
+// Combined: the runtime-batch route snapshot (runtime-mode selection) and our
+// review fixes (idempotent creation, locked transcript appends) both stay.
+import {
+  getActiveRuntimeMode,
+  listProviderConfigurations,
+} from "@/lib/providers/config";
+import { getPresetAdapter } from "@/lib/providers/registry";
+import { selectRuntime } from "./runtime";
 import {
   createInvitationToken,
   hashInvitationToken,
   invitationPath,
 } from "./invitation-token";
-import type { RoomStore, TranscriptEntry } from "./room";
+import type {
+  RealtimeTranscriptMessage,
+  RoomStore,
+  TranscriptEntry,
+} from "./room";
 import { findActiveSessionByToken, issueInvitation, type IssuedInvitation } from "./invitations";
+// Runtime-batch utterance classification: a realtime acknowledgement is never
+// stored as an assessable question (FR-TRANSCRIPT-004).
+import { classifyInterviewerUtterance } from "./realtime-transcript";
 import { UnitConflictError } from "./unit-conflict";
 import {
   interviewSetupSchema,
@@ -65,7 +79,8 @@ export const INTERVIEWER_PROMPT_VERSION = "v0-typed-slice";
  * before an outbound call (ADR-0005, NFR-SEC-003).
  */
 export interface ProviderRouteSnapshot {
-  capability: "llm";
+  // Both runtimes are snapshotted at creation (ADR-006): exactly one is active.
+  capability: "llm" | "realtime";
   providerName: string;
   providerType: string;
   baseUrl: string;
@@ -79,6 +94,9 @@ export interface SessionSummary {
   sessionId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   categoryId: string;
   categoryCodeSnapshot: string;
   categoryNameSnapshot: string;
@@ -117,6 +135,11 @@ function toSessionSummary(
     sessionId: session.sessionId,
     jobRole: session.jobRole,
     jobDescription: session.jobDescription,
+    experienceLevel: session.experienceLevel,
+    techStack: Array.isArray(session.techStack)
+      ? (session.techStack as unknown[]).filter((v): v is string => typeof v === "string")
+      : [],
+    questionCount: session.questionCount,
     categoryId: session.categoryId,
     categoryCodeSnapshot: session.categoryCodeSnapshot,
     categoryNameSnapshot: session.categoryNameSnapshot,
@@ -179,28 +202,48 @@ async function loadOwnedSession(
   return session;
 }
 
-async function loadRouteSnapshot(userId: string): Promise<ProviderRouteSnapshot> {
-  try {
-    // The interviewer/question-generation capability (FR-INTERVIEW-002) —
-    // resolved at creation so a session always knows which route it was
-    // built against; the decrypted key never leaves resolveForOutboundCall.
-    const route = await resolveForOutboundCall(userId, "llm");
-    return {
-      capability: "llm",
-      providerName: route.providerName,
-      providerType: route.providerType,
-      baseUrl: route.baseUrl,
-      modelId: route.modelId,
-    };
-  } catch (error) {
-    if (error instanceof ProviderConfigError && error.code === "not_found") {
-      throw new InterviewError(
-        "provider_route_missing",
-        "Configure a provider with an LLM capability before starting an interview.",
-      );
-    }
-    throw error;
+/**
+ * Snapshots the ONE selected runtime (ADR-006): a native realtime agent or the
+ * custom LLM pipeline. Kept from the runtime batch so a realtime-only candidate
+ * can still create a session; no credential is decrypted here (ADR-0005).
+ */
+async function selectRouteSnapshot(
+  userId: string,
+): Promise<{ snapshot: ProviderRouteSnapshot; runtimeMode: RuntimeMode }> {
+  const runtime = selectRuntime(
+    await listProviderConfigurations(userId),
+    await getActiveRuntimeMode(userId),
+  );
+  if (!runtime.ready || !runtime.row) {
+    throw new InterviewError(
+      "provider_route_missing",
+      runtime.mode === "realtime"
+        ? "The realtime agent configuration is not usable yet."
+        : "Configure a realtime agent or an LLM provider before starting an interview.",
+    );
   }
+  const row = runtime.row;
+  const capability = runtime.mode === "realtime" ? "realtime" : "llm";
+  const baseUrl =
+    row.providerType === "custom"
+      ? row.baseUrl
+      : getPresetAdapter(row.providerName)?.defaultBaseUrl ?? null;
+  if (!baseUrl) {
+    throw new InterviewError(
+      "provider_route_missing",
+      "The selected provider has no usable endpoint.",
+    );
+  }
+  return {
+    snapshot: {
+      capability,
+      providerName: row.providerName,
+      providerType: row.providerType,
+      baseUrl,
+      modelId: row.capabilities[capability]?.modelId ?? "",
+    },
+    runtimeMode: runtime.mode === "realtime" ? "preset_realtime" : "custom",
+  };
 }
 
 /** Normalizes and validates a candidate-supplied creation idempotency key. */
@@ -299,7 +342,10 @@ export async function createInterviewSession(
     throw new InterviewError("invalid_input", "Select an active interview category.");
   }
 
-  const providerRouteSnapshot = await loadRouteSnapshot(userId);
+  // Combine: the runtime snapshot (which runtime actually has a usable route)
+  // wins over the candidate's requested mode, while idempotent creation and
+  // the generation fields from both sides are preserved.
+  const { snapshot: providerRouteSnapshot, runtimeMode } = await selectRouteSnapshot(userId);
 
   // FR-SETUP-007/008: the interview is born scheduled/ready, with a
   // revocable link whose raw capability is never stored (only its hash).
@@ -311,11 +357,14 @@ export async function createInterviewSession(
         userId,
         jobRole: parsed.jobRole,
         jobDescription: parsed.jobDescription ?? null,
+        experienceLevel: parsed.experienceLevel ?? null,
+        techStack: parsed.techStack ? (parsed.techStack as unknown as Prisma.InputJsonValue) : undefined,
+        questionCount: parsed.questionCount ?? null,
         categoryId: category.categoryId,
         categoryCodeSnapshot: category.categoryCode,
         categoryNameSnapshot: category.categoryName,
         evaluationMode: parsed.evaluationMode,
-        runtimeMode: parsed.runtimeMode,
+        runtimeMode,
         providerRouteSnapshot:
           providerRouteSnapshot as unknown as Prisma.InputJsonValue,
         interviewerPromptVersion: INTERVIEWER_PROMPT_VERSION,
@@ -382,6 +431,15 @@ export async function endInterviewSession(
   sessionId: string,
 ): Promise<SessionSummary> {
   const session = await loadOwnedSession(userId, sessionId);
+  // FR-INTERVIEW-011: a repeated end request is idempotent — an already
+  // completed interview returns its stored state instead of a second
+  // completion event or an error.
+  if (session.status === "completed") {
+    return toSessionSummary(
+      session,
+      session.providerRouteSnapshot as unknown as ProviderRouteSnapshot,
+    );
+  }
   if (session.status !== "active") {
     throw new InterviewError("invalid_state", "Only an active interview can be ended.");
   }
@@ -578,6 +636,11 @@ export function createRoomStore(): RoomStore {
         userId: session.userId,
         jobRole: session.jobRole,
         jobDescription: session.jobDescription,
+        experienceLevel: session.experienceLevel,
+        techStack: Array.isArray(session.techStack)
+          ? session.techStack.filter((value): value is string => typeof value === "string")
+          : [],
+        questionCount: session.questionCount,
         evaluationMode: session.evaluationMode,
         status: session.status,
       };
@@ -684,17 +747,72 @@ export function createRoomStore(): RoomStore {
       };
     },
 
+    /** Opens the next assessment unit and stores its first question atomically. */
+    async appendInterviewerWithNewUnit(sessionId, contentText) {
+      return db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT session_id FROM interview_session WHERE session_id = ${sessionId}::uuid FOR UPDATE`;
+        await tx.interviewAssessmentUnit.updateMany({
+          where: { sessionId, status: "open" },
+          data: { status: "closed", closedAt: new Date() },
+        });
+        const maxUnit = await tx.interviewAssessmentUnit.aggregate({
+          where: { sessionId },
+          _max: { unitNumber: true },
+        });
+        const unit = await tx.interviewAssessmentUnit.create({
+          data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
+          select: { assessmentUnitId: true },
+        });
+        const maxSeq = await tx.conversationMessage.aggregate({
+          where: { sessionId },
+          _max: { sequenceNumber: true },
+        });
+        const message = await tx.conversationMessage.create({
+          data: {
+            sessionId,
+            sequenceNumber: (maxSeq._max.sequenceNumber ?? 0) + 1,
+            speakerType: "interviewer",
+            messageKind: "primary_question",
+            contentText,
+            assessmentUnitId: unit.assessmentUnitId,
+          },
+        });
+        return {
+          sequenceNumber: message.sequenceNumber,
+          speakerType: message.speakerType,
+          messageKind: message.messageKind,
+          contentText: message.contentText,
+          assessmentUnitId: message.assessmentUnitId,
+        };
+      });
+    },
+
     /**
-     * Appends one finalized realtime (Gemini Live) message, idempotent on the
-     * provider's client id AND content; a reused id carrying different text
-     * or a different speaker is rejected visibly instead of being discarded.
-     * Kept here because `room-store.ts` now re-exports
-     * this store; the unit-assignment rules mirror the reviewed room engine.
-     * Admission is RUNNING-only and checked under the session row lock below
-     * (the route's earlier check is only a fast 404); a live session never
-     * starts a scheduled interview.
+     * Appends one finalized native-realtime line, idempotent on the client id.
+     * Both call shapes are supported: the object form used by the transcript
+     * route and the positional form used by earlier callers/DB tests. A reused
+     * id with different content/speaker is a visible conflict; interviewer text
+     * is classified so an acknowledgement never becomes a primary question.
+     * Admission is RUNNING-only and re-checked under the session row lock.
      */
-    async appendRealtimeMessage(sessionId, speaker, contentText, clientId) {
+    async appendRealtimeMessage(
+      sessionId,
+      messageOrSpeaker: RealtimeTranscriptMessage | "candidate" | "interviewer",
+      positionalContent?: string,
+      positionalClientId?: string,
+    ) {
+      const isPositional = typeof messageOrSpeaker === "string";
+      const message: RealtimeTranscriptMessage = isPositional
+        ? {
+            speaker: messageOrSpeaker,
+            contentText: positionalContent ?? "",
+            clientId: positionalClientId ?? "",
+          }
+        : messageOrSpeaker;
+      const { speaker, contentText, clientId } = message;
+      // Content-aware classification is opt-in via the object form (the native
+      // realtime wire); the positional form keeps its legacy unit semantics.
+      const classifyKind = !isPositional;
       const toEntry = (message: {
         sequenceNumber: number;
         speakerType: string;
@@ -752,25 +870,42 @@ export function createRoomStore(): RoomStore {
               orderBy: { unitNumber: "desc" },
               select: { assessmentUnitId: true },
             });
-            let messageKind: "candidate_response" | "primary_question" | "follow_up_question";
+            let messageKind: "candidate_response" | "primary_question" | "follow_up_question" | "acknowledgement";
             let assessmentUnitId: string | null = openUnit?.assessmentUnitId ?? null;
             if (speaker === "candidate") {
               messageKind = "candidate_response";
-            } else if (openUnit) {
-              messageKind = "follow_up_question";
             } else {
-              messageKind = "primary_question";
-              const maxUnit = await tx.interviewAssessmentUnit.aggregate({
-                where: { sessionId },
-                _max: { unitNumber: true },
-              });
-              // The unit and its first question are written in the same
-              // transaction: a failed message insert rolls the unit back.
-              const unit = await tx.interviewAssessmentUnit.create({
-                data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
-                select: { assessmentUnitId: true },
-              });
-              assessmentUnitId = unit.assessmentUnitId;
+              // Content-aware kind (runtime batch): a conversational reply is an
+              // acknowledgement and joins no assessment unit; a follow-up joins
+              // the open unit, and a new primary question opens a fresh one.
+              const classified = classifyKind
+                ? classifyInterviewerUtterance(contentText)
+                : "primary_question";
+              messageKind = classified === "follow_up_question" && !openUnit
+                ? "primary_question"
+                : classified;
+              if (messageKind === "primary_question") {
+                // A new assessment area closes the previous open unit first
+                // (one-open-unit partial index), then opens the next numbered
+                // one in the same locked transaction.
+                await tx.interviewAssessmentUnit.updateMany({
+                  where: { sessionId, status: "open" },
+                  data: { status: "closed", closedAt: new Date() },
+                });
+                const maxUnit = await tx.interviewAssessmentUnit.aggregate({
+                  where: { sessionId },
+                  _max: { unitNumber: true },
+                });
+                // The unit and its first question are written in the same
+                // transaction: a failed message insert rolls the unit back.
+                const unit = await tx.interviewAssessmentUnit.create({
+                  data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
+                  select: { assessmentUnitId: true },
+                });
+                assessmentUnitId = unit.assessmentUnitId;
+              } else if (messageKind === "acknowledgement") {
+                assessmentUnitId = null;
+              }
             }
 
             const aggregate = await tx.conversationMessage.aggregate({
@@ -810,8 +945,18 @@ export function createRoomStore(): RoomStore {
 
     async openUnit(sessionId, unitNumber) {
       try {
+        // Legacy callers pin a number (DB test asserts the one-open-unit index);
+        // new callers let the store allocate the next number atomically.
+        let number = unitNumber;
+        if (number === undefined) {
+          const max = await db.interviewAssessmentUnit.aggregate({
+            where: { sessionId },
+            _max: { unitNumber: true },
+          });
+          number = (max._max.unitNumber ?? 0) + 1;
+        }
         const unit = await db.interviewAssessmentUnit.create({
-          data: { sessionId, unitNumber },
+          data: { sessionId, unitNumber: number },
           select: { assessmentUnitId: true },
         });
         return unit.assessmentUnitId;
