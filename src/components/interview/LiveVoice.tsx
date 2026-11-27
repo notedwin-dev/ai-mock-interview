@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { experimental_useRealtime } from "@ai-sdk/react";
 import { google } from "@ai-sdk/google";
 
@@ -25,12 +25,26 @@ interface LiveLine {
  * "saved" only after the transcript route answered 2xx, and "in flight"
  * while a post with the same clientId is still running.
  */
-const lineRegistries = new Map<string, { saved: Set<string>; inFlight: Set<string> }>();
+const lineRegistries = new Map<
+  string,
+  {
+    saved: Set<string>;
+    inFlight: Set<string>;
+    /** Finalized lines awaiting persistence, strictly in arrival order. */
+    queue: LiveLine[];
+    draining: boolean;
+  }
+>();
 
 function lineRegistry(token: string) {
   const existing = lineRegistries.get(token);
   if (existing) return existing;
-  const created = { saved: new Set<string>(), inFlight: new Set<string>() };
+  const created = {
+    saved: new Set<string>(),
+    inFlight: new Set<string>(),
+    queue: [] as LiveLine[],
+    draining: false,
+  };
   lineRegistries.set(token, created);
   return created;
 }
@@ -62,9 +76,7 @@ export function LiveVoice({
   const [lines, setLines] = useState<LiveLine[]>([]);
   const [failed, setFailed] = useState<LiveLine[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
-  const registry = lineRegistry(token);
-
-  async function post(line: LiveLine): Promise<boolean> {
+  const post = useCallback(async (line: LiveLine): Promise<boolean> => {
     for (let attempt = 1; attempt <= TRANSCRIPT_POST_ATTEMPTS; attempt++) {
       try {
         const response = await fetch(
@@ -90,22 +102,58 @@ export function LiveVoice({
       }
     }
     return false;
-  }
+  }, [token]);
 
-  /** Persists a finalized line once; an id counts as saved only after a 2xx. */
-  async function persist(line: LiveLine) {
-    let saved = false;
+  /**
+   * Ordered outbox: only the head line is posted, and the next line is
+   * attempted only once that one is acknowledged. A failed head STAYS at the
+   * front — later lines wait behind it, so nothing is silently dropped or
+   * reordered. Manual retry re-posts that same head with its original clientId
+   * (the server deduplicates), including after a permanent rejection if the
+   * underlying condition (e.g. a completed-but-still-open link) is resolved.
+   */
+  const drainOutbox = useCallback(async () => {
+    const reg = lineRegistry(token);
+    if (reg.draining) return;
+    reg.draining = true;
     try {
-      saved = await post(line);
-      if (saved) registry.saved.add(line.clientId);
+      while (reg.queue.length > 0) {
+        const head = reg.queue[0]!;
+        const saved = await post(head);
+        if (!saved) {
+          setFailed([head]);
+          setNotice(
+            "A transcript line could not be saved. Later lines are waiting behind it — retry to continue.",
+          );
+          return;
+        }
+        reg.saved.add(head.clientId);
+        reg.queue.shift();
+        setFailed([]);
+      }
     } finally {
-      registry.inFlight.delete(line.clientId);
+      reg.draining = false;
     }
-    if (!saved) {
-      setNotice("A transcript line could not be saved; it remains visible here.");
-      setFailed((current) => (current.some((l) => l.clientId === line.clientId) ? current : [...current, line]));
-    }
-  }
+  }, [post, token]);
+
+  const handleEvent = useCallback(
+    (event: Parameters<NonNullable<Parameters<typeof experimental_useRealtime>[0]["onEvent"]>>[0]) => {
+      const reg = lineRegistry(token);
+      const line: LiveLine | null =
+        event.type === "input-transcription-completed" && "transcript" in event
+          ? { speaker: "candidate", text: String(event.transcript ?? ""), clientId: `in-${event.itemId}` }
+          : event.type === "audio-transcript-done" && "transcript" in event
+            ? { speaker: "interviewer", text: String(event.transcript ?? ""), clientId: `out-${event.itemId}` }
+            : null;
+      if (!line || !line.text) return;
+      if (reg.saved.has(line.clientId) || reg.inFlight.has(line.clientId)) return;
+      reg.inFlight.add(line.clientId);
+      setLines((current) => [...current, line]);
+      reg.queue.push(line);
+      void drainOutbox();
+    },
+    [drainOutbox, token],
+  );
 
   const realtime = experimental_useRealtime({
     model: google.experimental_realtime(modelId),
@@ -117,19 +165,7 @@ export function LiveVoice({
       outputModalities: ["audio"],
     },
     onError: () => setNotice("The live session reported an error. Reconnect to try again."),
-    onEvent: (event) => {
-      const line: LiveLine | null =
-        event.type === "input-transcription-completed" && "transcript" in event
-          ? { speaker: "candidate", text: String(event.transcript ?? ""), clientId: `in-${event.itemId}` }
-          : event.type === "audio-transcript-done" && "transcript" in event
-            ? { speaker: "interviewer", text: String(event.transcript ?? ""), clientId: `out-${event.itemId}` }
-            : null;
-      if (!line || !line.text) return;
-      if (registry.saved.has(line.clientId) || registry.inFlight.has(line.clientId)) return;
-      registry.inFlight.add(line.clientId);
-      setLines((current) => [...current, line]);
-      void persist(line);
-    },
+    onEvent: handleEvent,
   });
 
   const connected = realtime.session !== undefined;
@@ -177,14 +213,7 @@ export function LiveVoice({
           <button
             type="button"
             className="underline"
-            onClick={() => {
-              const retry = failed;
-              setFailed([]);
-              for (const line of retry) {
-                registry.inFlight.add(line.clientId);
-                void persist(line);
-              }
-            }}
+            onClick={() => void drainOutbox()}
           >
             Retry
           </button>
