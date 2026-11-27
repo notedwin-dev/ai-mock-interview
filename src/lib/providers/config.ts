@@ -3,6 +3,7 @@ import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { decryptApiKey, encryptApiKey } from "./encryption";
 import { CAPABILITIES, getPresetAdapter, type Capability } from "./registry";
+import type { ProviderRoute } from "./provider-route";
 import { evaluateBaseUrl } from "./ssrf";
 
 /**
@@ -470,13 +471,7 @@ export async function listProviderConfigurations(
 export async function resolveForOutboundCall(
   userId: string,
   capability: Capability,
-): Promise<{
-  providerName: string;
-  providerType: ProviderType;
-  baseUrl: string;
-  modelId: string;
-  apiKey: string;
-}> {
+): Promise<ProviderRoute> {
   const parsedUser = parseUserId(userId);
   if (!CAPABILITIES.includes(capability)) {
     throw new ProviderConfigError("invalid_input", "Unknown capability.");
@@ -544,6 +539,64 @@ export async function resolveForOutboundCall(
     // toString encodings); decode explicitly to the envelope string.
     apiKey: decryptApiKey(new TextDecoder().decode(envelopeBytes)),
   };
+}
+
+/**
+ * Credential-free resolution of the enabled provider + model for a
+ * capability (ADR-0005). For the case where the server must know WHICH
+ * provider model the candidate has enabled without making an outbound call
+ * (e.g. rendering the live-voice room page, which shows the model id):
+ * resolves the SAME oldest-enabled row as resolveForOutboundCall and returns
+ * only the provider name and model id. It never reads or decrypts
+ * `encrypted_api_key` (write-only invariant), and the result is not an
+ * authorization to call the provider.
+ *
+ * Fails closed with `ProviderConfigError` when no enabled row serves the
+ * capability or the capability has no configured model — callers must
+ * explain the situation to the user (the room page surfaces the reason and
+ * how to fix it); they never fail silently.
+ */
+export async function resolveEnabledModel(
+  userId: string,
+  capability: Capability,
+): Promise<{ providerName: string; modelId: string }> {
+  const parsedUser = parseUserId(userId);
+  if (!CAPABILITIES.includes(capability)) {
+    throw new ProviderConfigError("invalid_input", "Unknown capability.");
+  }
+
+  const rows = await db.userProviderConfiguration.findMany({
+    where: { userId: parsedUser, isEnabled: true },
+    orderBy: { createdAt: "asc" },
+    // Credential-free resolution: never read (let alone decrypt) the key.
+    select: { providerType: true, providerName: true, capabilitiesJson: true },
+  });
+  const row = rows.find(
+    (candidate) => capability in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
+  );
+  if (!row) {
+    throw new ProviderConfigError(
+      "not_found",
+      `No enabled provider configuration serves the ${capability} capability.`,
+    );
+  }
+  if (row.providerType === "preset" && !getPresetAdapter(row.providerName)) {
+    // Registry drift vs stored data — fail closed, same as the outbound path.
+    throw new ProviderConfigError(
+      "unknown_preset",
+      `Preset "${row.providerName}" is no longer registered.`,
+    );
+  }
+
+  const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+  const modelId = capabilities[capability]?.modelId;
+  if (!modelId) {
+    throw new ProviderConfigError(
+      "not_found",
+      `The configuration does not define a model for the ${capability} capability.`,
+    );
+  }
+  return { providerName: row.providerName, modelId };
 }
 
 /** Deletes an owned configuration row (credentials destroyed with it). */

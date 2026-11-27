@@ -1,6 +1,7 @@
-import { generateStructured, type LlmRoute, type StructuredOptions } from "@/lib/ai/llm";
+import { generateStructured, type StructuredOptions } from "@/lib/ai/llm";
 import { db } from "@/lib/db";
 import { resolveForOutboundCall } from "@/lib/providers/config";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { z } from "zod";
 import {
   createInterviewSession,
@@ -86,22 +87,15 @@ export interface AgentResult {
 }
 
 export interface AgentDeps {
-  resolveRoute?: (userId: string) => Promise<LlmRoute>;
+  resolveRoute?: (userId: string) => Promise<ProviderRoute>;
   generate?: (
-    route: LlmRoute,
+    route: ProviderRoute,
     options: StructuredOptions<AgentLlmOutput>,
   ) => Promise<AgentLlmOutput>;
 }
 
-async function defaultResolveRoute(userId: string): Promise<LlmRoute> {
-  const resolved = await resolveForOutboundCall(userId, "llm");
-  return {
-    providerName: resolved.providerName,
-    providerType: resolved.providerType,
-    baseUrl: resolved.baseUrl,
-    modelId: resolved.modelId,
-    apiKey: resolved.apiKey,
-  };
+async function defaultResolveRoute(userId: string): Promise<ProviderRoute> {
+  return resolveForOutboundCall(userId, "llm");
 }
 
 /** Instructions encode only approved requirements — never invented fields. */

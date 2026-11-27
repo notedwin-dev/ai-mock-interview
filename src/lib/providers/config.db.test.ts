@@ -6,6 +6,7 @@ import {
   createProviderConfiguration,
   deleteProviderConfiguration,
   listProviderConfigurations,
+  resolveEnabledModel,
   resolveForOutboundCall,
   updateProviderConfiguration,
 } from "./config";
@@ -328,6 +329,30 @@ d("provider configuration service (integration)", () => {
     const resolved = await resolveForOutboundCall(userId, "scorer");
     expect(resolved.modelId).toBe("gpt-4o-mini");
     expect(resolved.apiKey).toBe("sk-openai-key");
+  });
+
+  it("resolveEnabledModel returns provider + model WITHOUT decrypting the credential (ADR-0005)", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      ...customInput,
+      capabilities: { llm: { modelId: "gpt-4o" }, realtime: { modelId: "gemini-3.1-flash-live-preview" } },
+    });
+
+    const resolved = await resolveEnabledModel(userId, "realtime");
+    expect(resolved).toEqual({ providerName: "my-endpoint", modelId: "gemini-3.1-flash-live-preview" });
+
+    // Same oldest-enabled-row rule as the outbound resolver.
+    await createProviderConfiguration(userId, {
+      ...customInput,
+      providerName: "newer-endpoint",
+      capabilities: { realtime: { modelId: "other-realtime" } },
+    });
+    const again = await resolveEnabledModel(userId, "realtime");
+    expect(again.providerName).toBe("my-endpoint");
+
+    // A user with nothing enabled for the capability fails closed.
+    const other = await createUser();
+    await expect(resolveEnabledModel(other, "realtime")).rejects.toMatchObject({ code: "not_found" });
   });
 
   it("fails closed when no enabled configuration serves the capability", async () => {

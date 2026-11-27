@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Loader2, MessageSquare, Send, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Loader2, MessageSquare, Mic, Send, X } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
@@ -27,6 +27,63 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   // answer or a received response discards it.
   const pendingKeyRef = useRef<{ text: string; key: string } | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  // True while a getUserMedia request is in flight (ignores duplicate activation).
+  const acquisitionPendingRef = useRef(false);
+  // Identity of the current microphone acquisition. Bumping it cancels a
+  // pending getUserMedia result and tells the recorder's onstop not to submit.
+  const recordingGenerationRef = useRef(0);
+  // The recorder whose onstop must NOT submit (cancelled by end/unmount/cancel).
+  // onstop always releases the tracks; only submitting is gated.
+  const cancelledRecorderRef = useRef<MediaRecorder | null>(null);
+  // Draft and transcription identities: a transcription may only replace the
+  // draft it started from, and only the newest request may apply.
+  const draftRevisionRef = useRef(0);
+  const transcriptionRequestRef = useRef(0);
+
+  // Releases a microphone track; a track already ended (e.g. by MediaRecorder.stop())
+  // is a no-op. Declared before releaseRecording so the callback sees it.
+  const stopCaptureTrack = useCallback((track: MediaStreamTrack) => {
+    if (track.readyState !== "ended") track.stop();
+  }, []);
+
+  /**
+   * Stops the active capture and invalidates any pending acquisition. With
+   * `cancelled: true` the active recorder's onstop will neither submit the audio
+   * nor touch the (already released) stream — used when the interview ends or
+   * the room unmounts, so a cancel can never post a turn.
+   */
+  const releaseRecording = useCallback((cancelled: boolean) => {
+    cancelledRecorderRef.current = cancelled ? recorderRef.current : null;
+    // Bump the generation BEFORE stopping, for a recorder that has no onstop
+    // installed yet (still starting in an ended/unmounted room).
+    recordingGenerationRef.current += 1;
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder && recorder.state === "recording") {
+      try {
+        recorder.stop();
+      } catch {
+        // start() threw after allocating the recorder: nothing is capturing and
+        // onstop will not fire, so the tracks are released below instead.
+      }
+    }
+    streamRef.current?.getTracks().forEach((track) => stopCaptureTrack(track));
+    streamRef.current = null;
+  }, [stopCaptureTrack]);
+
+  // Unmount and interview end both cancel capture: a recording must never
+  // outlive the room or be submitted after the interview has ended.
+  useEffect(() => {
+    if (!ended) return;
+    releaseRecording(true);
+  }, [ended, releaseRecording]);
+
+  // Unmount releases the microphone too (and suppresses any in-flight submit).
+  useEffect(() => () => releaseRecording(true), [releaseRecording]);
 
   useEffect(() => {
     let active = true;
@@ -104,6 +161,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         messages?: TranscriptEntry[];
         error?: { message: string };
         endCall?: boolean;
+        audioBase64?: string | null;
       };
       if (!response.ok) {
         // The draft and its idempotency key are preserved so the candidate
@@ -114,13 +172,137 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       }
       appliedTurnsRef.current += 1;
       setMessages(body.messages ?? []);
+      draftRevisionRef.current += 1;
       setDraft("");
       pendingKeyRef.current = null;
+      // Voice playback is best-effort: the transcript is the source of truth.
+      if (body.audioBase64) {
+        try {
+          void new Audio(`data:audio/mp3;base64,${body.audioBase64}`).play().catch(() => undefined);
+        } catch {
+          // Browser blocked autoplay — the text reply is still visible.
+        }
+      }
       setState(body.endCall ? "listening" : "speaking");
-      if (body.endCall) setEnded(true);
+      if (body.endCall) {
+        // The interview is over server-side: stop capturing immediately so no
+        // further audio is posted, and mark the room ended.
+        releaseRecording(true);
+        setRecording(false);
+        setEnded(true);
+      }
     } catch {
       setError("The request could not reach the server.");
       setState("listening");
+    }
+  }
+
+  async function submitAudio(blob: Blob, recorderMime: string) {
+    // Identity of this transcription: it may only replace the draft it
+    // started from, and only the newest request may apply its result. The
+    // revision is bumped on every candidate-side draft change.
+    const request = ++transcriptionRequestRef.current;
+    const startedAtRevision = draftRevisionRef.current;
+    const isCurrent = () =>
+      request === transcriptionRequestRef.current &&
+      startedAtRevision === draftRevisionRef.current;
+    try {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      const response = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/transcribe`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audioBase64: btoa(binary),
+            mimeType: (recorderMime || blob.type || "audio/webm").split(";")[0],
+          }),
+        },
+      );
+      if (!isCurrent()) return;
+      const body = (await response.json()) as { text?: string; error?: { message: string } };
+      if (!response.ok) {
+        setVoiceNotice(body.error?.message ?? "The recording could not be transcribed.");
+        return;
+      }
+      // The transcript goes into the input for review — nothing is sent until
+      // the candidate explicitly presses Send. A draft the candidate typed or
+      // edited while this request was in flight is never clobbered.
+      draftRevisionRef.current += 1;
+      setDraft(body.text ?? "");
+      setVoiceNotice("Voice transcribed — review the text, then press Send.");
+    } catch {
+      if (!isCurrent()) return;
+      setVoiceNotice("The recording could not be transcribed.");
+    }
+  }
+
+  async function startRecording() {
+    // One microphone request at a time: a second activation while the first is
+    // still pending is ignored instead of acquiring a second stream (and
+    // leaking the first).
+    if (acquisitionPendingRef.current || recorderRef.current?.state === "recording") return;
+    setVoiceNotice(null);
+    acquisitionPendingRef.current = true;
+    const generation = ++recordingGenerationRef.current;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (generation !== recordingGenerationRef.current) {
+        // The room ended / unmounted / recorded again while the permission
+        // prompt was open: this acquisition is stale. Release every track so
+        // the microphone is free and the indicator goes away.
+        stream.getTracks().forEach((track) => stopCaptureTrack(track));
+        return;
+      }
+      streamRef.current = stream;
+
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (error) {
+        stream.getTracks().forEach((track) => stopCaptureTrack(track));
+        streamRef.current = null;
+        throw error;
+      }
+
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onstop = () => {
+        // Cancel (the interview ended or the room unmounted) must never post a
+        // turn; a normal stop submits once and never leaves the mic open.
+        const cancel = cancelledRecorderRef.current === recorder;
+        if (cancelledRecorderRef.current === recorder) cancelledRecorderRef.current = null;
+        stream.getTracks().forEach((track) => stopCaptureTrack(track));
+        if (streamRef.current === stream) streamRef.current = null;
+        if (recorderRef.current === recorder) recorderRef.current = null;
+        if (!cancel && chunks.length > 0) {
+          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+          void submitAudio(blob, recorder.mimeType);
+        }
+        setRecording(false);
+      };
+      recorderRef.current = recorder;
+      try {
+        recorder.start();
+      } catch (error) {
+        // start() threw after the recorder was allocated: release the tracks
+        // right away and both refs before surfacing the failure.
+        recorderRef.current = null;
+        stream.getTracks().forEach((track) => stopCaptureTrack(track));
+        if (streamRef.current === stream) streamRef.current = null;
+        throw error;
+      }
+      setRecording(true);
+    } catch {
+      setVoiceNotice("Microphone access was not granted. You can type your answer instead.");
+    } finally {
+      acquisitionPendingRef.current = false;
     }
   }
 
@@ -157,7 +339,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
           <p className="mt-1 text-xs text-ink-muted">Type your answers below.</p>
-          <p className="mt-3 text-xs text-ink-muted">Camera and microphone are never used as AI input.</p>
+          <p className="mt-3 text-xs text-ink-muted">Camera is not used. Microphone audio is used only when you start a voice feature.</p>
         </section>
       </div>
 
@@ -169,19 +351,37 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
           <input
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              // A candidate edit invalidates any in-flight transcription result:
+              // it must never overwrite text the candidate typed afterwards.
+              draftRevisionRef.current += 1;
+              setDraft(event.target.value);
+            }}
             className="h-11 flex-1 rounded-full border border-line bg-raised px-5 text-sm text-ink outline-none placeholder:text-ink-muted focus:border-emerald-400/70"
             placeholder="Type your answer…"
             maxLength={5000}
             aria-label="Your interview answer"
             disabled={state === "thinking"}
           />
+          <button
+            type="button"
+            onClick={() => (recording ? recorderRef.current?.stop() : void startRecording())}
+            className="btn-ghost"
+            aria-label={recording ? "Stop recording" : "Record answer"}
+          >
+            {recording ? (
+              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop recording</>
+            ) : (
+              <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
+            )}
+          </button>
           <button type="submit" disabled={!draft.trim() || state === "thinking"} className="btn-primary">
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
           </button>
         </form>
       )}
+      {voiceNotice ? <p className="text-sm text-amber-300" role="status">{voiceNotice}</p> : null}
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (

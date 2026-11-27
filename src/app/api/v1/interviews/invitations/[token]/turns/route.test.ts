@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LlmError } from "@/lib/ai/llm";
+import { TtsError } from "@/lib/ai/tts";
 import { RoomError } from "@/lib/interview/room";
 
 const mocks = vi.hoisted(() => ({ runRoomTurn: vi.fn(), resolveInvitation: vi.fn() }));
@@ -28,7 +29,13 @@ describe("token-scoped room turns API", () => {
     const response = await POST(request({ contentText: "my answer", idempotencyKey: "turn-1" }), ctx);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(result);
-    expect(mocks.runRoomTurn).toHaveBeenCalledWith(TOKEN, { contentText: "my answer", idempotencyKey: "turn-1" });
+    expect(mocks.runRoomTurn).toHaveBeenCalledWith(
+      TOKEN,
+      { contentText: "my answer", idempotencyKey: "turn-1" },
+      expect.objectContaining({
+        tts: expect.objectContaining({ synthesize: expect.any(Function), resolveRoute: expect.any(Function) }),
+      }),
+    );
   });
 
   it("GET refuses an invalid or revoked link", async () => {
@@ -54,5 +61,13 @@ describe("token-scoped room turns API", () => {
     const provider = await POST(request({ contentText: "hi" }), ctx);
     expect(provider.status).toBe(502);
     expect(JSON.stringify(await provider.json())).not.toContain("sk-secret");
+
+    mocks.runRoomTurn.mockRejectedValueOnce(
+      new TtsError("unsupported_provider", "Interviewer voice currently supports Fish Audio secret-key"),
+    );
+    const voice = await POST(request({ contentText: "hi" }), ctx);
+    expect(voice.status).toBe(409);
+    const voiceBody = await voice.json();
+    expect(voiceBody).toMatchObject({ error: { code: "tts_provider_unsupported" } });
   });
 });

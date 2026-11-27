@@ -121,6 +121,90 @@ d("invitation links (TT-21)", () => {
     await expect(revokeInvitation(otherId, session.sessionId)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("persists realtime messages in approved kinds and is idempotent on client ids", async () => {
+    // A live line never starts an interview (only a typed turn does), so the
+    // fixture is already running.
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
+    const second = await store.appendRealtimeMessage(session.sessionId, "interviewer", "tell me more", "evt-i");
+    const replay = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
+
+    expect(first.messageKind).toBe("candidate_response");
+    expect(second.messageKind).toBe("primary_question"); // approved message_kind domain
+    expect(replay.sequenceNumber).toBe(first.sequenceNumber);
+    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
+  });
+
+  it("assigns a candidate answer to the unit opened by an earlier interviewer line", async () => {
+    // The live outbox reserves the question's position before an answer can be
+    // finalized. Storing them in that order is what puts the answer in an
+    // assessment unit — the answer alone cannot open one.
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const question = await store.appendRealtimeMessage(
+      session.sessionId, "interviewer", "first question", "evt-q",
+    );
+    const answer = await store.appendRealtimeMessage(
+      session.sessionId, "candidate", "my answer", "evt-a",
+    );
+
+    expect(question.messageKind).toBe("primary_question");
+    expect(question.assessmentUnitId).not.toBeNull();
+    expect(answer.messageKind).toBe("candidate_response");
+    expect(answer.assessmentUnitId).toBe(question.assessmentUnitId);
+  });
+
+  it("rejects a reused client id carrying different content or a different speaker", async () => {
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "original answer", "evt-dup");
+
+    await expect(
+      store.appendRealtimeMessage(session.sessionId, "candidate", "a different answer", "evt-dup"),
+    ).rejects.toMatchObject({ code: "client_id_conflict" });
+    await expect(
+      store.appendRealtimeMessage(session.sessionId, "interviewer", "original answer", "evt-dup"),
+    ).rejects.toMatchObject({ code: "client_id_conflict" });
+
+    // An identical replay is still idempotent (no duplicate row).
+    const replay = await store.appendRealtimeMessage(session.sessionId, "candidate", "original answer", "evt-dup");
+    expect(replay.sequenceNumber).toBe(first.sequenceNumber);
+    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(1);
+  });
+
+  it("only appends live lines to a running interview (a live line never starts one)", async () => {
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const active = await makeSession({ status: "active", startedAt: new Date() });
+
+    await expect(
+      store.appendRealtimeMessage(active.sessionId, "candidate", "live answer", "evt-live"),
+    ).resolves.toMatchObject({ speakerType: "candidate", messageKind: "candidate_response" });
+
+    const cleared = await db.interviewSession.update({
+      where: { sessionId: active.sessionId },
+      data: { status: "completed", completedAt: new Date() },
+    });
+    expect(cleared.status).toBe("completed");
+
+    await expect(
+      store.appendRealtimeMessage(active.sessionId, "candidate", "late line", "evt-late"),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    expect(await db.conversationMessage.count({ where: { sessionId: active.sessionId } })).toBe(1);
+  });
+
+  it("allocates concurrent live lines without gaps or duplicate sequences", async () => {
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+
+    const entries = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        store.appendRealtimeMessage(session.sessionId, "candidate", `line ${index}`, `evt-${index}`),
+      ),
+    );
+    expect(entries.map((entry) => entry.sequenceNumber).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
   it("runs a token-scoped turn against the real store: transcript, unit and active state", async () => {
     const session = await makeSession();
     const invitation = await issueInvitation(ownerId, session.sessionId);
