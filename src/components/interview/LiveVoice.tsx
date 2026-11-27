@@ -1,54 +1,18 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { experimental_useRealtime } from "@ai-sdk/react";
 import { google } from "@ai-sdk/google";
-
-/**
- * Bounded retries for persisting one finalized line. The client id is fixed, so
- * every attempt deduplicates server-side against the same transcript row.
- */
-const TRANSCRIPT_POST_ATTEMPTS = 3;
-/** Statuses that will not heal on retry (the link is gone or already finished). */
-const TERMINAL_STATUSES: ReadonlySet<number> = new Set([400, 404, 409]);
-
-interface LiveLine {
-  speaker: "candidate" | "interviewer";
-  text: string;
-  clientId: string;
-}
-
-/**
- * Identity tracking for persisted live lines, one registry per token. The
- * realtime callback is recreated on every render (and may fire across room
- * remounts), so identity lives OUTSIDE the component render tree: an id is
- * "saved" only after the transcript route answered 2xx, and "in flight"
- * while a post with the same clientId is still running.
- */
-const lineRegistries = new Map<
-  string,
-  {
-    saved: Set<string>;
-    inFlight: Set<string>;
-    /** Finalized lines awaiting persistence, strictly in arrival order. */
-    queue: LiveLine[];
-    draining: boolean;
-  }
->();
-
-function lineRegistry(token: string) {
-  const existing = lineRegistries.get(token);
-  if (existing) return existing;
-  const created = {
-    saved: new Set<string>(),
-    inFlight: new Set<string>(),
-    queue: [] as LiveLine[],
-    draining: false,
-  };
-  lineRegistries.set(token, created);
-  return created;
-}
-
+import {
+  enqueueFinalizedLine,
+  getLiveLineSnapshot,
+  getServerLiveLineSnapshot,
+  recordTranscriptDelta,
+  retryFailedLines,
+  subscribeLiveLines,
+  takeTranscriptText,
+  type LiveLine,
+} from "@/lib/interview/live-transcript-outbox";
 
 /**
  * Native Gemini Live realtime session for the token-scoped room (ADR-006
@@ -62,6 +26,10 @@ function lineRegistry(token: string) {
  * the AI SDK delivers it both through the token request (baked into Google's
  * client secret) and as a `session-update` over the WebSocket, so both paths
  * carry the identical configuration (verified in the AI SDK source).
+ *
+ * Outbox identity, failures and background persistence live in the shared
+ * per-token registry (see live-transcript-outbox.ts), not in this component:
+ * an instance that unmounts mid-drain must not take the retry state with it.
  */
 export function LiveVoice({
   token,
@@ -74,85 +42,52 @@ export function LiveVoice({
 }) {
   const endpoint = `/api/v1/interviews/invitations/${encodeURIComponent(token)}/realtime/token`;
   const [lines, setLines] = useState<LiveLine[]>([]);
-  const [failed, setFailed] = useState<LiveLine[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
-  const post = useCallback(async (line: LiveLine): Promise<boolean> => {
-    for (let attempt = 1; attempt <= TRANSCRIPT_POST_ATTEMPTS; attempt++) {
-      try {
-        const response = await fetch(
-          `/api/v1/interviews/invitations/${encodeURIComponent(token)}/realtime/transcript`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              messages: [{
-                speaker: line.speaker,
-                content: line.text,
-                clientId: line.clientId,
-              }],
-            }),
-          },
-        );
-        if (response.ok) return true;
-        // A rejected line (link gone, interview finished, malformed) will not
-        // heal on retry; only a transient failure is worth another attempt.
-        if (TERMINAL_STATUSES.has(response.status)) return false;
-      } catch {
-        // Network error: retry below.
-      }
-    }
-    return false;
-  }, [token]);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
-  /**
-   * Ordered outbox: only the head line is posted, and the next line is
-   * attempted only once that one is acknowledged. A failed head STAYS at the
-   * front — later lines wait behind it, so nothing is silently dropped or
-   * reordered. Manual retry re-posts that same head with its original clientId
-   * (the server deduplicates), including after a permanent rejection if the
-   * underlying condition (e.g. a completed-but-still-open link) is resolved.
-   */
-  const drainOutbox = useCallback(async () => {
-    const reg = lineRegistry(token);
-    if (reg.draining) return;
-    reg.draining = true;
-    try {
-      while (reg.queue.length > 0) {
-        const head = reg.queue[0]!;
-        const saved = await post(head);
-        if (!saved) {
-          setFailed([head]);
-          setNotice(
-            "A transcript line could not be saved. Later lines are waiting behind it — retry to continue.",
-          );
-          return;
-        }
-        reg.saved.add(head.clientId);
-        reg.queue.shift();
-        setFailed([]);
-      }
-    } finally {
-      reg.draining = false;
-    }
-  }, [post, token]);
+  // Restores failed lines on mount and keeps every mounted instance in sync
+  // with a drain that was started (and may exhaust) in a previous instance.
+  const subscribe = useCallback(
+    (onChange: () => void) => subscribeLiveLines(token, onChange),
+    [token],
+  );
+  const getSnapshot = useCallback(() => getLiveLineSnapshot(token), [token]);
+  const { failed, notice: outboxNotice } = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getServerLiveLineSnapshot,
+  );
+  const retry = useCallback(() => retryFailedLines(token), [token]);
 
   const handleEvent = useCallback(
     (event: Parameters<NonNullable<Parameters<typeof experimental_useRealtime>[0]["onEvent"]>>[0]) => {
-      const reg = lineRegistry(token);
+      // The installed Google mapper emits interviewer text as deltas and a
+      // textless `audio-transcript-done`; accumulate until the turn closes.
+      if (event.type === "audio-transcript-delta" && "delta" in event) {
+        recordTranscriptDelta(token, event.itemId, String(event.delta ?? ""));
+        return;
+      }
       const line: LiveLine | null =
         event.type === "input-transcription-completed" && "transcript" in event
           ? { speaker: "candidate", text: String(event.transcript ?? ""), clientId: `in-${event.itemId}` }
-          : event.type === "audio-transcript-done" && "transcript" in event
-            ? { speaker: "interviewer", text: String(event.transcript ?? ""), clientId: `out-${event.itemId}` }
+          : event.type === "audio-transcript-done" && "itemId" in event
+            ? {
+                speaker: "interviewer",
+                text: takeTranscriptText(
+                  token,
+                  event.itemId,
+                  "transcript" in event ? String(event.transcript ?? "") : undefined,
+                ),
+                clientId: `out-${event.itemId}`,
+              }
             : null;
-      if (!line || !line.text) return;
-      if (reg.saved.has(line.clientId) || reg.inFlight.has(line.clientId)) return;
-      reg.inFlight.add(line.clientId);
-      setLines((current) => [...current, line]);
-      reg.queue.push(line);
-      void drainOutbox();
+      if (!line) return;
+
+      // Split long turns (and dedupe accumulated re-deliveries) before
+      // queueing; enqueueFinalizedLine starts background persistence.
+      const accepted = enqueueFinalizedLine(token, line);
+      if (accepted.length > 0) setLines((current) => [...current, ...accepted]);
     },
-    [drainOutbox, token],
+    [token],
   );
 
   const realtime = experimental_useRealtime({
@@ -164,7 +99,7 @@ export function LiveVoice({
       outputAudioTranscription: {},
       outputModalities: ["audio"],
     },
-    onError: () => setNotice("The live session reported an error. Reconnect to try again."),
+    onError: () => setSessionNotice("The live session reported an error. Reconnect to try again."),
     onEvent: handleEvent,
   });
 
@@ -208,18 +143,25 @@ export function LiveVoice({
         </ul>
       ) : null}
       {failed.length > 0 ? (
-        <p className="text-xs text-amber-300">
-          {failed.length} {failed.length === 1 ? "line" : "lines"} not saved yet.{" "}
-          <button
-            type="button"
-            className="underline"
-            onClick={() => void drainOutbox()}
-          >
-            Retry
-          </button>
-        </p>
+        <div className="flex flex-col gap-1 text-xs text-amber-300">
+          <p>
+            {failed.length} {failed.length === 1 ? "line" : "lines"} not saved yet.{" "}
+            <button type="button" className="underline" onClick={retry}>
+              Retry
+            </button>
+          </p>
+          <ul className="max-h-20 overflow-y-auto">
+            {failed.map((line) => (
+              <li key={line.clientId}>
+                <span className="font-semibold">{line.speaker}: </span>
+                {line.text}
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
-      {notice ? <p className="text-xs text-amber-300">{notice}</p> : null}
+      {outboxNotice ? <p className="text-xs text-amber-300">{outboxNotice}</p> : null}
+      {sessionNotice ? <p className="text-xs text-amber-300">{sessionNotice}</p> : null}
     </section>
   );
 }
