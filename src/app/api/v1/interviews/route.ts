@@ -12,7 +12,13 @@ export async function POST(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const body = (await request.json()) as Record<string, unknown>;
+    const parsed: unknown = await request.json();
+    // Validate the shape before destructuring: null (and arrays/scalars) are
+    // valid JSON but must be rejected as invalid input, not crash as a 500.
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return jsonError(400, "invalid_input", "The request body is invalid.");
+    }
+    const body = parsed as Record<string, unknown>;
     // The creation key rides alongside the setup input; the strict setup
     // schema must not see it, but session creation uses it for replay safety.
     const { idempotencyKey, ...setup } = body;
