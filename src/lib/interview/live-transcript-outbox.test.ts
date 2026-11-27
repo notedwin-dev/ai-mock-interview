@@ -3,7 +3,9 @@ import {
   beginLiveConnection,
   enqueueFinalizedLine,
   finalizeInputTranscription,
+  flushCompletedOutputTranscriptions,
   getLiveLineSnapshot,
+  markOutputTranscriptionDone,
   recordInputTranscription,
   recordTranscriptDelta,
   retryFailedLines,
@@ -117,6 +119,81 @@ describe("interviewer transcript accumulation", () => {
 
     recordTranscriptDelta(t, "google-item-2", "partial");
     expect(takeTranscriptText(t, "google-item-2", "final")).toBe("final");
+  });
+});
+
+describe("interviewer output completion boundary", () => {
+  it("finalizes one interviewer line when the final delta precedes turnComplete", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    recordTranscriptDelta(t, "google-item-0", "Hello ");
+    recordTranscriptDelta(t, "google-item-0", "world.");
+    markOutputTranscriptionDone(t, "google-item-0");
+
+    expect(flushCompletedOutputTranscriptions(t)).toEqual([
+      { speaker: "interviewer", text: "Hello world.", clientId: "1:out-google-item-0-1" },
+    ]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    expect(body.messages[0]!.content).toBe("Hello world.");
+  });
+
+  it("includes a final delta that arrives after turnComplete in the same line", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    recordTranscriptDelta(t, "google-item-0", "Hello ");
+    markOutputTranscriptionDone(t, "google-item-0");
+    // Google delivers output transcription independently: the final chunk may
+    // arrive after the completion signal for the SAME item id.
+    recordTranscriptDelta(t, "google-item-0", "world.");
+
+    expect(flushCompletedOutputTranscriptions(t)).toEqual([
+      { speaker: "interviewer", text: "Hello world.", clientId: "1:out-google-item-0-1" },
+    ]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1"]);
+  });
+
+  it("closes a completion-signaled item when a new interviewer item starts", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    recordTranscriptDelta(t, "google-item-0", "first question");
+    markOutputTranscriptionDone(t, "google-item-0");
+    expect(recordTranscriptDelta(t, "google-item-1", "next ")).toEqual([
+      { speaker: "interviewer", text: "first question", clientId: "1:out-google-item-0-1" },
+    ]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1"]);
+  });
+
+  it("queues a retained candidate answer before the interviewer line answering it", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    // The candidate's final text is retained but has not been queued yet; the
+    // interviewer line completes first (no ordering guarantee between streams).
+    recordInputTranscription(t, "google-input-0", "my answer", false);
+    recordTranscriptDelta(t, "google-item-0", "Tell me more.");
+    markOutputTranscriptionDone(t, "google-item-0");
+
+    const closed = flushCompletedOutputTranscriptions(t);
+    expect(closed.map((line) => line.speaker)).toEqual(["candidate", "interviewer"]);
+    expect(closed.map((line) => line.clientId)).toEqual([
+      "1:in-google-input-0-1",
+      "1:out-google-item-0-1",
+    ]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:in-google-input-0-1", "1:out-google-item-0-1"]);
   });
 });
 
@@ -283,6 +360,33 @@ describe("live transcript outbox", () => {
     retryFailedLines(t);
     await vi.waitFor(() => expect(getLiveLineSnapshot(t).failed).toHaveLength(0));
     expect(postedClientIds().slice(-1)).toEqual(["in-1-1"]);
+  });
+});
+
+describe("bounded transcript POST", () => {
+  it("passes an abort signal to fetch and retries an aborted attempt with the same client id", async () => {
+    const t = token();
+    const signals: AbortSignal[] = [];
+    fetchMock.mockImplementation((_url, init) => {
+      const signal = init.signal as AbortSignal;
+      signals.push(signal);
+      return signals.length === 1
+        ? new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("deadline expired")), { once: true });
+          })
+        : Promise.resolve(ok());
+    });
+
+    enqueueFinalizedLine(t, { speaker: "candidate", text: "saved after abort", clientId: "in-abort" });
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+
+    // Simulate the deadline expiring while the first POST is in flight.
+    signals[0]!.dispatchEvent(new Event("abort"));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(postedClientIds()).toEqual(["in-abort-1", "in-abort-1"]);
+    expect(getLiveLineSnapshot(t)).toEqual({ failed: [], notice: null });
   });
 });
 

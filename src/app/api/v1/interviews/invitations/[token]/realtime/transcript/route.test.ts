@@ -58,6 +58,17 @@ describe("POST .../realtime/transcript", () => {
     expect(mocks.append).not.toHaveBeenCalled();
   });
 
+  it("maps a reused client id with different content to a visible conflict", async () => {
+    mocks.append.mockRejectedValue(
+      new InterviewError("client_id_conflict", "A different message was already saved with this id."),
+    );
+
+    const response = await POST(body([{ speaker: "candidate", content: "new", clientId: "evt-1" }]), ctx);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "client_id_conflict" } });
+  });
+
   it("maps a commit-time completion race to a conflict instead of a server error", async () => {
     // The store re-checks "active" under the session row lock, so a line that
     // arrives after the interview completed loses the race and is rejected.

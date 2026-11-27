@@ -1,19 +1,20 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { experimental_useRealtime } from "@ai-sdk/react";
 import { google } from "@ai-sdk/google";
 import {
   beginLiveConnection,
-  enqueueFinalizedLine,
   finalizeInputTranscription,
+  flushCompletedOutputTranscriptions,
+  flushPendingLiveLines,
   getLiveLineSnapshot,
   getServerLiveLineSnapshot,
+  markOutputTranscriptionDone,
   recordInputTranscription,
   recordTranscriptDelta,
   retryFailedLines,
   subscribeLiveLines,
-  takeTranscriptText,
   type LiveLine,
 } from "@/lib/interview/live-transcript-outbox";
 
@@ -34,6 +35,20 @@ function inputTranscriptionFrame(raw: unknown): GoogleInputTranscription | undef
     serverContent?: { inputTranscription?: GoogleInputTranscription };
   };
   return frame.inputTranscription ?? frame.serverContent?.inputTranscription;
+}
+
+/** A textless `finished` marker closes the retained cumulative transcript. */
+function hasTextlessFinishedMarker(raw: unknown): boolean {
+  const frame = inputTranscriptionFrame(raw);
+  return frame?.finished === true && !frame.text;
+}
+
+/** Google's end-of-turn signals: no more output deltas for this turn. */
+function isOutputTurnEnd(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null) return false;
+  const content = (raw as { serverContent?: { interactionStatus?: string; waitingForInput?: boolean } })
+    .serverContent;
+  return content?.interactionStatus === "IDLE" || content?.waitingForInput === true;
 }
 
 /**
@@ -65,6 +80,7 @@ export function LiveVoice({
   const endpoint = `/api/v1/interviews/invitations/${encodeURIComponent(token)}/realtime/token`;
   const [lines, setLines] = useState<LiveLine[]>([]);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [captureFailed, setCaptureFailed] = useState(false);
 
   // Restores failed lines on mount and keeps every mounted instance in sync
   // with a drain that was started (and may exhaust) in a previous instance.
@@ -83,28 +99,46 @@ export function LiveVoice({
   const handleEvent = useCallback(
     (event: Parameters<NonNullable<Parameters<typeof experimental_useRealtime>[0]["onEvent"]>>[0]) => {
       // Google's mapper restarts its synthetic item ids for every socket, so a
-      // reconnect can reuse an id. Move to a new generation in the shared
-      // registry before any event of that connection is handled.
+      // reconnect can reuse an id. Close everything buffered by the old socket
+      // and move to a new generation before any event of that connection is
+      // handled. A successful reconnect also clears a stale warning.
       if (event.type === "session-created") {
+        const closed = flushPendingLiveLines(token);
+        if (closed.length > 0) setLines((current) => [...current, ...closed]);
         beginLiveConnection(token);
+        setSessionNotice(null);
+        setCaptureFailed(false);
         return;
       }
 
-      // A `finished` marker may arrive with no text of its own; the retained
-      // cumulative transcript is the line that must be persisted.
-      if (event.type === "custom" && "raw" in event) {
-        const frame = inputTranscriptionFrame(event.raw);
-        if (frame?.finished === true && !frame.text) {
-          const closed = finalizeInputTranscription(token);
-          if (closed.length > 0) setLines((current) => [...current, ...closed]);
-          return;
-        }
+      // Input and output transcription have no ordering guarantee. A textless
+      // `finished` marker may be attached to ANY event carrying the raw frame
+      // (including `response-done`), not just a `custom` event. Close the
+      // retained candidate text exactly once (the outbox dedupes repeats) and
+      // keep processing the event so interviewer events in the same frame are
+      // not skipped.
+      if ("raw" in event && hasTextlessFinishedMarker(event.raw)) {
+        const closed = finalizeInputTranscription(token);
+        if (closed.length > 0) setLines((current) => [...current, ...closed]);
       }
 
-      // The installed Google mapper emits interviewer text as deltas and a
-      // textless `audio-transcript-done`; accumulate until the turn closes.
+      // turnComplete is not a safe interviewer boundary: Google can deliver
+      // the final output delta after it. `audio-transcript-done` only marks the
+      // item as completion-signaled; it is closed at the next item boundary or
+      // on an explicit end-of-turn signal, so late deltas join the same line.
       if (event.type === "audio-transcript-delta" && "delta" in event) {
-        recordTranscriptDelta(token, event.itemId, String(event.delta ?? ""));
+        const closed = recordTranscriptDelta(token, event.itemId, String(event.delta ?? ""));
+        if (closed.length > 0) setLines((current) => [...current, ...closed]);
+        return;
+      }
+
+      if (
+        event.type === "custom" &&
+        "raw" in event &&
+        isOutputTurnEnd(event.raw)
+      ) {
+        const closed = flushCompletedOutputTranscriptions(token);
+        if (closed.length > 0) setLines((current) => [...current, ...closed]);
         return;
       }
 
@@ -121,42 +155,76 @@ export function LiveVoice({
         return;
       }
 
-      const line: LiveLine | null =
-        event.type === "audio-transcript-done" && "itemId" in event
-          ? {
-              speaker: "interviewer",
-              text: takeTranscriptText(
-                token,
-                event.itemId,
-                "transcript" in event ? String(event.transcript ?? "") : undefined,
-              ),
-              clientId: `out-${event.itemId}`,
-            }
-          : null;
-      if (!line) return;
-
-      // Split long turns (and dedupe accumulated re-deliveries) before
-      // queueing; enqueueFinalizedLine starts background persistence.
-      const accepted = enqueueFinalizedLine(token, line);
-      if (accepted.length > 0) setLines((current) => [...current, ...accepted]);
+      if (event.type === "audio-transcript-done" && "itemId" in event) {
+        markOutputTranscriptionDone(token, event.itemId);
+      }
     },
     [token],
   );
 
-  const realtime = experimental_useRealtime({
-    model: google.experimental_realtime(modelId),
-    api: { token: endpoint },
-    sessionConfig: {
+  // The hook recreates (and disposes) its session when these references
+  // change. Model identity and config must depend only on their inputs so a
+  // rerender from a status or transcript update cannot drop a live connection.
+  const model = useMemo(() => google.experimental_realtime(modelId), [modelId]);
+  const sessionConfig = useMemo(
+    () => ({
       instructions,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      outputModalities: ["audio"],
-    },
+      outputModalities: ["audio"] as ("audio")[],
+    }),
+    [instructions],
+  );
+
+  const realtime = experimental_useRealtime({
+    model,
+    api: { token: endpoint },
+    sessionConfig,
     onError: () => setSessionNotice("The live session reported an error. Reconnect to try again."),
     onEvent: handleEvent,
   });
 
-  const connected = realtime.session !== undefined;
+  const status = realtime.status;
+  const connected = status === "connected";
+  const busy = status === "connecting" || status === "closing";
+  // These actions are memoized once by the SDK, so they stay stable across
+  // the status/transcript rerenders that would otherwise recreate callbacks.
+  const { connect: connectSession, close: closeSession, resumeAudioCapture } = realtime;
+
+  const requestCapture = useCallback(async () => {
+    try {
+      // The installed Google model is turn-based over a client-secret socket,
+      // so the SDK does NOT acquire the microphone automatically. Start it
+      // only now that the socket is ready.
+      await resumeAudioCapture();
+      setCaptureFailed(false);
+      setSessionNotice(null);
+    } catch {
+      setCaptureFailed(true);
+      setSessionNotice("Microphone access is required. Allow it and retry, or end the live session.");
+    }
+  }, [resumeAudioCapture]);
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    // Defer off the effect body: capture may synchronously resolve its state
+    // update, which an effect must not trigger directly.
+    const timer = setTimeout(() => { void requestCapture(); }, 0);
+    return () => clearTimeout(timer);
+  }, [status, requestCapture]);
+
+  const endSession = useCallback(() => {
+    const closed = flushPendingLiveLines(token);
+    if (closed.length > 0) setLines((current) => [...current, ...closed]);
+    setCaptureFailed(false);
+    void closeSession();
+  }, [token, closeSession]);
+
+  // A remount (or tab close) must not strand interviewer text that was still
+  // waiting for a late delta or a next-item boundary.
+  useEffect(() => () => {
+    flushPendingLiveLines(token);
+  }, [token]);
 
   return (
     <section aria-label="Live voice session" className="flex flex-col gap-3 rounded-2xl border border-line bg-surface p-4">
@@ -164,13 +232,19 @@ export function LiveVoice({
         <div>
           <h2 className="text-sm font-semibold text-ink">Live voice</h2>
           <p className="text-xs text-ink-muted">
-            {connected ? "Connected — speak naturally" : "Real-time WebSocket session, not started"}
+            {connected
+              ? "Connected — speak naturally"
+              : busy
+                ? "Connecting…"
+                : status === "error"
+                  ? "Disconnected — reconnect to try again"
+                  : "Real-time WebSocket session, not started"}
           </p>
         </div>
         {connected ? (
           <button
             type="button"
-            onClick={() => void realtime.close()}
+            onClick={endSession}
             className="inline-flex h-10 items-center rounded-full border border-line px-4 text-sm text-ink-soft"
           >
             End live session
@@ -178,13 +252,23 @@ export function LiveVoice({
         ) : (
           <button
             type="button"
-            onClick={() => void realtime.connect()}
-            className="inline-flex h-10 items-center rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950"
+            onClick={() => void connectSession()}
+            disabled={busy}
+            className="inline-flex h-10 items-center rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 disabled:opacity-50"
           >
             Start live voice
           </button>
         )}
       </div>
+      {connected && captureFailed ? (
+        <button
+          type="button"
+          onClick={() => void requestCapture()}
+          className="self-start text-xs text-amber-300 underline"
+        >
+          Retry microphone
+        </button>
+      ) : null}
       {lines.length > 0 ? (
         <ul className="flex max-h-40 flex-col gap-1 overflow-y-auto text-xs">
           {lines.map((line) => (

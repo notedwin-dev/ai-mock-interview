@@ -21,6 +21,9 @@
 export const TRANSCRIPT_SEGMENT_LIMIT = 5000;
 /** Bounded retries for one line; its client id never changes between attempts. */
 const TRANSCRIPT_POST_ATTEMPTS = 3;
+/** Deadline for a single POST. Expiry is a transient failure, retried with the
+ * same client id because the server may have committed before the abort. */
+const TRANSCRIPT_POST_TIMEOUT_MS = 10_000;
 /** Statuses that will not heal on retry (the link is gone or already finished). */
 const TERMINAL_STATUSES: ReadonlySet<number> = new Set([400, 404, 409]);
 /** The transcript route caps client ids at 100 characters. */
@@ -67,6 +70,14 @@ interface LineRegistry {
    * `input-transcription-completed` per text chunk, not one per utterance.
    */
   inputTranscripts: Map<string, { itemId: string; text: string; connection: number }>;
+  /**
+   * Interviewer items that reported a completion signal but have not been
+   * closed yet. Google's mapper emits `audio-transcript-done` on turnComplete
+   * yet may deliver a final `audio-transcript-delta` afterwards for the SAME
+   * item. Keeping the item open until the next item (or connection end)
+   * absorbs those late deltas into one line instead of stranding them.
+   */
+  completedOutput: Map<string, { itemId: string; connection: number }>;
   /** Finalized lines awaiting persistence, strictly in arrival order. */
   queue: LiveLine[];
   /** Transiently failed lines that a user can still retry. */
@@ -88,6 +99,7 @@ function lineRegistry(token: string): LineRegistry {
     bases: new Set<string>(),
     connection: 0,
     inputTranscripts: new Map(),
+    completedOutput: new Map(),
     queue: [],
     failed: [],
     notice: null,
@@ -148,17 +160,70 @@ function deltaKey(token: string, itemId: string): string {
   return `${token}\u0000${connection}\u0000${itemId}`;
 }
 
-export function recordTranscriptDelta(token: string, itemId: string, delta: string): void {
-  if (!delta) return;
+function consumeTranscriptText(key: string): string {
+  const text = transcriptDeltas.get(key) ?? "";
+  transcriptDeltas.delete(key);
+  return text;
+}
+
+/**
+ * Record an interviewer delta. The mapper rolls to a new synthetic item id
+ * only when the next turn's content arrives, so seeing a different item
+ * closes any earlier item that already reported completion. Returns lines
+ * finalized by that closure (the component displays them).
+ */
+export function recordTranscriptDelta(token: string, itemId: string, delta: string): LiveLine[] {
   const key = deltaKey(token, itemId);
-  transcriptDeltas.set(key, (transcriptDeltas.get(key) ?? "") + delta);
+  const accepted = flushCompletedOutputTranscriptions(token, key);
+  if (delta) transcriptDeltas.set(key, (transcriptDeltas.get(key) ?? "") + delta);
+  return accepted;
+}
+
+/**
+ * Signal that an interviewer item reached turnComplete. The item is NOT
+ * finalized here: the mapper can still deliver a final delta for it, so it
+ * is closed at the next item boundary (or at connection end) instead.
+ */
+export function markOutputTranscriptionDone(token: string, itemId: string): void {
+  const reg = lineRegistry(token);
+  reg.completedOutput.set(deltaKey(token, itemId), { itemId, connection: reg.connection });
+}
+
+/**
+ * Close completion-signaled interviewer items. Candidate answers are queued
+ * first so the line answering them is never saved ahead of the answer,
+ * regardless of the ordering of the two transcription streams.
+ */
+export function flushCompletedOutputTranscriptions(token: string, exceptKey?: string): LiveLine[] {
+  const reg = lineRegistry(token);
+  if (reg.completedOutput.size === 0) return [];
+  const entries = [...reg.completedOutput.entries()].filter(([key]) => key !== exceptKey);
+  if (entries.length === 0) return [];
+  // Queue candidate answers before the interviewer lines that respond to them.
+  const accepted = flushPendingInputTranscripts(token);
+  for (const [key, pending] of entries) {
+    reg.completedOutput.delete(key);
+    accepted.push(...enqueueFinalizedForConnection(token, {
+      speaker: "interviewer",
+      text: consumeTranscriptText(key),
+      clientId: `out-${pending.itemId}`,
+    }, pending.connection));
+  }
+  return accepted;
+}
+
+/** Flush everything buffered for a token (connection end, close, unmount). */
+export function flushPendingLiveLines(token: string): LiveLine[] {
+  return [
+    ...flushPendingInputTranscripts(token),
+    ...flushCompletedOutputTranscriptions(token),
+  ];
 }
 
 /** Consume a turn's accumulated interviewer text; an explicit final text wins. */
 export function takeTranscriptText(token: string, itemId: string, finalText?: string): string {
   const key = deltaKey(token, itemId);
-  const accumulated = transcriptDeltas.get(key) ?? "";
-  transcriptDeltas.delete(key);
+  const accumulated = consumeTranscriptText(key);
   return finalText && finalText.length > 0 ? finalText : accumulated;
 }
 
@@ -213,6 +278,8 @@ export function toSegmentLines(line: LiveLine): LiveLine[] {
 
 async function post(token: string, line: LiveLine): Promise<PostResult> {
   for (let attempt = 1; attempt <= TRANSCRIPT_POST_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TRANSCRIPT_POST_TIMEOUT_MS);
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/realtime/transcript`,
@@ -226,14 +293,20 @@ async function post(token: string, line: LiveLine): Promise<PostResult> {
               clientId: line.clientId,
             }],
           }),
+          // Bound each attempt. An aborted request is treated as transient
+          // below and retried with the SAME client id: the server may have
+          // committed just before the abort, so the id must stay idempotent.
+          signal: controller.signal,
         },
       );
       if (response.ok) return "saved";
-      // A rejected line (link gone, interview finished, malformed) will not
-      // heal on retry; only a transient failure is worth another attempt.
+      // A rejected line (link gone, interview finished, malformed, or a client
+      // id reused for different content) will not heal on retry.
       if (TERMINAL_STATUSES.has(response.status)) return "rejected";
     } catch {
-      // Network error: retry below.
+      // Network error or deadline expiry: retry below with the same id.
+    } finally {
+      clearTimeout(timeout);
     }
   }
   return "unavailable";

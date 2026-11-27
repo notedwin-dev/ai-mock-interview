@@ -136,6 +136,24 @@ d("invitation links (TT-21)", () => {
     expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
   });
 
+  it("rejects a reused client id carrying different content or a different speaker", async () => {
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "original answer", "evt-dup");
+
+    await expect(
+      store.appendRealtimeMessage(session.sessionId, "candidate", "a different answer", "evt-dup"),
+    ).rejects.toMatchObject({ code: "client_id_conflict" });
+    await expect(
+      store.appendRealtimeMessage(session.sessionId, "interviewer", "original answer", "evt-dup"),
+    ).rejects.toMatchObject({ code: "client_id_conflict" });
+
+    // An identical replay is still idempotent (no duplicate row).
+    const replay = await store.appendRealtimeMessage(session.sessionId, "candidate", "original answer", "evt-dup");
+    expect(replay.sequenceNumber).toBe(first.sequenceNumber);
+    expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(1);
+  });
+
   it("only appends live lines to a running interview (a live line never starts one)", async () => {
     const store = (await import("./room-store")).createDefaultRoomStore();
     const active = await makeSession({ status: "active", startedAt: new Date() });

@@ -6,7 +6,9 @@ import { InterviewError } from "@/lib/interview/service";
 /**
  * POST .../realtime/transcript — persists finalized Gemini Live turns to the
  * same chronological transcript as typed turns (FR-TRANSCRIPT-001/002).
- * Client-provided IDs make repeated deliveries idempotent. Only a RUNNING
+ * Client-provided IDs make repeated deliveries idempotent (same speaker and
+ * content); a reused ID carrying different content is a visible conflict.
+ * Only a RUNNING
  * interview accepts live lines: the link is checked here for a fast 404, and
  * the store re-checks "active" under the session row lock at commit time so a
  * line that arrives after completion is never written.
@@ -62,7 +64,10 @@ export async function POST(
   } catch (error) {
     // The store re-checks "active" at commit time (under the session row lock);
     // losing that race to completion is a conflict, not a server failure.
-    if (error instanceof InterviewError && error.code === "invalid_state") {
+    if (
+      error instanceof InterviewError &&
+      (error.code === "invalid_state" || error.code === "client_id_conflict")
+    ) {
       return jsonError(409, error.code, error.message);
     }
     return jsonError(500, "internal_error", "Something went wrong. Try again.");

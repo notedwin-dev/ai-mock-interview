@@ -39,6 +39,7 @@ export type InterviewErrorCode =
   | "invalid_input"
   | "not_found"
   | "invalid_state"
+  | "client_id_conflict"
   | "provider_route_missing";
 
 export class InterviewError extends Error {
@@ -685,7 +686,9 @@ export function createRoomStore(): RoomStore {
 
     /**
      * Appends one finalized realtime (Gemini Live) message, idempotent on the
-     * provider's client id. Kept here because `room-store.ts` now re-exports
+     * provider's client id AND content; a reused id carrying different text
+     * or a different speaker is rejected visibly instead of being discarded.
+     * Kept here because `room-store.ts` now re-exports
      * this store; the unit-assignment rules mirror the reviewed room engine.
      * Admission is RUNNING-only and checked under the session row lock below
      * (the route's earlier check is only a fast 404); a live session never
@@ -730,7 +733,19 @@ export function createRoomStore(): RoomStore {
             const existing = await tx.conversationMessage.findFirst({
               where: { sessionId, idempotencyKey: clientId },
             });
-            if (existing) return toEntry(existing);
+            if (existing) {
+              // A replay must carry the SAME speaker and content. A document
+              // reload can reuse a client id after the old answer was already
+              // stored; silently returning that row would discard the new
+              // answer. Refuse the collision so it is visible (409) instead.
+              if (existing.speakerType !== speaker || existing.contentText !== contentText) {
+                throw new InterviewError(
+                  "client_id_conflict",
+                  "A different message was already saved with this id. The transcript line was not saved.",
+                );
+              }
+              return toEntry(existing);
+            }
 
             const openUnit = await tx.interviewAssessmentUnit.findFirst({
               where: { sessionId, status: "open" },
