@@ -9,12 +9,13 @@ import { describe, expect, it } from "vitest";
 describe("user-facing configuration copy", () => {
   it("does not render internal ADR/FR/TT references", () => {
     const source = readFileSync("src/components/dashboard/ProviderConfigurator.tsx", "utf8");
-    const jsxText = source
-      .split("\n")
-      .filter((line) => !line.trimStart().startsWith("*") && !line.trimStart().startsWith("//"))
-      .join("\n");
-    expect(jsxText).not.toContain("(ADR-");
-    expect(jsxText).not.toMatch(/[>(]\s*(FR-|TT-)/);
-    expect(jsxText).not.toContain("never shown again (ADR-0005)");
+    // Drop JSX/block comments and line comments before scanning: IDs in an
+    // explanatory comment are legitimate, IDs in copy or string literals are
+    // not. Assert the ID pattern itself instead of requiring punctuation,
+    // so a bare "ADR-0005" is caught just like "(ADR-0005)".
+    const renderedSource = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+    expect(renderedSource).not.toMatch(/\b(?:ADR-\d{4}|FR-[A-Z0-9]+(?:-[A-Z0-9]+)*|TT-\d+)\b/);
   });
 });

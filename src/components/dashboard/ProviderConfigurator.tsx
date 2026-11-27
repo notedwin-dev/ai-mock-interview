@@ -266,16 +266,14 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     realtime: true,
   });
 
-  async function refresh(): Promise<ProviderConfigSummary[]> {
+  async function refresh(): Promise<void> {
     const result = await callApi<{ configurations: ProviderConfigSummary[] }>(
       "/api/v1/providers/configurations",
       { cache: "no-store" },
     );
-    if (result.ok) {
-      setRows(result.data.configurations);
-      return result.data.configurations;
-    }
-    return [];
+    // Only replace the rows on success: a failed re-sync must not erase a
+    // configuration that was just saved and is already shown to the user.
+    if (result.ok) setRows(result.data.configurations);
   }
 
   async function runAction(
@@ -465,6 +463,14 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
         },
       );
       if (!result.ok) return result.error;
+      // Show the configuration returned by the POST immediately; refresh()
+      // only overwrites rows when it succeeds, so a failed re-sync cannot
+      // make a completed setup look like it was never saved.
+      const saved = result.data.configuration;
+      setRows((current) => [
+        saved,
+        ...current.filter((row) => row.userProviderConfigurationId !== saved.userProviderConfigurationId),
+      ]);
       await refresh();
       return null;
     });
@@ -692,8 +698,8 @@ function PreconfiguredModePanel(props: PreconfiguredModePanelProps) {
                     <p className="mt-1 text-xs text-ink-soft">Model: <code className="rounded bg-surface px-1.5 py-0.5">{spec.modelId}</code></p>
                   ) : null}
                   {configured ? (
-                    <p className={`mt-1 text-xs ${configured.credentialStatus === "valid" ? "text-emerald-400" : "text-amber-300"}`}>
-                      {configured.credentialStatus === "valid" ? "Validated" : "Not validated yet"} · {configured.isEnabled ? "enabled" : "disabled"}
+                    <p className={`mt-1 text-xs ${CREDENTIAL_STATUS[configured.credentialStatus]?.text ?? "text-amber-300"}`}>
+                      {CREDENTIAL_STATUS[configured.credentialStatus]?.word ?? "Not validated yet"} · {configured.isEnabled ? "enabled" : "disabled"}
                     </p>
                   ) : null}
                 </div>

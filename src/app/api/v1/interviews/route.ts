@@ -12,8 +12,15 @@ export async function POST(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const body = await request.json();
-    const session = await createInterviewSession(account.account.userId, body);
+    const body = (await request.json()) as Record<string, unknown>;
+    // The creation key rides alongside the setup input; the strict setup
+    // schema must not see it, but session creation uses it for replay safety.
+    const { idempotencyKey, ...setup } = body;
+    const session = await createInterviewSession(
+      account.account.userId,
+      setup,
+      typeof idempotencyKey === "string" ? idempotencyKey : undefined,
+    );
     return Response.json({ session }, { status: 201 });
   } catch (error) {
     return errorResponse(error);

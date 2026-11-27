@@ -85,6 +85,7 @@ export function InterviewAgent({ runtimeMode, categoryId }: InterviewAgentProps)
   // Stable per-configuration key: retries of the SAME create request reuse it
   // so the server returns the original session instead of a duplicate.
   const creationKeyRef = useRef<{ config: string; key: string } | null>(null);
+  const realtimeLaunchKeyRef = useRef<{ signature: string; key: string } | null>(null);
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -159,21 +160,33 @@ export function InterviewAgent({ runtimeMode, categoryId }: InterviewAgentProps)
     if (!categoryId || pending !== null) return;
     setError(null);
     setPending("create");
-    const response = await fetch("/api/v1/interviews", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildRealtimeLaunchInput(categoryId, strictness)),
-    });
-    setPending(null);
-    const body = (await response.json().catch(() => null)) as {
-      session?: { invitation?: { token?: string } };
-      error?: { message: string };
-    } | null;
-    if (!response.ok || !body?.session?.invitation?.token) {
-      setError(body?.error?.message ?? "The realtime interview could not be launched.");
-      return;
+    // One key per launch attempt, retained across retries of that attempt so
+    // a retry replays the original session instead of creating a duplicate.
+    const signature = `${categoryId}|${strictness}`;
+    const retained = realtimeLaunchKeyRef.current;
+    const creationKey = retained?.signature === signature ? retained.key : crypto.randomUUID();
+    realtimeLaunchKeyRef.current = { signature, key: creationKey };
+    try {
+      const response = await fetch("/api/v1/interviews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildRealtimeLaunchInput(categoryId, strictness, creationKey)),
+      });
+      const body = (await response.json().catch(() => null)) as {
+        session?: { invitation?: { token?: string } };
+        error?: { message: string };
+      } | null;
+      if (!response.ok || !body?.session?.invitation?.token) {
+        setError(body?.error?.message ?? "The realtime interview could not be launched.");
+        return;
+      }
+      realtimeLaunchKeyRef.current = null;
+      router.push(`/i/${body.session.invitation.token}/waiting`);
+    } catch {
+      setError("The realtime interview could not be launched. Try again.");
+    } finally {
+      setPending(null);
     }
-    router.push(`/i/${body.session.invitation.token}/waiting`);
   }
 
   function startOver() {

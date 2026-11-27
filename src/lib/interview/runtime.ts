@@ -41,13 +41,15 @@ function bestServingRow(
 export function buildRealtimeLaunchInput(
   categoryId: string,
   strictness: "supportive" | "balanced" | "rigorous",
-): InterviewSetupInput {
+  idempotencyKey?: string,
+): InterviewSetupInput & { idempotencyKey?: string } {
   return {
     jobRole: "General practice",
     jobDescription: undefined,
     categoryId,
     evaluationMode: strictness,
     runtimeMode: "preset_realtime",
+    ...(idempotencyKey ? { idempotencyKey } : {}),
   };
 }
 
