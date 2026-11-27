@@ -262,6 +262,28 @@ describe("interviewer output completion boundary", () => {
     expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "1:in-google-input-0-1"]);
   });
 
+  it("releases reserved lines at an output boundary with no transcript-done event", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    recordTranscriptDelta(t, "google-item-0", "Question?");
+    markOutputTranscriptionDone(t, "google-item-0");
+    expect(recordInputTranscription(t, "google-input-0", "answer", true)).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A frame with waitingForInput + turnComplete but no output transcription
+    // emits no audio-transcript-done. The boundary flush is the only release.
+    const closed = flushCompletedOutputTranscriptions(t);
+    expect(closed.map((line) => line.clientId)).toEqual([
+      "1:out-google-item-0-1",
+      "1:in-google-input-0-1",
+    ]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "1:in-google-input-0-1"]);
+  });
+
   it("restarts the drain when a reserved line closes with no segments", async () => {
     const t = token();
     fetchMock.mockResolvedValue(ok());

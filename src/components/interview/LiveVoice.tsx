@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { experimental_useRealtime } from "@ai-sdk/react";
 import { google } from "@ai-sdk/google";
+import { isOutputBoundaryFrame } from "@/lib/interview/live-output-boundary";
 import {
   beginLiveConnection,
   finalizeInputTranscription,
@@ -41,21 +42,6 @@ function inputTranscriptionFrame(raw: unknown): GoogleInputTranscription | undef
 function hasTextlessFinishedMarker(raw: unknown): boolean {
   const frame = inputTranscriptionFrame(raw);
   return frame?.finished === true && !frame.text;
-}
-
-/** Google's end-of-turn signals: no more output deltas for this turn. */
-function isOutputTurnEnd(raw: unknown): boolean {
-  if (typeof raw !== "object" || raw === null) return false;
-  const content = (raw as { serverContent?: { interactionStatus?: string; waitingForInput?: boolean } })
-    .serverContent;
-  return content?.interactionStatus === "IDLE" || content?.waitingForInput === true;
-}
-
-/** turnComplete can share one raw frame with an output boundary signal. */
-function hasTurnComplete(raw: unknown): boolean {
-  if (typeof raw !== "object" || raw === null) return false;
-  const content = (raw as { serverContent?: { turnComplete?: boolean } }).serverContent;
-  return content?.turnComplete === true;
 }
 
 /**
@@ -166,14 +152,15 @@ export function LiveVoice({
         return;
       }
 
+      // The boundary signal is authoritative even when the same frame carries
+      // turnComplete and no audio-transcript-done (a turn with no output
+      // transcription text). Handle it on any carrying event — custom or
+      // response-done — so reserved lines are never stranded. A bare
+      // turnComplete has no boundary signal and stays buffered for late deltas.
       if (
-        event.type === "custom" &&
+        (event.type === "custom" || event.type === "response-done") &&
         "raw" in event &&
-        isOutputTurnEnd(event.raw) &&
-        // A frame carrying turnComplete too is handled as one boundary by the
-        // audio-transcript-done branch below, so no reservation is opened after
-        // this boundary has already been processed.
-        !hasTurnComplete(event.raw)
+        isOutputBoundaryFrame(event.raw)
       ) {
         const closed = flushCompletedOutputTranscriptions(token);
         if (closed.length > 0) setLines((current) => [...current, ...closed]);
@@ -198,12 +185,11 @@ export function LiveVoice({
         // the previous turn, so it is finalized here, ahead of the question
         // whose slot this event reserves.
         const closed = markOutputTranscriptionDone(token, event.itemId);
-        // waitingForInput / IDLE can share this frame with turnComplete. Treat
-        // the frame as ONE boundary: reserve and close it in the same handler
-        // instead of leaving a reservation created after the flush ran. A bare
-        // turnComplete keeps the late-delta path: the slot stays open until the
-        // next item or a real output boundary.
-        if ("raw" in event && isOutputTurnEnd(event.raw)) {
+        // waitingForInput / IDLE can share this frame with turnComplete. Close
+        // the just-reserved slot in the same pass so the frame is one boundary
+        // and no reservation is left open after it. A bare turnComplete has no
+        // boundary signal and keeps the slot open for late deltas.
+        if ("raw" in event && isOutputBoundaryFrame(event.raw)) {
           closed.push(...flushCompletedOutputTranscriptions(token));
         }
         if (closed.length > 0) setLines((current) => [...current, ...closed]);
