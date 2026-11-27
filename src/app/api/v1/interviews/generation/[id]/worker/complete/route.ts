@@ -1,13 +1,14 @@
 import { z } from "zod";
 import { jsonError } from "@/lib/api/respond";
 import { completeGeneration, GenerationError } from "@/lib/interview/generation";
+import { AIMIS_WORKER_TOKEN_HEADER } from "@/lib/utils/constants";
 
 /** POST .../worker/complete — creates the interview from the spoken briefing. */
 export async function POST(
   request: Request,
   ctx: RouteContext<"/api/v1/interviews/generation/[id]/worker/complete">,
 ): Promise<Response> {
-  const workerToken = request.headers.get("x-aimis-worker-token");
+  const workerToken = request.headers.get(AIMIS_WORKER_TOKEN_HEADER);
   if (!workerToken) return jsonError(401, "unauthorized", "Missing worker credential.");
   const { id } = await ctx.params;
   try {

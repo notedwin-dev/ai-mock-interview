@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { jsonError } from "@/lib/api/respond";
 import { GenerationError, postCaption } from "@/lib/interview/generation";
+import { AIMIS_WORKER_TOKEN_HEADER } from "@/lib/utils/constants";
 
 /**
  * POST .../worker/caption — token-scoped caption write from the LiveKit
@@ -10,7 +11,7 @@ export async function POST(
   request: Request,
   ctx: RouteContext<"/api/v1/interviews/generation/[id]/worker/caption">,
 ): Promise<Response> {
-  const workerToken = request.headers.get("x-aimis-worker-token");
+  const workerToken = request.headers.get(AIMIS_WORKER_TOKEN_HEADER);
   if (!workerToken) return jsonError(401, "unauthorized", "Missing worker credential.");
   const { id } = await ctx.params;
   try {

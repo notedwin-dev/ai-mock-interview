@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IDEMPOTENCY_KEY_PATTERN } from "@/lib/utils/constants";
 
 /**
  * Interview setup and typed-turn contracts (FR-SETUP-001..005,
@@ -50,7 +51,7 @@ export const CANDIDATE_INPUT_MODES = ["text", "voice"] as const;
 const idempotencyKeySchema = z
   .string()
   .trim()
-  .regex(/^[A-Za-z0-9._:-]{1,100}$/, "Idempotency key must be 1-100 characters of letters, digits, dot, underscore, dash or colon.");
+  .regex(IDEMPOTENCY_KEY_PATTERN, "Idempotency key must be 1-100 characters of letters, digits, dot, underscore, dash or colon.");
 
 export const typedTurnSchema = z
   .object({

@@ -5,6 +5,7 @@ import {
 } from "@/lib/ai/live-transcribe";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
+import { ASR_STREAM_MAX_AGE_MS } from "@/lib/utils/constants";
 
 /**
  * Streaming ASR bridge for Google's `gemini-3.5-transcribe-live`.
@@ -22,12 +23,11 @@ interface StreamSession {
   createdAt: number;
 }
 const streams = new Map<string, StreamSession>();
-const MAX_AGE_MS = 10 * 60 * 1000;
 
 function reap() {
   const now = Date.now();
   for (const [id, entry] of streams) {
-    if (now - entry.createdAt > MAX_AGE_MS || entry.session.closed) {
+    if (now - entry.createdAt > ASR_STREAM_MAX_AGE_MS || entry.session.closed) {
       entry.session.close();
       streams.delete(id);
     }

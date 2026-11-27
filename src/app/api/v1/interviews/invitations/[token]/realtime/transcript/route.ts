@@ -2,6 +2,7 @@ import { z } from "zod";
 import { jsonError, parseJsonBody } from "@/lib/api/respond";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { InterviewError } from "@/lib/interview/service";
+import { IDEMPOTENCY_KEY_PATTERN } from "@/lib/utils/constants";
 
 /**
  * POST .../realtime/transcript — persists finalized native-realtime turns to the
@@ -22,7 +23,7 @@ const bodySchema = z
           .object({
             speaker: z.enum(["candidate", "interviewer"]),
             content: z.string().trim().min(1).max(5000),
-            clientId: z.string().trim().regex(/^[A-Za-z0-9._:-]{1,100}$/),
+            clientId: z.string().trim().regex(IDEMPOTENCY_KEY_PATTERN),
           })
           .strict(),
       )

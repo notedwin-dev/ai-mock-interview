@@ -30,6 +30,14 @@ const elevenRoute: AsrRoute = {
   apiKey: "xi-secret-key",
 };
 
+const fishRoute: AsrRoute = {
+  providerName: "fish-audio",
+  providerType: "preset",
+  baseUrl: "https://api.fish.audio",
+  modelId: "transcribe-1-pro",
+  apiKey: "fish-secret-key",
+};
+
 function mockFetch(body: unknown, status = 200) {
   const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -44,6 +52,31 @@ function mockFetch(body: unknown, status = 200) {
 }
 
 describe("transcribeAudio", () => {
+  it("fish-audio preset: native /v1/asr with Bearer key and exact model header", async () => {
+    const { fetchImpl, calls } = mockFetch({ text: "Fish heard this." });
+
+    const text = await transcribeAudio(fishRoute, new Uint8Array([5, 6]), "audio/wav", { fetchImpl });
+
+    expect(text).toBe("Fish heard this.");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.fish.audio/v1/asr");
+    expect(calls[0]!.headers["authorization"]).toBe("Bearer fish-secret-key");
+    expect(calls[0]!.headers["model"]).toBe("transcribe-1-pro");
+    const form = calls[0]!.body as FormData;
+    expect(form.get("audio")).toBeInstanceOf(File);
+    expect(form.get("model")).toBeNull(); // model travels in the header
+  });
+
+  it("a custom row pointing at fish.audio uses the native wire by host", async () => {
+    const { fetchImpl, calls } = mockFetch({ text: "Host match." });
+    const route = { ...fishRoute, providerType: "custom", providerName: "my-fish" };
+
+    await transcribeAudio(route, new Uint8Array([1]), "audio/wav", { fetchImpl });
+
+    expect(calls[0]!.url).toBe("https://api.fish.audio/v1/asr");
+    expect(calls[0]!.headers["model"]).toBe("transcribe-1-pro");
+  });
+
   it("google preset: inline base64 audio to Gemini's documented interactions endpoint", async () => {
     const { fetchImpl, calls } = mockFetch({ output_text: "I fixed a slow query." });
 

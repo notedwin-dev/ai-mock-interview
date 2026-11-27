@@ -1,5 +1,8 @@
 import { createGoogle } from "@ai-sdk/google";
-import { AIMIS_ELEVENLABS_REALTIME_MODEL_ID } from "@/lib/utils/constants";
+import {
+  AIMIS_ELEVENLABS_REALTIME_MODEL_ID,
+  XI_API_KEY_HEADER,
+} from "@/lib/utils/constants";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
 import type { Experimental_RealtimeSessionConfig } from "ai";
 
@@ -109,8 +112,12 @@ export const ELEVENLABS_REALTIME_MODEL_ID = AIMIS_ELEVENLABS_REALTIME_MODEL_ID;
 export const ELEVENLABS_REALTIME_WS_URL = "wss://api.elevenlabs.io/v1/convai/realtime";
 /** Provider API base for the mint call; the model is admin-fixed, never user-editable. */
 export const ELEVENLABS_REALTIME_API_BASE = "https://api.elevenlabs.io";
-/** Short-lived client secret endpoint (xi-api-key header, per the provider docs). */
-const ELEVENLABS_CLIENT_SECRET_PATH = "/v1/convai/conversation/client-secret";
+/**
+ * Short-lived client secret endpoint (xi-api-key header). Verified live
+ * 2026-11-25: POST /v1/convai/realtime/client_secrets with a `session`
+ * (OpenAI-compatible) and `expires_after` body returns `{ value, expires_at, session }`.
+ */
+const ELEVENLABS_CLIENT_SECRET_PATH = "/v1/convai/realtime/client_secrets";
 /** Assumed client-secret TTL; the value is documented, not silently substituted. */
 const CLIENT_SECRET_TTL_SECONDS = 600;
 
@@ -188,12 +195,18 @@ async function mintElevenLabsClientSecret(
       {
         method: "POST",
         headers: {
-          "xi-api-key": route.apiKey,
+          [XI_API_KEY_HEADER]: route.apiKey,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model_id: route.modelId,
-          expires_after_seconds: CLIENT_SECRET_TTL_SECONDS,
+          // The provider uses the OpenAI Realtime wire (snake_case), while
+          // SESSION_CONFIG above is camelCase for the Google AI SDK.
+          session: {
+            type: "realtime",
+            model: route.modelId,
+            output_modalities: ["audio"],
+          },
+          expires_after: { seconds: CLIENT_SECRET_TTL_SECONDS },
         }),
       },
     );
@@ -238,9 +251,9 @@ async function mintElevenLabsClientSecret(
     );
   }
 
-  let payload: { client_secret?: unknown };
+  let payload: { value?: unknown; expires_at?: unknown };
   try {
-    payload = JSON.parse(text) as { client_secret?: unknown };
+    payload = JSON.parse(text) as { value?: unknown; expires_at?: unknown };
   } catch {
     throw new RealtimeTokenError(
       route.providerName,
@@ -250,7 +263,9 @@ async function mintElevenLabsClientSecret(
     );
   }
 
-  const clientSecret = payload.client_secret;
+  // The live endpoint returns `{ value, expires_at, session }` (verified
+  // 2026-11-25); accept the documented shape only — no silent fallback.
+  const clientSecret = payload.value;
   if (typeof clientSecret !== "string" || clientSecret.length === 0) {
     throw new RealtimeTokenError(
       route.providerName,
@@ -259,11 +274,15 @@ async function mintElevenLabsClientSecret(
       response.status,
     );
   }
+  const expiresAt =
+    typeof payload.expires_at === "number"
+      ? payload.expires_at * 1000
+      : now() + CLIENT_SECRET_TTL_SECONDS * 1000;
 
   return {
     token: clientSecret,
     url: ELEVENLABS_REALTIME_WS_URL,
-    expiresAt: now() + CLIENT_SECRET_TTL_SECONDS * 1000,
+    expiresAt,
   };
 }
 
@@ -307,7 +326,10 @@ export async function createRealtimeToken(
       const provider = (
         deps.createProvider ??
         // Pass the resolved key explicitly: the provider must never fall back
-        // to the process-wide GOOGLE_GENERATIVE_AI_API_KEY (ADR-0005).
+        // to the process-wide GOOGLE_GENERATIVE_AI_API_KEY (ADR-0005). This
+        // supersedes the header-based factory: `apiKey` is the SDK's own
+        // explicit-key option, so no x-goog-api-key constant or cast is needed
+        // here (the constant stays on the shared/probe wire surface).
         ((r: ProviderRoute) => createGoogle({ apiKey: r.apiKey }))
       )(route);
       const result = await provider.experimental_realtime.getToken({
