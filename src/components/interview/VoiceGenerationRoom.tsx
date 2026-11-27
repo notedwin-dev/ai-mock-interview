@@ -15,10 +15,6 @@ import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
  */
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
 
-// One generation per page load, including Strict Mode's double effect. Reset
-// shortly after a real unmount so revisiting the page starts a fresh session.
-let generationStartedThisLoad = false;
-
 /** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
 type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
 
@@ -52,7 +48,7 @@ export function VoiceGenerationRoom() {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
-  const startedAtRef = useRef(Date.now());
+  const startedAtRef = useRef(0);
   const agentPresentRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
@@ -66,14 +62,18 @@ export function VoiceGenerationRoom() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (generationStartedThisLoad) return;
-    generationStartedThisLoad = true;
-    const active = true;
+    // Each effect setup owns its startup. Strict Mode's setup-cleanup-setup
+    // replays it, and cleanup invalidates this flag so work started by a dead
+    // setup can never attach a room to the live component. Request
+    // deduplication lives server-side, not in a module-level gate.
+    let active = true;
     roomRef.current = null;
+    startedAtRef.current = Date.now();
 
     async function start() {
       try {
         const response = await fetch("/api/v1/interviews/generation", { method: "POST" });
+        if (!active) return;
         const body = (await response.json().catch(() => null)) as
           | { id?: string; url?: string; token?: string; error?: { message?: string } }
           | null;
@@ -132,6 +132,12 @@ export function VoiceGenerationRoom() {
           setStatus("connecting");
         }
         await room.connect(body.url, body.token);
+        // Cleanup may have run while the connection was being negotiated; a
+        // cancelled startup must not leave this room connected or publishing.
+        if (!active) {
+          void room.disconnect();
+          return;
+        }
         try {
           await room.localParticipant.setMicrophoneEnabled(true);
         } catch {
@@ -140,6 +146,10 @@ export function VoiceGenerationRoom() {
             setMuted(true);
             setError("Microphone unavailable — the planner cannot hear you.");
           }
+        }
+        if (!active) {
+          void room.disconnect();
+          return;
         }
         setBrowserMicEnabled(room, !mutedRef.current);
         if (active) setStatus("connected");
@@ -152,11 +162,9 @@ export function VoiceGenerationRoom() {
     }
     queueMicrotask(() => void start());
     return () => {
+      active = false;
       void roomRef.current?.disconnect();
       roomRef.current = null;
-      // Strict Mode's immediate remount happens well within 250ms; a genuine
-      // navigation then clears the guard for the next planning session.
-      setTimeout(() => { generationStartedThisLoad = false; }, 250);
     };
   }, []);
 
@@ -230,7 +238,6 @@ export function VoiceGenerationRoom() {
     if (!response.ok || !body?.invitationPath) {
       throw new Error(body?.error?.message ?? "Could not confirm the interview.");
     }
-    generationStartedThisLoad = false;
     router.push(`${body.invitationPath}/waiting`);
   }
 

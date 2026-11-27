@@ -17,7 +17,14 @@ function rowsForRuntime(
   mode: RuntimeMode | null,
 ): ProviderConfigSummary[] {
   if (!mode) return rows;
-  return rows.filter((row) => Boolean(row.capabilities.realtime) === (mode === "realtime"));
+  return rows.filter((row) => {
+    const isRealtime = Boolean(row.capabilities.realtime);
+    if (mode === "realtime") return isRealtime;
+    // The data model allows one row to serve several capabilities. Dropping
+    // every realtime-capable row in custom mode would hide the LLM route of a
+    // mixed row, so retain it for its non-realtime capabilities.
+    return !isRealtime || Object.keys(row.capabilities).some((key) => key !== "realtime");
+  });
 }
 
 export interface RuntimeSelection {

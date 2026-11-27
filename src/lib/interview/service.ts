@@ -751,6 +751,16 @@ export function createRoomStore(): RoomStore {
     async appendInterviewerWithNewUnit(sessionId, contentText) {
       return db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT session_id FROM interview_session WHERE session_id = ${sessionId}::uuid FOR UPDATE`;
+        // Re-check status under the same row lock as appendRealtimeMessage: a
+        // completion that committed while the answer was generated must not
+        // add a primary question or open a unit on a finished interview.
+        const session = await tx.interviewSession.findUnique({
+          where: { sessionId },
+          select: { status: true },
+        });
+        if (session?.status !== "active") {
+          throw new InterviewError("invalid_state", "This interview is not accepting turns.");
+        }
         await tx.interviewAssessmentUnit.updateMany({
           where: { sessionId, status: "open" },
           data: { status: "closed", closedAt: new Date() },

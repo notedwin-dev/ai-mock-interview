@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { readDevicePreferences } from "@/lib/interview/device-preferences";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -33,7 +34,21 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [muted, setMuted] = useState(false);
+  // Source of truth for the current mute intent, including changes made while
+  // a getUserMedia permission request is still pending (the render-time
+  // `muted` value would be stale when that request resolves).
+  const mutedRef = useRef(muted);
   const [error, setError] = useState<string | null>(null);
+
+  // Apply the waiting-room device choices after mount (sessionStorage is
+  // browser-only, so reading it during render would break SSR hydration).
+  useEffect(() => {
+    const preferences = readDevicePreferences();
+    mutedRef.current = preferences.muted;
+    // Defer the state update out of the effect body: sessionStorage is only
+    // available after mount, and a synchronous setState here cascades renders.
+    queueMicrotask(() => setMuted(preferences.muted));
+  }, []);
   const [ended, setEnded] = useState(false);
   // Monotonic counter for applied turn results: the initial transcript load
   // may only overwrite messages when no turn has been applied since it
@@ -197,7 +212,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       if (body.audioBase64) {
         try {
           const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
-          audio.onended = () => setState("listening");
+          // A new answer may have moved the room to "thinking" while this
+          // audio was playing; only release the speaking state we own.
+          audio.onended = () => setState((current) => (current === "speaking" ? "listening" : current));
           void audio.play().catch(() => undefined);
           audioPlaying = true;
         } catch {
@@ -263,7 +280,8 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   }
 
   function toggleMute() {
-    const next = !muted;
+    const next = !mutedRef.current;
+    mutedRef.current = next;
     setMuted(next);
     streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
   }
@@ -277,7 +295,13 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     acquisitionPendingRef.current = true;
     const generation = ++recordingGenerationRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Prefer the microphone chosen in the waiting room. An "ideal" constraint
+      // falls back to the browser default when that device is missing or no
+      // longer available.
+      const { micId } = readDevicePreferences();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: micId ? { deviceId: { ideal: micId } } : true,
+      });
       if (generation !== recordingGenerationRef.current) {
         // The room ended / unmounted / recorded again while the permission
         // prompt was open: this acquisition is stale. Release every track so

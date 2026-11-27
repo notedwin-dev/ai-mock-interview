@@ -52,6 +52,12 @@ export function WebRTCRoom({
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const leavingRef = useRef(false);
   const didAutoJoinRef = useRef(false);
+  // Latest mute intent, including toggles made while a token request or a
+  // connection is still in flight. The saved preference is only the initial
+  // value; the ref is what the joining flow must re-read before publishing.
+  const muteIntentRef = useRef(false);
+  // Only the newest transcript request may replace the displayed messages.
+  const transcriptRequestRef = useRef(0);
   const [status, setStatus] = useState<RoomStatus>("idle");
   const [joined, setJoined] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
@@ -72,13 +78,17 @@ export function WebRTCRoom({
   }, []);
 
   const loadTranscript = useCallback(async () => {
+    const request = ++transcriptRequestRef.current;
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
         { cache: "no-store" },
       );
+      if (request !== transcriptRequestRef.current) return;
       if (response.ok) {
         const body = (await response.json()) as { messages: TranscriptEntry[] };
+        // A slower earlier response must never overwrite newer messages.
+        if (request !== transcriptRequestRef.current) return;
         setMessages(body.messages ?? []);
       }
     } catch {
@@ -100,7 +110,12 @@ export function WebRTCRoom({
   useEffect(() => {
     if (!overlayOpen) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    overlayRef.current?.focus();
+    // Focus a real control, not the panel: Shift+Tab from the panel would land
+    // on the backdrop button before the dialog, escaping the focus trap.
+    const firstControl = overlayRef.current?.querySelector<HTMLElement>(
+      'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    (firstControl ?? overlayRef.current)?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();
@@ -144,7 +159,9 @@ export function WebRTCRoom({
     leavingRef.current = false;
     const preferences = readDevicePreferences();
     // Never carry a stale mute state across a rejoin. The stored preference is
-    // the source of truth until the real track state is read back below.
+    // the initial intent; the ref stays authoritative while the token request
+    // and connection are pending.
+    muteIntentRef.current = preferences.muted;
     setMuted(preferences.muted);
     const supportsOutputSelection =
       typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
@@ -216,17 +233,22 @@ export function WebRTCRoom({
 
       await room.connect(body.url, body.token);
       let micUnavailable = false;
+      // Re-read the intent after the async boundary: a Mute click while the
+      // token request was pending must not be overridden by the old snapshot.
+      const shouldPublish = !muteIntentRef.current;
       try {
-        if (!preferences.muted) {
+        if (shouldPublish) {
           await room.localParticipant.setMicrophoneEnabled(true);
         }
       } catch {
         micUnavailable = true;
       }
-      setBrowserMicEnabled(room, !preferences.muted && !micUnavailable);
+      setBrowserMicEnabled(room, shouldPublish && !micUnavailable);
       // Reflect the actual track state, not the requested state — a permission
       // denial or a rejoin must never show "muted" while audio is being sent.
-      setMuted(micUnavailable || !room.localParticipant.isMicrophoneEnabled);
+      const actualMuted = micUnavailable || !room.localParticipant.isMicrophoneEnabled;
+      muteIntentRef.current = actualMuted;
+      setMuted(actualMuted);
       if (micUnavailable) {
         setNotice("Microphone unavailable — you can listen to the interviewer.");
       }
@@ -262,7 +284,8 @@ export function WebRTCRoom({
 
   async function toggleMute() {
     const participant = roomRef.current?.localParticipant;
-    const next = !muted;
+    const next = !muteIntentRef.current;
+    muteIntentRef.current = next;
     if (!participant) {
       setMuted(next);
       saveMutePreference(next);
@@ -272,9 +295,11 @@ export function WebRTCRoom({
       await participant.setMicrophoneEnabled(!next);
       setBrowserMicEnabled(roomRef.current, !next);
       const actual = !participant.isMicrophoneEnabled;
+      muteIntentRef.current = actual;
       setMuted(actual);
       saveMutePreference(actual);
     } catch {
+      muteIntentRef.current = true;
       setMuted(true);
       saveMutePreference(true);
       setNotice("Microphone unavailable — you can listen to the interviewer.");

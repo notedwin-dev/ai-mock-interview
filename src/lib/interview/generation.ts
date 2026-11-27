@@ -108,7 +108,11 @@ export async function startGeneration(userId: string) {
       config,
     );
   } catch {
-    // A worker outage does not invalidate the room; the UI reports the failure.
+    // Do not report a successful generation when the planner never started:
+    // the candidate would wait in an idle room. Only a sanitized error crosses
+    // this boundary; provider error text may contain URLs or credentials.
+    console.error("generator dispatch failed");
+    throw new GenerationError("not_configured", "The interview planner could not be started. Try again.");
   }
   return { id: record.id, ...session };
 }
@@ -128,9 +132,11 @@ export async function getGeneration(userId: string, id: string) {
 export async function postCaption(id: string, workerToken: string, input: unknown) {
   await assertWorker(id, workerToken);
   const caption = captionSchema.parse(input);
+  // Only the caption changes: a late caption must never reset a generation
+  // that already completed or was confirmed. New records start collecting.
   await db.interviewGeneration.update({
     where: { id },
-    data: { captionJson: caption as unknown as never, status: "collecting" },
+    data: { captionJson: caption as unknown as never },
   });
 }
 
@@ -167,11 +173,24 @@ export async function confirmGeneration(
 ): Promise<{ invitationPath: string }> {
   const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
   if (!record) throw new GenerationError("not_found", "Generation session not found.");
+  const { agentConfigSchema } = await import("./agent");
+  const config = agentConfigSchema.parse(input);
+  if (record.status === "confirmed" && record.sessionId) {
+    // Replaying the same confirmation returns the original invitation. A
+    // different configuration is a distinct outcome: it cannot rewrite the
+    // session the candidate already reviewed.
+    const stored = record.configJson as unknown as Record<string, unknown> | null;
+    if (stored && JSON.stringify(stored) === JSON.stringify(config)) {
+      return { invitationPath: record.invitationPath! };
+    }
+    throw new GenerationError(
+      "invalid_state",
+      "This generation was already confirmed with a different configuration.",
+    );
+  }
   if (record.status !== "completed" || !record.sessionId) {
     throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
   }
-  const { agentConfigSchema } = await import("./agent");
-  const config = agentConfigSchema.parse(input);
   await db.interviewSession.update({
     where: { sessionId: record.sessionId },
     data: {

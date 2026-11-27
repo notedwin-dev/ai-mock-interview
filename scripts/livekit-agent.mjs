@@ -110,6 +110,9 @@ export async function runGeneratorJob(ctx, meta) {
     description: "Submit all six gathered values once all questions have been answered. Call exactly once.",
     parameters: TOOL_PARAMETERS,
     execute: async (answers) => {
+      // Only a successful completion response ends the job. A failed save
+      // leaves the session running so the candidate can retry in this call.
+      let completed = false;
       try {
         const response = await fetch(
           `${API_BASE}/api/v1/interviews/generation/${encodeURIComponent(generationId)}/worker/complete`,
@@ -117,14 +120,15 @@ export async function runGeneratorJob(ctx, meta) {
         );
         const body = await response.json().catch(() => null);
         if (!response.ok) throw new Error(body?.error?.message ?? "generation failed");
+        completed = true;
         await say(closingLine());
       } catch (error) {
         console.error("generation failed", error instanceof Error ? error.message : "unknown");
-        await say("I could not save your interview. Please try again.");
-      } finally {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        ctx.shutdown("generation finished");
+        if (!completed) await say("I could not save your interview. Please try again.");
       }
+      if (!completed) return { ok: false };
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      ctx.shutdown("generation finished");
       return { ok: true };
     },
   });

@@ -27,9 +27,10 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError(409, "webrtc_not_configured", "LiveKit is not configured.");
   }
 
-  const body = await request.text();
+  // Reject unsigned requests before buffering their body.
   const authorization = request.headers.get("authorization");
   if (!authorization) return jsonError(401, "unauthorized", "Missing webhook signature.");
+  const body = await request.text();
 
   let event: unknown;
   try {

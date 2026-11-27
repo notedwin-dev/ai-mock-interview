@@ -291,6 +291,13 @@ export function ProviderConfigurator({
   /** Switch the active runtime; saved rows of both modes are kept untouched. */
   async function switchMode(next: RuntimeMode) {
     setSwitching(true);
+    // Clear the previous attempt's error at the start so a stale failure is
+    // never shown while a new switch is in flight or after one succeeds.
+    setActionError((current) => {
+      const cleared = { ...current };
+      delete cleared["mode:switch"];
+      return cleared;
+    });
     const result = await callApi<{ mode: RuntimeMode }>("/api/v1/providers/runtime-mode", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -300,6 +307,7 @@ export function ProviderConfigurator({
     if (result.ok) {
       setMode(next);
     } else {
+      // Only a failed current attempt keeps its error.
       setActionError((current) => ({ ...current, "mode:switch": result.error }));
     }
   }

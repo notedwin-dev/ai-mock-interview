@@ -57,10 +57,15 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
     loadDevices();
   }, [loadDevices]);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    cameraRequestRef.current += 1;
-    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+  useEffect(() => {
+    // StrictMode replays setup after cleanup: restore the mounted flag so a
+    // new camera request is not discarded by its own cleanup generation.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cameraRequestRef.current += 1;
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
   }, []);
 
   function stopCamera() {
@@ -232,6 +237,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
               <select
                 value={cameraId}
                 onChange={(event) => changeCamera(event.target.value)}
+                disabled={busy}
                 aria-label="Camera"
                 className={PILL}>
                 {cameraOptions.length === 0 ? <option value="">Camera</option> : null}

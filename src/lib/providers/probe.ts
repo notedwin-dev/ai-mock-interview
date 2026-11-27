@@ -303,10 +303,12 @@ export async function probeProviderConfiguration(
       const presetBase =
         row.providerType === "preset" ? getPresetAdapter(row.providerName)?.defaultBaseUrl : null;
       const realtimeBase = presetBase ?? row.baseUrl ?? "";
+      // createRealtimeToken only supports the preset Google route. A custom
+      // target that merely points at a Gemini base URL cannot be verified here
+      // and stays status-neutral (skipped); injected tokens (tests) still run.
       const isGemini =
         Boolean(deps.realtimeToken) ||
-        row.providerName === "google" ||
-        realtimeBase.includes("generativelanguage.googleapis.com");
+        (row.providerType === "preset" && row.providerName === "google");
       if (!isGemini) {
         results.push({
           capability,

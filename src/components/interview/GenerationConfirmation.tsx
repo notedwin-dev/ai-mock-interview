@@ -25,14 +25,45 @@ export function GenerationConfirmation({
   onConfirm: (config: ConfirmableConfig) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<ConfirmableConfig>(config);
+  // Raw text drafts: normalising on every keystroke would strip a trailing
+  // comma and make "React, " impossible to type. Both are normalised on blur
+  // and again before confirmation.
+  const [techStackDraft, setTechStackDraft] = useState((config.techStack ?? []).join(", "));
+  const [questionCountDraft, setQuestionCountDraft] = useState(
+    config.questionCount == null ? "" : String(config.questionCount),
+  );
+  const [fieldErrors, setFieldErrors] = useState<{ questionCount?: string }>({});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  function normalizeTechStack(): string[] {
+    const normalized = techStackDraft.split(",").map((part) => part.trim()).filter(Boolean);
+    setTechStackDraft(normalized.join(", "));
+    return normalized;
+  }
+
   async function submit() {
+    const rawCount = questionCountDraft.trim();
+    let questionCount: number | undefined;
+    if (rawCount !== "") {
+      const parsed = Number(rawCount);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+        setFieldErrors({ questionCount: "Enter a whole number of questions between 1 and 50." });
+        return;
+      }
+      questionCount = parsed;
+    }
+    setFieldErrors({});
+    const finalConfig: ConfirmableConfig = {
+      ...draft,
+      techStack: normalizeTechStack(),
+      questionCount,
+    };
+    setDraft(finalConfig);
     setPending(true);
     setError(null);
     try {
-      await onConfirm(draft);
+      await onConfirm(finalConfig);
     } catch {
       setError("Could not save the changes. Please try again.");
       setPending(false);
@@ -66,13 +97,9 @@ export function GenerationConfirmation({
           <span className="text-xs uppercase tracking-wide text-ink-muted">Topics (comma separated)</span>
           <input
             className="h-10 rounded-full border border-line bg-raised px-4 text-sm text-ink"
-            value={(draft.techStack ?? []).join(", ")}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                techStack: event.target.value.split(",").map((part) => part.trim()).filter(Boolean),
-              })
-            }
+            value={techStackDraft}
+            onChange={(event) => setTechStackDraft(event.target.value)}
+            onBlur={() => setDraft((current) => ({ ...current, techStack: normalizeTechStack() }))}
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -82,11 +109,19 @@ export function GenerationConfirmation({
             min={1}
             max={50}
             className="h-10 rounded-full border border-line bg-raised px-4 text-sm text-ink"
-            value={draft.questionCount ?? ""}
-            onChange={(event) =>
-              setDraft({ ...draft, questionCount: Number(event.target.value) || undefined })
-            }
+            value={questionCountDraft}
+            onChange={(event) => {
+              setQuestionCountDraft(event.target.value);
+              if (fieldErrors.questionCount) setFieldErrors({});
+            }}
+            aria-invalid={Boolean(fieldErrors.questionCount)}
+            aria-describedby={fieldErrors.questionCount ? "question-count-error" : undefined}
           />
+          {fieldErrors.questionCount ? (
+            <p id="question-count-error" className="text-xs text-red-400" role="alert">
+              {fieldErrors.questionCount}
+            </p>
+          ) : null}
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-wide text-ink-muted">Evaluation mode</span>
