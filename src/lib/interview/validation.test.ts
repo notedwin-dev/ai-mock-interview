@@ -16,7 +16,12 @@ describe("interviewSetupSchema (FR-SETUP-001..005)", () => {
   });
 
   it("keeps the job description optional (FR-SETUP-002: enter OR paste)", () => {
-    const { jobDescription: _omitted, ...withoutDescription } = base;
+    const withoutDescription = {
+      jobRole: base.jobRole,
+      categoryId: base.categoryId,
+      evaluationMode: base.evaluationMode,
+      runtimeMode: base.runtimeMode,
+    };
     expect(interviewSetupSchema.parse(withoutDescription).jobDescription).toBeUndefined();
   });
 
