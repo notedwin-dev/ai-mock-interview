@@ -51,6 +51,13 @@ function isOutputTurnEnd(raw: unknown): boolean {
   return content?.interactionStatus === "IDLE" || content?.waitingForInput === true;
 }
 
+/** turnComplete can share one raw frame with an output boundary signal. */
+function hasTurnComplete(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null) return false;
+  const content = (raw as { serverContent?: { turnComplete?: boolean } }).serverContent;
+  return content?.turnComplete === true;
+}
+
 /**
  * Native Gemini Live realtime session for the token-scoped room (ADR-006
  * Option A). WebSocket transport is provided by the AI SDK; the ephemeral
@@ -77,10 +84,15 @@ export function LiveVoice({
   modelId: string;
   instructions: string;
 }) {
-  const endpoint = `/api/v1/interviews/invitations/${encodeURIComponent(token)}/realtime/token`;
+  const invitationBase = `/api/v1/interviews/invitations/${encodeURIComponent(token)}`;
+  const endpoint = `${invitationBase}/realtime/token`;
   const [lines, setLines] = useState<LiveLine[]>([]);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [captureFailed, setCaptureFailed] = useState(false);
+  // Live lines are accepted only for an active interview. Activate through the
+  // invitation before connecting, and keep Start unavailable until that
+  // succeeds so no socket can be opened while transcript saving would 404.
+  const [activation, setActivation] = useState<"checking" | "ready" | "failed">("checking");
 
   // Restores failed lines on mount and keeps every mounted instance in sync
   // with a drain that was started (and may exhaust) in a previous instance.
@@ -95,6 +107,28 @@ export function LiveVoice({
     getServerLiveLineSnapshot,
   );
   const retry = useCallback(() => retryFailedLines(token), [token]);
+
+  const activateInterview = useCallback(async () => {
+    setActivation("checking");
+    try {
+      const response = await fetch(`${invitationBase}/activate`, { method: "POST" });
+      if (!response.ok) throw new Error("activation refused");
+      setActivation("ready");
+      setSessionNotice(null);
+    } catch {
+      setActivation("failed");
+      setSessionNotice(
+        "Live voice is unavailable: this interview is not accepting transcript lines. Try again.",
+      );
+    }
+  }, [invitationBase]);
+
+  useEffect(() => {
+    // Defer off the effect body: activation updates state before its first
+    // await, which an effect must not trigger directly.
+    const timer = setTimeout(() => { void activateInterview(); }, 0);
+    return () => clearTimeout(timer);
+  }, [activateInterview]);
 
   const handleEvent = useCallback(
     (event: Parameters<NonNullable<Parameters<typeof experimental_useRealtime>[0]["onEvent"]>>[0]) => {
@@ -135,7 +169,11 @@ export function LiveVoice({
       if (
         event.type === "custom" &&
         "raw" in event &&
-        isOutputTurnEnd(event.raw)
+        isOutputTurnEnd(event.raw) &&
+        // A frame carrying turnComplete too is handled as one boundary by the
+        // audio-transcript-done branch below, so no reservation is opened after
+        // this boundary has already been processed.
+        !hasTurnComplete(event.raw)
       ) {
         const closed = flushCompletedOutputTranscriptions(token);
         if (closed.length > 0) setLines((current) => [...current, ...closed]);
@@ -157,9 +195,17 @@ export function LiveVoice({
 
       if (event.type === "audio-transcript-done" && "itemId" in event) {
         // Candidate text already collected before this completion belongs to
-        // the previous turn, so it is finalized and displayed here, ahead of
-        // the question whose slot this event reserves.
+        // the previous turn, so it is finalized here, ahead of the question
+        // whose slot this event reserves.
         const closed = markOutputTranscriptionDone(token, event.itemId);
+        // waitingForInput / IDLE can share this frame with turnComplete. Treat
+        // the frame as ONE boundary: reserve and close it in the same handler
+        // instead of leaving a reservation created after the flush ran. A bare
+        // turnComplete keeps the late-delta path: the slot stays open until the
+        // next item or a real output boundary.
+        if ("raw" in event && isOutputTurnEnd(event.raw)) {
+          closed.push(...flushCompletedOutputTranscriptions(token));
+        }
         if (closed.length > 0) setLines((current) => [...current, ...closed]);
       }
     },
@@ -256,14 +302,29 @@ export function LiveVoice({
         ) : (
           <button
             type="button"
-            onClick={() => void connectSession()}
-            disabled={busy}
+            onClick={() => {
+              if (activation === "ready") void connectSession();
+            }}
+            disabled={busy || activation !== "ready"}
             className="inline-flex h-10 items-center rounded-full bg-emerald-400 px-5 text-sm font-semibold text-emerald-950 disabled:opacity-50"
           >
-            Start live voice
+            {activation === "ready"
+              ? "Start live voice"
+              : activation === "failed"
+                ? "Live voice unavailable"
+                : "Preparing live voice…"}
           </button>
         )}
       </div>
+      {activation === "failed" && !connected ? (
+        <button
+          type="button"
+          className="self-start text-xs text-amber-300 underline"
+          onClick={() => void activateInterview()}
+        >
+          Retry activation
+        </button>
+      ) : null}
       {connected && captureFailed ? (
         <button
           type="button"

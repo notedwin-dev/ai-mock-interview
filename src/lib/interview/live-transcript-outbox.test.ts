@@ -212,18 +212,19 @@ describe("interviewer output completion boundary", () => {
     markOutputTranscriptionDone(t, "google-item-0");
     expect(fetchMock).not.toHaveBeenCalled();
 
-    expect(recordInputTranscription(t, "google-input-0", "Five years.", true)).toEqual([
-      { speaker: "candidate", text: "Five years.", clientId: "1:in-google-input-0-1" },
-    ]);
-    // The answer may be queued, but it must not be stored until the earlier
-    // question has been finalized into its reserved slot.
+    // The answer is queued but withheld from display AND storage until the
+    // earlier question closes into its reserved slot.
+    expect(recordInputTranscription(t, "google-input-0", "Five years.", true)).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
 
     // A late delta joins the reserved question, and the next interviewer item
-    // finally closes it. Both lines are then stored in chronological order.
+    // finally closes it. Both lines are then displayed and stored in order.
     recordTranscriptDelta(t, "google-item-0", " Please be specific.");
     const closed = recordTranscriptDelta(t, "google-item-1", "Tell me about a project.");
-    expect(closed.map((line) => line.clientId)).toEqual(["1:out-google-item-0-1"]);
+    expect(closed.map((line) => line.clientId)).toEqual([
+      "1:out-google-item-0-1",
+      "1:in-google-input-0-1",
+    ]);
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(postedClientIds()).toEqual([
@@ -245,19 +246,38 @@ describe("interviewer output completion boundary", () => {
 
     // The completion signal owns the slot before any output delta is seen.
     markOutputTranscriptionDone(t, "google-item-0");
-    expect(recordInputTranscription(t, "google-input-0", "my answer", true)).toEqual([
-      { speaker: "candidate", text: "my answer", clientId: "1:in-google-input-0-1" },
-    ]);
+    expect(recordInputTranscription(t, "google-input-0", "my answer", true)).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
 
     // Deltas arrive later and join the already-reserved slot; the next item's
-    // delta closes it without letting the answer take the earlier position.
+    // delta closes it and releases both lines in chronological order.
     recordTranscriptDelta(t, "google-item-0", "Question?");
     const closed = recordTranscriptDelta(t, "google-item-1", "next turn");
-    expect(closed.map((line) => line.clientId)).toEqual(["1:out-google-item-0-1"]);
+    expect(closed.map((line) => line.clientId)).toEqual([
+      "1:out-google-item-0-1",
+      "1:in-google-input-0-1",
+    ]);
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "1:in-google-input-0-1"]);
+  });
+
+  it("restarts the drain when a reserved line closes with no segments", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    // A completion signal with no deltas resolves to no interviewer segments.
+    markOutputTranscriptionDone(t, "google-item-0");
+    expect(recordInputTranscription(t, "google-input-0", "my answer", true)).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Closing the empty slot must still release and store the withheld answer.
+    const closed = flushCompletedOutputTranscriptions(t);
+    expect(closed.map((line) => line.clientId)).toEqual(["1:in-google-input-0-1"]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(postedClientIds()).toEqual(["1:in-google-input-0-1"]);
   });
 
   it("stores a reserved question first even when the answer is finalized by a boundary", async () => {
