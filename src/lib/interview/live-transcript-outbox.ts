@@ -10,6 +10,11 @@
  *
  * Persistence is intentionally fire-and-forget from the event handler: new
  * finalized lines keep arriving while earlier ones are being posted.
+ *
+ * Provider item ids (and candidate transcription chunks) are scoped to a
+ * connection generation: Google's mapper restarts its counters per socket and
+ * re-emits cumulative candidate text, so only a finalized, connection-scoped
+ * item becomes one persisted line.
  */
 
 /** The transcript route validates `content` with `.trim().min(1).max(5000)`. */
@@ -51,6 +56,17 @@ interface LineRegistry {
    * not a segment id — is the idempotency identity of one logical line.
    */
   bases: Set<string>;
+  /**
+   * Provider item ids are only unique within one socket: the Google mapper
+   * restarts its counters for every connection. Scoping ids with this
+   * generation keeps a reused id from suppressing a later utterance.
+   */
+  connection: number;
+  /**
+   * Latest cumulative candidate transcript per input item. Google emits one
+   * `input-transcription-completed` per text chunk, not one per utterance.
+   */
+  inputTranscripts: Map<string, { itemId: string; text: string; connection: number }>;
   /** Finalized lines awaiting persistence, strictly in arrival order. */
   queue: LiveLine[];
   /** Transiently failed lines that a user can still retry. */
@@ -70,6 +86,8 @@ function lineRegistry(token: string): LineRegistry {
     saved: new Set<string>(),
     inFlight: new Set<string>(),
     bases: new Set<string>(),
+    connection: 0,
+    inputTranscripts: new Map(),
     queue: [],
     failed: [],
     notice: null,
@@ -111,8 +129,23 @@ export function getServerLiveLineSnapshot(): LiveLineStoreSnapshot {
  */
 const transcriptDeltas = new Map<string, string>();
 
+/**
+ * One socket's provider item ids must not mix with another socket's ids, even
+ * when a remount or reconnect reuses the same number. The registry lives for
+ * the token's lifetime, so this stays consistent across mounts.
+ */
+export function beginLiveConnection(token: string): void {
+  lineRegistry(token).connection += 1;
+}
+
+/** Historical ids (no session event) stay unprefixed; later sockets do not. */
+function scopedClientId(connection: number, clientId: string): string {
+  return connection === 0 ? clientId : `${connection}:${clientId}`;
+}
+
 function deltaKey(token: string, itemId: string): string {
-  return `${token}\u0000${itemId}`;
+  const connection = lineRegistry(token).connection;
+  return `${token}\u0000${connection}\u0000${itemId}`;
 }
 
 export function recordTranscriptDelta(token: string, itemId: string, delta: string): void {
@@ -259,18 +292,79 @@ export function enqueueLiveLines(token: string, lines: LiveLine[]): LiveLine[] {
 }
 
 /**
- * Finalize one logical line: split it, dedupe on its base id, start background
- * persistence and return the segments the caller should display. Returns an
- * empty array for a repeated/empty transcript so neither the UI nor the
- * transcript gains a duplicate.
+ * Finalize one logical line for a specific connection generation: scope its
+ * base id, split it, dedupe, start background persistence and return the
+ * segments to display. An empty array means a repeated/empty transcript, so
+ * neither the UI nor the transcript gains a duplicate.
  */
-export function enqueueFinalizedLine(token: string, base: LiveLine): LiveLine[] {
+function enqueueFinalizedForConnection(
+  token: string,
+  base: LiveLine,
+  connection: number,
+): LiveLine[] {
   const reg = lineRegistry(token);
-  if (reg.bases.has(base.clientId)) return [];
-  const segments = toSegmentLines(base);
+  const scoped = { ...base, clientId: scopedClientId(connection, base.clientId) };
+  if (reg.bases.has(scoped.clientId)) return [];
+  const segments = toSegmentLines(scoped);
   if (segments.length === 0) return [];
-  reg.bases.add(base.clientId);
+  reg.bases.add(scoped.clientId);
   return enqueueLiveLines(token, segments);
+}
+
+/** Finalize using the connection generation currently active for the token. */
+export function enqueueFinalizedLine(token: string, base: LiveLine): LiveLine[] {
+  return enqueueFinalizedForConnection(token, base, lineRegistry(token).connection);
+}
+
+function flushPendingInputTranscripts(token: string, exceptKey?: string): LiveLine[] {
+  const reg = lineRegistry(token);
+  const accepted: LiveLine[] = [];
+  for (const [key, pending] of reg.inputTranscripts) {
+    if (key === exceptKey) continue;
+    reg.inputTranscripts.delete(key);
+    accepted.push(...enqueueFinalizedForConnection(token, {
+      speaker: "candidate",
+      text: pending.text,
+      clientId: `in-${pending.itemId}`,
+    }, pending.connection));
+  }
+  return accepted;
+}
+
+/**
+ * Retain the latest cumulative transcript for one candidate input item.
+ * Google emits several `input-transcription-completed` events per utterance,
+ * each carrying the text so far; nothing is persisted until the item closes.
+ */
+export function recordInputTranscription(
+  token: string,
+  itemId: string,
+  transcript: string,
+  finished: boolean,
+): LiveLine[] {
+  const reg = lineRegistry(token);
+  const key = `${reg.connection}\u0000${itemId}`;
+  // A new item id means the mapper closed the previous utterance: the fallback
+  // boundary for payloads that carry no `finished` marker.
+  const accepted = flushPendingInputTranscripts(token, key);
+  if (finished) {
+    const pending = reg.inputTranscripts.get(key);
+    reg.inputTranscripts.delete(key);
+    accepted.push(...enqueueFinalizedForConnection(token, {
+      speaker: "candidate",
+      // A textless `finished` event keeps the last cumulative text.
+      text: transcript || pending?.text || "",
+      clientId: `in-${itemId}`,
+    }, reg.connection));
+    return accepted;
+  }
+  reg.inputTranscripts.set(key, { itemId, text: transcript, connection: reg.connection });
+  return accepted;
+}
+
+/** Close a pending candidate utterance signalled outside a transcription event. */
+export function finalizeInputTranscription(token: string): LiveLine[] {
+  return flushPendingInputTranscripts(token);
 }
 
 /**

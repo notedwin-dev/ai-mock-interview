@@ -4,15 +4,37 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 import { experimental_useRealtime } from "@ai-sdk/react";
 import { google } from "@ai-sdk/google";
 import {
+  beginLiveConnection,
   enqueueFinalizedLine,
+  finalizeInputTranscription,
   getLiveLineSnapshot,
   getServerLiveLineSnapshot,
+  recordInputTranscription,
   recordTranscriptDelta,
   retryFailedLines,
   subscribeLiveLines,
   takeTranscriptText,
   type LiveLine,
 } from "@/lib/interview/live-transcript-outbox";
+
+interface GoogleInputTranscription {
+  text?: string;
+  finished?: boolean;
+}
+
+/**
+ * The normalized event keeps Google's wire frame in `raw`. The authoritative
+ * utterance boundary is `finished` on `inputTranscription`, which may be
+ * top-level or nested in `serverContent` depending on the frame.
+ */
+function inputTranscriptionFrame(raw: unknown): GoogleInputTranscription | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const frame = raw as {
+    inputTranscription?: GoogleInputTranscription;
+    serverContent?: { inputTranscription?: GoogleInputTranscription };
+  };
+  return frame.inputTranscription ?? frame.serverContent?.inputTranscription;
+}
 
 /**
  * Native Gemini Live realtime session for the token-scoped room (ADR-006
@@ -60,26 +82,57 @@ export function LiveVoice({
 
   const handleEvent = useCallback(
     (event: Parameters<NonNullable<Parameters<typeof experimental_useRealtime>[0]["onEvent"]>>[0]) => {
+      // Google's mapper restarts its synthetic item ids for every socket, so a
+      // reconnect can reuse an id. Move to a new generation in the shared
+      // registry before any event of that connection is handled.
+      if (event.type === "session-created") {
+        beginLiveConnection(token);
+        return;
+      }
+
+      // A `finished` marker may arrive with no text of its own; the retained
+      // cumulative transcript is the line that must be persisted.
+      if (event.type === "custom" && "raw" in event) {
+        const frame = inputTranscriptionFrame(event.raw);
+        if (frame?.finished === true && !frame.text) {
+          const closed = finalizeInputTranscription(token);
+          if (closed.length > 0) setLines((current) => [...current, ...closed]);
+          return;
+        }
+      }
+
       // The installed Google mapper emits interviewer text as deltas and a
       // textless `audio-transcript-done`; accumulate until the turn closes.
       if (event.type === "audio-transcript-delta" && "delta" in event) {
         recordTranscriptDelta(token, event.itemId, String(event.delta ?? ""));
         return;
       }
+
+      // Every input transcription event carries the cumulative text so far.
+      // Keep the latest one and enqueue only on its final event.
+      if (event.type === "input-transcription-completed" && "itemId" in event && "transcript" in event) {
+        const accepted = recordInputTranscription(
+          token,
+          String(event.itemId),
+          String(event.transcript ?? ""),
+          "raw" in event ? inputTranscriptionFrame(event.raw)?.finished === true : false,
+        );
+        if (accepted.length > 0) setLines((current) => [...current, ...accepted]);
+        return;
+      }
+
       const line: LiveLine | null =
-        event.type === "input-transcription-completed" && "transcript" in event
-          ? { speaker: "candidate", text: String(event.transcript ?? ""), clientId: `in-${event.itemId}` }
-          : event.type === "audio-transcript-done" && "itemId" in event
-            ? {
-                speaker: "interviewer",
-                text: takeTranscriptText(
-                  token,
-                  event.itemId,
-                  "transcript" in event ? String(event.transcript ?? "") : undefined,
-                ),
-                clientId: `out-${event.itemId}`,
-              }
-            : null;
+        event.type === "audio-transcript-done" && "itemId" in event
+          ? {
+              speaker: "interviewer",
+              text: takeTranscriptText(
+                token,
+                event.itemId,
+                "transcript" in event ? String(event.transcript ?? "") : undefined,
+              ),
+              clientId: `out-${event.itemId}`,
+            }
+          : null;
       if (!line) return;
 
       // Split long turns (and dedupe accumulated re-deliveries) before

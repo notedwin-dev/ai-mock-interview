@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  beginLiveConnection,
   enqueueFinalizedLine,
+  finalizeInputTranscription,
   getLiveLineSnapshot,
+  recordInputTranscription,
   recordTranscriptDelta,
   retryFailedLines,
   splitFinalizedText,
@@ -280,5 +283,113 @@ describe("live transcript outbox", () => {
     retryFailedLines(t);
     await vi.waitFor(() => expect(getLiveLineSnapshot(t).failed).toHaveLength(0));
     expect(postedClientIds().slice(-1)).toEqual(["in-1-1"]);
+  });
+});
+
+describe("provider item identity across connections", () => {
+  it("accepts a reused item id on a new connection but dedupes replays within one", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+    expect(enqueueFinalizedLine(t, {
+      speaker: "candidate",
+      text: "first connection",
+      clientId: "in-google-input-0",
+    })).toEqual([{ speaker: "candidate", text: "first connection", clientId: "1:in-google-input-0-1" }]);
+    expect(enqueueFinalizedLine(t, {
+      speaker: "candidate",
+      text: "replayed",
+      clientId: "in-google-input-0",
+    })).toEqual([]);
+
+    // Google's mapper restarts its ids on the new socket.
+    beginLiveConnection(t);
+    expect(enqueueFinalizedLine(t, {
+      speaker: "candidate",
+      text: "second connection",
+      clientId: "in-google-input-0",
+    })).toEqual([{ speaker: "candidate", text: "second connection", clientId: "2:in-google-input-0-1" }]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:in-google-input-0-1", "2:in-google-input-0-1"]);
+    const contents = fetchMock.mock.calls.map((call) =>
+      (JSON.parse(String(call[1]?.body)) as {
+        messages: Array<{ content: string }>;
+      }).messages[0]!.content,
+    );
+    expect(contents).toEqual(["first connection", "second connection"]);
+  });
+
+  it("scopes interviewer ids too and keeps retry recovery across reconnects", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+    expect(enqueueFinalizedLine(t, {
+      speaker: "interviewer",
+      text: "hello",
+      clientId: "out-google-item-0",
+    })).toEqual([{ speaker: "interviewer", text: "hello", clientId: "1:out-google-item-0-1" }]);
+    beginLiveConnection(t);
+    expect(enqueueFinalizedLine(t, {
+      speaker: "interviewer",
+      text: "hello again",
+      clientId: "out-google-item-0",
+    })).toEqual([{ speaker: "interviewer", text: "hello again", clientId: "2:out-google-item-0-1" }]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:out-google-item-0-1", "2:out-google-item-0-1"]);
+  });
+});
+
+describe("candidate input transcription", () => {
+  it("persists only the final cumulative transcript once per input item", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    expect(recordInputTranscription(t, "google-input-0", "Hello ", false)).toEqual([]);
+    expect(recordInputTranscription(t, "google-input-0", "Hello world", false)).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    expect(recordInputTranscription(t, "google-input-0", "Hello world.", true)).toEqual([
+      { speaker: "candidate", text: "Hello world.", clientId: "1:in-google-input-0-1" },
+    ]);
+    expect(recordInputTranscription(t, "google-input-0", "Hello world.", true)).toEqual([]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(postedClientIds()).toEqual(["1:in-google-input-0-1"]);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    expect(body.messages[0]!.content).toBe("Hello world.");
+  });
+
+  it("closes the previous item on a fallback boundary with no finished marker", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    expect(recordInputTranscription(t, "google-input-0", "first utterance", false)).toEqual([]);
+    expect(recordInputTranscription(t, "google-input-1", "second ", false)).toEqual([
+      { speaker: "candidate", text: "first utterance", clientId: "1:in-google-input-0-1" },
+    ]);
+    expect(recordInputTranscription(t, "google-input-1", "second utterance", true)).toEqual([
+      { speaker: "candidate", text: "second utterance", clientId: "1:in-google-input-1-1" },
+    ]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(postedClientIds()).toEqual(["1:in-google-input-0-1", "1:in-google-input-1-1"]);
+  });
+
+  it("keeps the retained text when a textless finished marker closes the item", async () => {
+    const t = token();
+    fetchMock.mockResolvedValue(ok());
+    beginLiveConnection(t);
+
+    expect(recordInputTranscription(t, "google-input-0", "cumulative answer", false)).toEqual([]);
+    expect(finalizeInputTranscription(t)).toEqual([
+      { speaker: "candidate", text: "cumulative answer", clientId: "1:in-google-input-0-1" },
+    ]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 });
