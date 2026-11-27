@@ -418,6 +418,15 @@ export function ProviderConfigurator({
       );
       return null;
     });
+    if (!error && typeof patch.apiKey === "string") {
+      // The cached probe was produced with the old credential. Discard it
+      // only after the key save succeeds; a failed PATCH keeps the old result.
+      setProbeByRow((current) => {
+        const next = { ...current };
+        delete next[row.userProviderConfigurationId];
+        return next;
+      });
+    }
     return error === null;
   }
 
@@ -496,8 +505,13 @@ export function ProviderConfigurator({
     return error === null;
   }
 
+  // Count only rows that cannot serve the selected view. A mixed row still
+  // supplies its custom cards (LLM/ASR/TTS); a scorer-only row can be used for
+  // reports while a realtime session runs, so neither is "inactive".
   const inactiveCount = rows.filter((row) =>
-    mode === "realtime" ? !row.capabilities.realtime : Boolean(row.capabilities.realtime),
+    mode === "realtime"
+      ? !row.capabilities.realtime && !row.capabilities.scorer
+      : !(row.capabilities.llm || row.capabilities.asr || row.capabilities.tts),
   ).length;
 
   if (mode === null) {

@@ -69,6 +69,18 @@ function timingSafeEqual(a: Buffer, b: Buffer): boolean {
   return diff === 0;
 }
 
+/** Value-based JSON comparison: object key order must not affect a replay. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson(record[key])}`,
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 export async function startGeneration(userId: string) {
   let config;
   try {
@@ -179,8 +191,7 @@ export async function confirmGeneration(
     // Replaying the same confirmation returns the original invitation. A
     // different configuration is a distinct outcome: it cannot rewrite the
     // session the candidate already reviewed.
-    const stored = record.configJson as unknown as Record<string, unknown> | null;
-    if (stored && JSON.stringify(stored) === JSON.stringify(config)) {
+    if (record.configJson != null && stableJson(record.configJson) === stableJson(config)) {
       return { invitationPath: record.invitationPath! };
     }
     throw new GenerationError(
@@ -191,20 +202,29 @@ export async function confirmGeneration(
   if (record.status !== "completed" || !record.sessionId) {
     throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
   }
-  await db.interviewSession.update({
-    where: { sessionId: record.sessionId },
-    data: {
-      jobRole: config.jobRole,
-      jobDescription: config.jobDescription || null,
-      experienceLevel: config.experienceLevel ?? null,
-      techStack: config.techStack ? (config.techStack as unknown as never) : undefined,
-      questionCount: config.questionCount ?? null,
-      evaluationMode: config.strictness,
-    },
-  });
-  await db.interviewGeneration.update({
-    where: { id },
-    data: { configJson: config as unknown as never, status: "confirmed" },
+  const sessionId = record.sessionId;
+  await db.$transaction(async (tx) => {
+    // Claim the transition under the same transaction as the session write:
+    // only one request can move completed -> confirmed, so a concurrent retry
+    // can never write the candidate-reviewed session twice.
+    const claimed = await tx.interviewGeneration.updateMany({
+      where: { id, userId, status: "completed" },
+      data: { configJson: config as unknown as never, status: "confirmed" },
+    });
+    if (claimed.count === 0) {
+      throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
+    }
+    await tx.interviewSession.update({
+      where: { sessionId },
+      data: {
+        jobRole: config.jobRole,
+        jobDescription: config.jobDescription || null,
+        experienceLevel: config.experienceLevel ?? null,
+        techStack: config.techStack ? (config.techStack as unknown as never) : undefined,
+        questionCount: config.questionCount ?? null,
+        evaluationMode: config.strictness,
+      },
+    });
   });
   return { invitationPath: record.invitationPath! };
 }

@@ -25,13 +25,13 @@ type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
  * false makes the track emit silence. LiveKit's setMicrophoneEnabled controls
  * publishing; we also set the browser track so "mute" is real user media.
  */
-type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
+type LocalMicPublication = { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } };
 
 function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
   const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
     | LocalMicPublication
     | undefined;
-  const track = publication?.audioTrack?.mediaTrack;
+  const track = publication?.audioTrack?.mediaStreamTrack;
   if (track) track.enabled = enabled;
 }
 
@@ -58,6 +58,9 @@ export function WebRTCRoom({
   const muteIntentRef = useRef(false);
   // Only the newest transcript request may replace the displayed messages.
   const transcriptRequestRef = useRef(0);
+  // At most one transcript request in flight: a new poll must not invalidate
+  // a request that is still loading.
+  const transcriptInFlightRef = useRef(false);
   const [status, setStatus] = useState<RoomStatus>("idle");
   const [joined, setJoined] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
@@ -78,21 +81,26 @@ export function WebRTCRoom({
   }, []);
 
   const loadTranscript = useCallback(async () => {
+    // Serialize polls: starting a newer request must not discard an older one
+    // that is still in flight (and may be the only successful response).
+    if (transcriptInFlightRef.current) return;
+    transcriptInFlightRef.current = true;
     const request = ++transcriptRequestRef.current;
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
         { cache: "no-store" },
       );
+      if (!response.ok) return;
+      const body = (await response.json()) as { messages: TranscriptEntry[] };
+      // Keep the stale-response guard after parsing so older data can never
+      // replace messages already applied by a newer request.
       if (request !== transcriptRequestRef.current) return;
-      if (response.ok) {
-        const body = (await response.json()) as { messages: TranscriptEntry[] };
-        // A slower earlier response must never overwrite newer messages.
-        if (request !== transcriptRequestRef.current) return;
-        setMessages(body.messages ?? []);
-      }
+      setMessages(body.messages ?? []);
     } catch {
       // The next poll retries; the call itself is unaffected.
+    } finally {
+      transcriptInFlightRef.current = false;
     }
   }, [token]);
 

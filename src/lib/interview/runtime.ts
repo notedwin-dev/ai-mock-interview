@@ -78,7 +78,13 @@ export function selectRuntime(
   // Only the selected runtime is considered. Rows saved under the other
   // runtime stay in the database but are inactive for this interview.
   const scoped = rowsForRuntime(rows, activeMode);
-  const realtime = bestServingRow(scoped, "realtime");
+  // A mixed row stays available for its custom capabilities, but must not be
+  // selected as a realtime route for an account that saved a non-realtime mode.
+  // Only an explicit realtime choice (or a legacy unset mode) can launch one.
+  const realtime =
+    activeMode === null || activeMode === "realtime"
+      ? bestServingRow(scoped, "realtime")
+      : null;
   if (realtime) {
     return {
       mode: "realtime",

@@ -32,6 +32,16 @@ export async function POST(
     try {
       resolved = await resolveForOutboundCall(interview.userId, "realtime");
     } catch {
+      // A realtime session keeps its runtime even if the account later saves
+      // a different mode. Name that conflict explicitly instead of claiming
+      // the interview has no realtime agent at all.
+      if (interview.runtimeMode === "preset_realtime") {
+        return jsonError(
+          409,
+          "runtime_mode_conflict",
+          "This interview uses the realtime runtime. Switch the account back to realtime mode to continue it.",
+        );
+      }
       return jsonError(
         409,
         "realtime_not_configured",

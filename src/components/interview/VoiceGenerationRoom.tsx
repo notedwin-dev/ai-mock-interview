@@ -16,13 +16,13 @@ import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
 
 /** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
-type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
+type LocalMicPublication = { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } };
 
 function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
   const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
     | LocalMicPublication
     | undefined;
-  const track = publication?.audioTrack?.mediaTrack;
+  const track = publication?.audioTrack?.mediaStreamTrack;
   if (track) track.enabled = enabled;
 }
 

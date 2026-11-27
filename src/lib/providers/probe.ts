@@ -88,6 +88,8 @@ export interface ProbeDeps {
   ) => Promise<{ token: string; url: string }>;
   /**
    * Persists the post-probe credential status (default: the database).
+   * `configurationVersion` is the version read when the probe started: the
+   * write is conditioned on it so a replacement configuration is untouched.
    * `disable` is true exactly when the probe failed — a failed test must
    * prevent the capability being (or remaining) enabled (FR-PROVIDER-006).
    */
@@ -95,6 +97,7 @@ export interface ProbeDeps {
     configurationId: string,
     credentialStatus: "valid" | "invalid",
     disable: boolean,
+    configurationVersion: number,
   ) => Promise<void>;
 }
 
@@ -111,10 +114,13 @@ function saveStoredStatus(
   configurationId: string,
   credentialStatus: "valid" | "invalid",
   disable: boolean,
+  configurationVersion: number,
 ): Promise<void> {
   return db.userProviderConfiguration
     .update({
-      where: { userProviderConfigurationId: configurationId },
+      // Version-conditioned: a row replaced or edited during this probe is
+      // never stamped with a result produced with its old credential/model.
+      where: { userProviderConfigurationId: configurationId, configurationVersion },
       data: { credentialStatus, ...(disable ? { isEnabled: false } : {}) },
     })
     .then(() => undefined);
@@ -278,6 +284,7 @@ export async function probeProviderConfiguration(
     throw new ProviderConfigError("not_found", "Provider configuration not found.");
   }
 
+  const configurationVersion = row.configurationVersion;
   const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
   const results: CapabilityProbeResult[] = [];
 
@@ -499,14 +506,35 @@ export async function probeProviderConfiguration(
 
   const allValidated = results.length > 0 && results.every((result) => result.status === "validated");
   const anyFailed = results.some((result) => result.status === "failed");
-  const nextStatus: "unvalidated" | "valid" | "invalid" = allValidated
-    ? "valid"
-    : anyFailed
-      ? "invalid"
-      : "unvalidated";
+  // A successful native realtime test proves the stored credential. Other
+  // capabilities on the same row may be skipped or use a wire that cannot be
+  // probed here; they must not prevent a later realtime success from enabling
+  // realtime launch after an earlier invalid result.
+  const realtimeValidated = results.some(
+    (result) => result.capability === "realtime" && result.status === "validated",
+  );
+  const nextStatus: "unvalidated" | "valid" | "invalid" =
+    allValidated || realtimeValidated
+      ? "valid"
+      : anyFailed
+        ? "invalid"
+        : "unvalidated";
+  const disable = anyFailed && !allValidated && !realtimeValidated;
   // A skipped-only probe verifies nothing: leave the stored status untouched.
-  if (nextStatus !== "unvalidated" || anyFailed) {
-    await save(row.userProviderConfigurationId, nextStatus === "valid" ? "valid" : "invalid", anyFailed);
+  if (nextStatus !== "unvalidated" || disable) {
+    try {
+      await save(
+        row.userProviderConfigurationId,
+        nextStatus === "valid" ? "valid" : "invalid",
+        disable,
+        configurationVersion,
+      );
+    } catch {
+      throw new ProviderConfigError(
+        "probe_failed",
+        "This configuration changed while it was being tested. Test the current configuration again.",
+      );
+    }
   }
   return {
     userProviderConfigurationId: row.userProviderConfigurationId,

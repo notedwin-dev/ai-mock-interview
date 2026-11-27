@@ -210,10 +210,8 @@ async function loadOwnedSession(
 async function selectRouteSnapshot(
   userId: string,
 ): Promise<{ snapshot: ProviderRouteSnapshot; runtimeMode: RuntimeMode }> {
-  const runtime = selectRuntime(
-    await listProviderConfigurations(userId),
-    await getActiveRuntimeMode(userId),
-  );
+  const activeMode = await getActiveRuntimeMode(userId);
+  const runtime = selectRuntime(await listProviderConfigurations(userId), activeMode);
   if (!runtime.ready || !runtime.row) {
     throw new InterviewError(
       "provider_route_missing",
@@ -242,6 +240,8 @@ async function selectRouteSnapshot(
       baseUrl,
       modelId: row.capabilities[capability]?.modelId ?? "",
     },
+    // Keep the runtime the account actually selected: a mixed row must not
+    // turn a custom-mode interview into a realtime one.
     runtimeMode: runtime.mode === "realtime" ? "preset_realtime" : "custom",
   };
 }
@@ -642,6 +642,7 @@ export function createRoomStore(): RoomStore {
           : [],
         questionCount: session.questionCount,
         evaluationMode: session.evaluationMode,
+        runtimeMode: session.runtimeMode,
         status: session.status,
       };
     },

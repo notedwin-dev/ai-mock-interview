@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   context: vi.fn(),
-  activate: vi.fn(async () => undefined),
+  activate: vi.fn(async (): Promise<"activated" | "already_active" | "rejected"> => "activated"),
   mint: vi.fn(),
   dispatch: vi.fn(async () => true),
 }));
@@ -52,5 +52,17 @@ describe("POST .../webrtc/token", () => {
     const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
     expect(response.status).toBe(404);
     expect(mocks.mint).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch or issue credentials when activation is rejected", async () => {
+    mocks.activate.mockResolvedValueOnce("rejected");
+    const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: "invitation_not_found" } });
+    expect(mocks.activate).toHaveBeenCalledWith("session-1");
+    // Credential minting legitimately precedes activation (config must be
+    // usable before a join); what matters is that no agent is dispatched and
+    // no credential is returned for a rejected session.
+    expect(mocks.dispatch).not.toHaveBeenCalled();
   });
 });

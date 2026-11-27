@@ -41,7 +41,13 @@ export async function POST(
     // runs before dispatch and the response, so a successful join enables End
     // immediately (the room_finished webhook remains authoritative for finish).
     if (interview.status === "scheduled") {
-      await store.activate(interview.sessionId);
+      const activation = await store.activate(interview.sessionId);
+      // A concurrent finish may have claimed the session while the credential
+      // was minted. Do not dispatch an agent or hand out a token for a room
+      // that is no longer joinable.
+      if (activation === "rejected") {
+        return jsonError(404, "invitation_not_found", "This interview link is not available.");
+      }
     }
     // The agent dispatch is best-effort: a worker outage must not prevent the
     // candidate from joining their room.
