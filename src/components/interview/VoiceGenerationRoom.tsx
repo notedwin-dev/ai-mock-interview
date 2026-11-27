@@ -8,6 +8,7 @@ import { GenerationConfirmation, type ConfirmableConfig } from "@/components/int
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { setBrowserMicEnabled } from "@/lib/interview/livekit-mic";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
+import { LK_TRANSCRIPTION_TOPIC } from "@/lib/utils/constants";
 
 /**
  * Voice-driven interview generation (FR-SETUP-006). The same two-panel shape
@@ -102,7 +103,7 @@ export function VoiceGenerationRoom() {
         // LiveKit Agents publishes transcriptions on the `lk.transcription`
         // text stream, synchronised with audio playback. Consume the deltas so
         // the candidate sees words as they are spoken, not only final lines.
-        room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
+        room.registerTextStreamHandler(LK_TRANSCRIPTION_TOPIC, async (reader, info) => {
           const speaker = (info.identity || "").startsWith("candidate") ? "candidate" : "agent";
           try {
             for await (const delta of reader) {
