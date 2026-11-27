@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { assertTtsWireSupported, synthesizeSpeech, TtsError } from "./tts";
 
@@ -84,6 +84,67 @@ describe("synthesizeSpeech", () => {
     );
     expect(() => assertTtsWireSupported(fishRoute)).not.toThrow();
     expect(() => assertTtsWireSupported({ ...elevenlabs, providerType: "custom", providerName: "my-voice" })).not.toThrow();
+  });
+
+  it("refuses unrecognised Fish Audio model ids before any network call (fail closed)", async () => {
+    // The native wire always sends the id in the `model` header; an id outside
+    // the documented catalogue would fail opaquely at the provider.
+    const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
+    const unknown: ProviderRoute = { ...fishRoute, modelId: "made-up-model" };
+
+    await expect(synthesizeSpeech(unknown, "Hi", { fetchImpl })).rejects.toMatchObject({
+      name: "TtsError",
+      code: "unsupported_provider",
+    });
+    expect(() => assertTtsWireSupported(unknown)).toThrowError(
+      expect.objectContaining({ code: "unsupported_provider" }),
+    );
+    expect(calls).toHaveLength(0);
+
+    // The documented list is still accepted, including s1 (retires 31 Dec 2026).
+    expect(() => assertTtsWireSupported(fishRoute)).not.toThrow();
+    expect(() => assertTtsWireSupported({ ...fishRoute, modelId: "s1" })).not.toThrow();
+    // Custom OpenAI-compatible ids stay unrestricted.
+    expect(() =>
+      assertTtsWireSupported({ ...fishRoute, providerType: "custom", providerName: "gw", baseUrl: "https://gw.example/v1", modelId: "voice-x" }),
+    ).not.toThrow();
+  });
+
+  it("aborts a stalled response body at the synthesis deadline and reports generation_failed", async () => {
+    // A provider that returns headers promptly and then stalls mid-audio: the
+    // deadline must cover body consumption, not just the initial fetch.
+    vi.useFakeTimers();
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("Timeout", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start() {
+            // Never enqueue and never close — the body hangs until aborted.
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+
+    try {
+      const settled = synthesizeSpeech(fishRoute, "Hi", { fetchImpl }).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      const outcome = await settled;
+
+      expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+      if (outcome.ok) throw new Error("the stalled body must reject, not resolve");
+      expect(outcome.error).toBeInstanceOf(TtsError);
+      expect((outcome.error as TtsError).code).toBe("generation_failed");
+    } finally {
+      vi.useRealTimers();
+      timeoutSpy.mockRestore();
+    }
   });
 
   it("reports provider failures as typed errors without leaking the key", async () => {

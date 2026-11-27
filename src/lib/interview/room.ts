@@ -271,14 +271,17 @@ export async function runRoomTurn(
   // no implemented wire, the turn is rejected with a typed error — nothing
   // is persisted, so the candidate loses nothing. A MISSING tts
   // configuration is not an error: the turn runs text-only (FR-INTERVIEW-003
-  // — audio is an enhancement, never a blocker).
+  // — audio is an enhancement, never a blocker). Resolved inside the claim
+  // scope so a rejection still releases the turn claim instead of making the
+  // retry wait for the lease to expire.
   let ttsRoute: ProviderRoute | null = null;
-  if (deps.tts) {
-    ttsRoute = await deps.tts.resolveRoute(context.userId);
-    if (ttsRoute) assertTtsWireSupported(ttsRoute);
-  }
 
   try {
+    if (deps.tts) {
+      ttsRoute = await deps.tts.resolveRoute(context.userId);
+      if (ttsRoute) assertTtsWireSupported(ttsRoute);
+    }
+
     // Atomic admission BEFORE the candidate row is inserted: a concurrent
     // completion must win (no candidate row), and an already-active interview
     // must not have startedAt reset by this retry.

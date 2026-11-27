@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
+
+const googleMocks = vi.hoisted(() => ({
+  createGoogle: vi.fn(() => ({
+    experimental_realtime: {
+      getToken: async () => ({ token: "env-token", url: "wss://live.example" }),
+    },
+  })),
+}));
+vi.mock("@ai-sdk/google", () => ({ createGoogle: googleMocks.createGoogle }));
+
 import {
   createRealtimeToken,
   type LiveSessionConfig,
@@ -56,6 +66,23 @@ describe("createRealtimeToken", () => {
     expect(options.sessionConfig.inputAudioTranscription).toEqual({});
     expect(options.sessionConfig.outputAudioTranscription).toEqual({});
     expect(options.sessionConfig.outputModalities).toEqual(["audio"]);
+  });
+
+  it("uses the route's key for the Google provider, not the process environment", async () => {
+    // A regression guard for the default factory: createGoogle must receive the
+    // resolved route key, so a missing GOOGLE_GENERATIVE_AI_API_KEY cannot make
+    // token minting fail (or silently use another key).
+    googleMocks.createGoogle.mockClear();
+    const previous = process.env["GOOGLE_GENERATIVE_AI_API_KEY"];
+    delete process.env["GOOGLE_GENERATIVE_AI_API_KEY"];
+    try {
+      const result = await createRealtimeToken(route, session);
+      expect(googleMocks.createGoogle).toHaveBeenCalledWith({ apiKey: "secret-key" });
+      expect(result.token).toBe("env-token");
+    } finally {
+      if (previous === undefined) delete process.env["GOOGLE_GENERATIVE_AI_API_KEY"];
+      else process.env["GOOGLE_GENERATIVE_AI_API_KEY"] = previous;
+    }
   });
 
   it("never includes the API key in the token result", async () => {

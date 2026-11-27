@@ -12,7 +12,7 @@ import {
   hashInvitationToken,
   invitationPath,
 } from "./invitation-token";
-import type { RoomStore } from "./room";
+import type { RoomStore, TranscriptEntry } from "./room";
 import { findActiveSessionByToken, issueInvitation, type IssuedInvitation } from "./invitations";
 import { UnitConflictError } from "./unit-conflict";
 import {
@@ -547,7 +547,26 @@ export async function submitTypedTurn(
  * Persistence for the token-scoped room (FR-INTERVIEW-004), sharing
  * appendMessage with the typed path. The token is resolved to the owning
  * session by invitations.findActiveSessionByToken — no account session.
+ *
+ * In-process serialisation of realtime transcript writes follows, one chain per
+ * session. Finalized live lines arrive concurrently — a batch inserts them in
+ * order — so sequence/unit allocation must not interleave: out-of-order
+ * allocation would leave a sequence gap and replay the transcript unordered. A
+ * writer queues behind the previous write of the SAME session; a failed write
+ * still releases the next one immediately. The bounded P2002 retry below stays
+ * as the cross-process safety net.
  */
+const realtimeWriteChains = new Map<string, Promise<void>>();
+
+function serializeRealtimeWrite<T>(sessionId: string, write: () => Promise<T>): Promise<T> {
+  const previous = realtimeWriteChains.get(sessionId) ?? Promise.resolve();
+  const run = previous.then(write, write);
+  // The chain link never rejects: the caller owns the result, the next writer
+  // must not inherit this write's failure.
+  realtimeWriteChains.set(sessionId, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 export function createRoomStore(): RoomStore {
   return {
     async context(token) {
@@ -668,73 +687,101 @@ export function createRoomStore(): RoomStore {
      * Appends one finalized realtime (Gemini Live) message, idempotent on the
      * provider's client id. Kept here because `room-store.ts` now re-exports
      * this store; the unit-assignment rules mirror the reviewed room engine.
+     * Admission is RUNNING-only and checked under the session row lock below
+     * (the route's earlier check is only a fast 404); a live session never
+     * starts a scheduled interview.
      */
     async appendRealtimeMessage(sessionId, speaker, contentText, clientId) {
-      const existing = await db.conversationMessage.findFirst({
-        where: { sessionId, idempotencyKey: clientId },
-      });
-      if (existing) {
-        return {
-          sequenceNumber: existing.sequenceNumber,
-          speakerType: existing.speakerType as "candidate" | "interviewer",
-          messageKind: existing.messageKind as
-            | "candidate_response"
-            | "primary_question"
-            | "follow_up_question",
-          contentText: existing.contentText,
-          assessmentUnitId: existing.assessmentUnitId,
-        };
-      }
-
-      const openUnit = await db.interviewAssessmentUnit.findFirst({
-        where: { sessionId, status: "open" },
-        orderBy: { unitNumber: "desc" },
-        select: { assessmentUnitId: true },
-      });
-      let messageKind: "candidate_response" | "primary_question" | "follow_up_question";
-      let assessmentUnitId: string | null = openUnit?.assessmentUnitId ?? null;
-      if (speaker === "candidate") {
-        messageKind = "candidate_response";
-      } else if (openUnit) {
-        messageKind = "follow_up_question";
-      } else {
-        messageKind = "primary_question";
-        const maxUnit = await db.interviewAssessmentUnit.aggregate({
-          where: { sessionId },
-          _max: { unitNumber: true },
-        });
-        const unit = await db.interviewAssessmentUnit.create({
-          data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
-          select: { assessmentUnitId: true },
-        });
-        assessmentUnitId = unit.assessmentUnitId;
-      }
-
-      const aggregate = await db.conversationMessage.aggregate({
-        where: { sessionId },
-        _max: { sequenceNumber: true },
-      });
-      const message = await db.conversationMessage.create({
-        data: {
-          sessionId,
-          sequenceNumber: (aggregate._max.sequenceNumber ?? 0) + 1,
-          speakerType: speaker,
-          messageKind,
-          contentText,
-          idempotencyKey: clientId,
-          assessmentUnitId,
-        },
-      });
-      return {
+      const toEntry = (message: {
+        sequenceNumber: number;
+        speakerType: string;
+        messageKind: string;
+        contentText: string;
+        assessmentUnitId: string | null;
+      }): TranscriptEntry => ({
         sequenceNumber: message.sequenceNumber,
-        speakerType: message.speakerType as "candidate" | "interviewer",
-        messageKind: message.messageKind as
-          | "candidate_response"
-          | "primary_question"
-          | "follow_up_question",
+        speakerType: message.speakerType,
+        messageKind: message.messageKind,
         contentText: message.contentText,
         assessmentUnitId: message.assessmentUnitId,
-      };
+      });
+
+      // Finalized live lines arrive concurrently with each other and with the
+      // typed path. Locking the parent session row serialises BOTH the sequence
+      // allocation and the unit-number allocation for the whole write;
+      // chaining writers per session keeps a delivered batch in order; and
+      // the bounded retry re-reads the idempotency key and the max values when
+      // a unique constraint is still lost to another writer — a finalized line
+      // is never dropped on a sequence/unit collision.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await serializeRealtimeWrite(sessionId, () => db.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT session_id FROM interview_session WHERE session_id = ${sessionId}::uuid FOR UPDATE`;
+            const session = await tx.interviewSession.findUnique({
+              where: { sessionId },
+              select: { status: true },
+            });
+            if (session?.status !== "active") {
+              // A completion that committed first wins: the finalized line is
+              // rejected instead of landing on a finished transcript.
+              throw new InterviewError("invalid_state", "This interview is not accepting turns.");
+            }
+
+            const existing = await tx.conversationMessage.findFirst({
+              where: { sessionId, idempotencyKey: clientId },
+            });
+            if (existing) return toEntry(existing);
+
+            const openUnit = await tx.interviewAssessmentUnit.findFirst({
+              where: { sessionId, status: "open" },
+              orderBy: { unitNumber: "desc" },
+              select: { assessmentUnitId: true },
+            });
+            let messageKind: "candidate_response" | "primary_question" | "follow_up_question";
+            let assessmentUnitId: string | null = openUnit?.assessmentUnitId ?? null;
+            if (speaker === "candidate") {
+              messageKind = "candidate_response";
+            } else if (openUnit) {
+              messageKind = "follow_up_question";
+            } else {
+              messageKind = "primary_question";
+              const maxUnit = await tx.interviewAssessmentUnit.aggregate({
+                where: { sessionId },
+                _max: { unitNumber: true },
+              });
+              // The unit and its first question are written in the same
+              // transaction: a failed message insert rolls the unit back.
+              const unit = await tx.interviewAssessmentUnit.create({
+                data: { sessionId, unitNumber: (maxUnit._max.unitNumber ?? 0) + 1 },
+                select: { assessmentUnitId: true },
+              });
+              assessmentUnitId = unit.assessmentUnitId;
+            }
+
+            const aggregate = await tx.conversationMessage.aggregate({
+              where: { sessionId },
+              _max: { sequenceNumber: true },
+            });
+            const message = await tx.conversationMessage.create({
+              data: {
+                sessionId,
+                sequenceNumber: (aggregate._max.sequenceNumber ?? 0) + 1,
+                speakerType: speaker,
+                messageKind,
+                contentText,
+                idempotencyKey: clientId,
+                assessmentUnitId,
+              },
+            });
+            return toEntry(message);
+          }));
+        } catch (error) {
+          const conflict =
+            error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+          if (conflict && attempt < 2) continue;
+          throw error;
+        }
+      }
     },
 
     async activeUnit(sessionId) {

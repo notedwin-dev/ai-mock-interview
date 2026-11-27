@@ -84,7 +84,10 @@ export async function createRealtimeToken(
 
   const createProvider =
     deps.createProvider ??
-    ((r: ProviderRoute) => createGoogle({ headers: { "x-goog-api-key": r.apiKey } }));
+    // Pass the resolved key explicitly: the provider must never fall back to
+    // the process-wide GOOGLE_GENERATIVE_AI_API_KEY (the interview runs on the
+    // candidate's own configuration, ADR-0005).
+    ((r: ProviderRoute) => createGoogle({ apiKey: r.apiKey }));
   const provider = createProvider(route);
 
   const result = await provider.experimental_realtime.getToken({

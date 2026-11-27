@@ -44,14 +44,17 @@ function modelName(modelId: string): string {
 
 function extractText(body: InteractionResponse): string {
   if (typeof body.output_text === "string" && body.output_text.trim()) return body.output_text.trim();
+  // Gemini can split one transcript across several text blocks; joining them
+  // before trimming keeps every recognised word instead of only the first block.
+  const parts: string[] = [];
   for (const step of body.steps ?? []) {
     for (const content of step.content ?? []) {
       if (content.type === "text" && typeof content.text === "string" && content.text.trim()) {
-        return content.text.trim();
+        parts.push(content.text.trim());
       }
     }
   }
-  return "";
+  return parts.join(" ");
 }
 
 export async function transcribeAudio(

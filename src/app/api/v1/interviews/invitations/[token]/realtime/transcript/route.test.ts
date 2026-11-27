@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { InterviewError } from "@/lib/interview/service";
 
 const mocks = vi.hoisted(() => ({ context: vi.fn(), append: vi.fn() }));
 vi.mock("@/lib/interview/room-store", () => ({
@@ -44,5 +45,29 @@ describe("POST .../realtime/transcript", () => {
     const bad = await POST(body([{ speaker: "system", content: "x", clientId: "e" }]), ctx);
     expect(bad.status).toBe(400);
     expect(mocks.append).not.toHaveBeenCalled();
+  });
+
+  it("rejects live lines for a scheduled interview instead of starting it", async () => {
+    // Realtime has no start path (unlike a typed turn): only a RUNNING
+    // interview accepts finalized live lines.
+    mocks.context.mockResolvedValue({ sessionId: "s1", userId: "owner-1", status: "scheduled" });
+
+    const response = await POST(body([{ speaker: "candidate", content: "early", clientId: "evt-early" }]), ctx);
+
+    expect(response.status).toBe(404);
+    expect(mocks.append).not.toHaveBeenCalled();
+  });
+
+  it("maps a commit-time completion race to a conflict instead of a server error", async () => {
+    // The store re-checks "active" under the session row lock, so a line that
+    // arrives after the interview completed loses the race and is rejected.
+    mocks.append.mockRejectedValue(
+      new InterviewError("invalid_state", "This interview is not accepting turns."),
+    );
+
+    const response = await POST(body([{ speaker: "candidate", content: "late", clientId: "evt-late" }]), ctx);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_state" } });
   });
 });

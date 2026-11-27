@@ -568,6 +568,8 @@ export async function resolveEnabledModel(
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser, isEnabled: true },
     orderBy: { createdAt: "asc" },
+    // Credential-free resolution: never read (let alone decrypt) the key.
+    select: { providerType: true, providerName: true, capabilitiesJson: true },
   });
   const row = rows.find(
     (candidate) => capability in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),

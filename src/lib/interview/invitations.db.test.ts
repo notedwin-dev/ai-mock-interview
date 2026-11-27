@@ -122,7 +122,9 @@ d("invitation links (TT-21)", () => {
   });
 
   it("persists realtime messages in approved kinds and is idempotent on client ids", async () => {
-    const session = await makeSession();
+    // A live line never starts an interview (only a typed turn does), so the
+    // fixture is already running.
+    const session = await makeSession({ status: "active", startedAt: new Date() });
     const store = (await import("./room-store")).createDefaultRoomStore();
     const first = await store.appendRealtimeMessage(session.sessionId, "candidate", "my answer", "evt-c");
     const second = await store.appendRealtimeMessage(session.sessionId, "interviewer", "tell me more", "evt-i");
@@ -132,6 +134,38 @@ d("invitation links (TT-21)", () => {
     expect(second.messageKind).toBe("primary_question"); // approved message_kind domain
     expect(replay.sequenceNumber).toBe(first.sequenceNumber);
     expect(await db.conversationMessage.count({ where: { sessionId: session.sessionId } })).toBe(2);
+  });
+
+  it("only appends live lines to a running interview (a live line never starts one)", async () => {
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const active = await makeSession({ status: "active", startedAt: new Date() });
+
+    await expect(
+      store.appendRealtimeMessage(active.sessionId, "candidate", "live answer", "evt-live"),
+    ).resolves.toMatchObject({ speakerType: "candidate", messageKind: "candidate_response" });
+
+    const cleared = await db.interviewSession.update({
+      where: { sessionId: active.sessionId },
+      data: { status: "completed", completedAt: new Date() },
+    });
+    expect(cleared.status).toBe("completed");
+
+    await expect(
+      store.appendRealtimeMessage(active.sessionId, "candidate", "late line", "evt-late"),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+    expect(await db.conversationMessage.count({ where: { sessionId: active.sessionId } })).toBe(1);
+  });
+
+  it("allocates concurrent live lines without gaps or duplicate sequences", async () => {
+    const store = (await import("./room-store")).createDefaultRoomStore();
+    const session = await makeSession({ status: "active", startedAt: new Date() });
+
+    const entries = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        store.appendRealtimeMessage(session.sessionId, "candidate", `line ${index}`, `evt-${index}`),
+      ),
+    );
+    expect(entries.map((entry) => entry.sequenceNumber).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("runs a token-scoped turn against the real store: transcript, unit and active state", async () => {

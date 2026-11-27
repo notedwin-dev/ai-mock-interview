@@ -49,6 +49,35 @@ describe("transcribeAudio", () => {
     ).resolves.toBe("Second answer.");
   });
 
+  it("keeps every text block when Gemini splits one transcript", async () => {
+    const { fetchImpl } = mockFetch({
+      steps: [
+        { content: [{ type: "text", text: "I fixed a slow query by adding" }] },
+        { content: [{ type: "text", text: "an index on the join column." }] },
+      ],
+    });
+    await expect(
+      transcribeAudio(route, new Uint8Array([5]), "audio/webm", { fetchImpl }),
+    ).resolves.toBe("I fixed a slow query by adding an index on the join column.");
+  });
+
+  it("keeps EVERY text block when one step holds several and a second step follows", async () => {
+    const { fetchImpl } = mockFetch({
+      steps: [
+        {
+          content: [
+            { type: "text", text: "I fixed a slow query" },
+            { type: "text", text: "by adding" },
+          ],
+        },
+        { content: [{ type: "text", text: "an index." }] },
+      ],
+    });
+    await expect(
+      transcribeAudio(route, new Uint8Array([6]), "audio/webm", { fetchImpl }),
+    ).resolves.toBe("I fixed a slow query by adding an index.");
+  });
+
   it("refuses non-Google routes with a typed error before any network call (fail closed)", async () => {
     // The registry declares `asr` for other presets (openai, elevenlabs) and
     // any custom endpoint, but only the Google wire is implemented: a foreign
