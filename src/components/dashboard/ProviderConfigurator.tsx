@@ -437,6 +437,27 @@ export function ProviderConfigurator({
     if (error === null) await refresh();
   }
 
+  /** Owner decision 2026-11-24: pick which saved config is ACTIVE per capability. */
+  async function setActive(row: ProviderConfigSummary, capability: Capability) {
+    const key = `${row.userProviderConfigurationId}:active:${capability}`;
+    const error = await runAction(key, async () => {
+      const response = await fetch(
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/active`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ capability }),
+        },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: ApiError } | null;
+        return body?.error ?? { code: "internal_error", message: "Could not change active configuration." };
+      }
+      return null;
+    });
+    if (error === null) await refresh();
+  }
+
   /**
    * Realtime rows are created on their own, one per provider, carrying only
    * the realtime capability. The same provider's LLM/ASR/TTS rows are never
@@ -573,6 +594,7 @@ export function ProviderConfigurator({
                 onProbe={runProbe}
                 onPatch={patchRow}
                 onDelete={deleteRow}
+                onSetActive={setActive}
                 onCreated={async () => {
                   await refresh();
                 }}
@@ -1045,6 +1067,7 @@ interface CapabilitySectionProps {
     key: string,
   ) => Promise<boolean>;
   onDelete: (row: ProviderConfigSummary) => void;
+  onSetActive: (row: ProviderConfigSummary, capability: Capability) => void;
   onCreated: (created: ProviderConfigSummary) => void;
 }
 
@@ -1090,6 +1113,27 @@ function CapabilitySection(props: CapabilitySectionProps) {
 
       {!collapsed ? (
         <div className="flex flex-col gap-4 border-t border-line p-5 sm:p-6">
+          {serving.length > 1 ? (
+            <label className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-raised/40 px-4 py-3 text-xs text-ink-muted">
+              Active configuration
+              <select
+                aria-label={`Active configuration for ${section.title}`}
+                value={serving.find((row) => row.isEnabled)?.userProviderConfigurationId ?? ""}
+                onChange={(event) => {
+                  const row = serving.find((r) => r.userProviderConfigurationId === event.target.value);
+                  if (row) props.onSetActive(row, section.capability);
+                }}
+                disabled={props.pending !== null}
+                className="h-9 rounded-full border border-line bg-surface px-4 text-xs text-ink outline-none focus:border-emerald-400/70">
+                {serving.map((row) => (
+                  <option key={row.userProviderConfigurationId} value={row.userProviderConfigurationId}>
+                    {row.providerName} · {row.capabilities[section.capability]?.modelId}
+                  </option>
+                ))}
+              </select>
+              <span>One active per capability; the newest saved is active by default.</span>
+            </label>
+          ) : null}
           {serving.length === 0 ? (
             <p className="rounded-xl border border-dashed border-line bg-surface/50 px-4 py-3 text-sm text-ink-muted">
               No configuration serves this capability yet. Pick a provider tag below.
@@ -1124,7 +1168,7 @@ function CapabilitySection(props: CapabilitySectionProps) {
 
 /* ------------------------------- row detail --------------------------------- */
 
-interface ConfigurationRowCardProps extends Omit<CapabilitySectionProps, "section" | "rows" | "collapsed" | "onToggle" | "onCreated"> {
+interface ConfigurationRowCardProps extends Omit<CapabilitySectionProps, "section" | "rows" | "collapsed" | "onToggle" | "onCreated" | "onSetActive"> {
   row: ProviderConfigSummary;
   capability: Capability;
 }

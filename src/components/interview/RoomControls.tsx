@@ -37,9 +37,6 @@ const SESSION_STATUS_WORDS: Record<string, { word: string; dot: string; text: st
   },
 };
 
-const FIELD_CLASS =
-  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
-
 interface RoomControlsProps {
   initialSession: SessionSummary;
   initialMessages: TranscriptMessage[];
@@ -337,7 +334,7 @@ export function RoomControls({
               onChange={(event) => setAnswerText(event.target.value)}
               placeholder="Type your answer…"
               disabled={pending}
-              className={`${FIELD_CLASS} min-w-0 flex-1`}
+              className="field min-w-0 flex-1"
             />
             <button
               type="submit"

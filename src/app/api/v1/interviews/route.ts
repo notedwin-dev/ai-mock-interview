@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { createInterviewSession } from "@/lib/interview/service";
 
 /**
@@ -12,7 +12,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!account) return jsonError(401, "unauthenticated", "Sign in as a candidate first.");
 
   try {
-    const parsed: unknown = await request.json();
+    const parsed: unknown = await parseJsonBody(request);
     // Validate the shape before destructuring: null (and arrays/scalars) are
     // valid JSON but must be rejected as invalid input, not crash as a 500.
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

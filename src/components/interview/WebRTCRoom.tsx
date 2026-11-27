@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, X } from "lucide-react";
 import { Room, RoomEvent, Track, type RemoteParticipant } from "livekit-client";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { useOverlayFocusTrap } from "@/components/interview/use-overlay-focus-trap";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { readDevicePreferences, saveDevicePreferences } from "@/lib/interview/device-preferences";
+import { setBrowserMicEnabled } from "@/lib/interview/livekit-mic";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
@@ -19,24 +21,6 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  * conversation overlay backed by the token-scoped transcript (ADR-006).
  */
 type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
-
-/**
- * MDN: MediaStreamTrack.enabled is the actual mute switch — setting it to
- * false makes the track emit silence. LiveKit's setMicrophoneEnabled controls
- * publishing; we also set the browser track so "mute" is real user media.
- */
-type LocalMicPublication = { audioTrack?: { mediaTrack?: MediaStreamTrack } };
-
-function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
-  const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
-    | LocalMicPublication
-    | undefined;
-  const track = publication?.audioTrack?.mediaTrack;
-  if (track) track.enabled = enabled;
-}
-
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
 export function WebRTCRoom({
   token,
@@ -97,37 +81,7 @@ export function WebRTCRoom({
   }, [loadTranscript]);
 
   /** Overlay dialog: focus in, Escape to close, focus back to the opener. */
-  useEffect(() => {
-    if (!overlayOpen) return;
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    overlayRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        setOverlayOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusables = overlayRef.current?.querySelectorAll<HTMLElement>(
-        'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusables || focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
-    };
-  }, [overlayOpen]);
+  useOverlayFocusTrap(overlayOpen, overlayRef, () => setOverlayOpen(false));
 
   const refreshParticipants = useCallback((room: Room) => {
     setParticipants([...room.remoteParticipants.values()].map((p: RemoteParticipant) => p.identity));
@@ -317,7 +271,7 @@ export function WebRTCRoom({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => setOverlayOpen((open) => !open)} className={GHOST}>
+          <button type="button" onClick={() => setOverlayOpen((open) => !open)} className="btn-ghost">
             {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
             {overlayOpen ? "Hide conversation" : "Open conversation"}
           </button>
@@ -374,7 +328,7 @@ export function WebRTCRoom({
           <div ref={overlayRef} tabIndex={-1} className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5 outline-none">
             <div className="flex items-center justify-between">
               <h2 id="conversation-heading" className="font-display text-lg font-semibold text-ink">Conversation</h2>
-              <button type="button" onClick={() => setOverlayOpen(false)} className={GHOST}>Close</button>
+              <button type="button" onClick={() => setOverlayOpen(false)} className="btn-ghost">Close</button>
             </div>
             {messages.length === 0 ? (
               <p className="text-sm text-ink-muted">The conversation will appear here as it happens.</p>

@@ -11,7 +11,8 @@ export async function POST(
   if (!workerToken) return jsonError(401, "unauthorized", "Missing worker credential.");
   const { id } = await ctx.params;
   try {
-    const result = await completeGeneration(id, workerToken, await request.json());
+    const body = await request.json().catch(() => ({}));
+    const result = await completeGeneration(id, workerToken, body);
     return Response.json(result);
   } catch (error) {
     if (error instanceof GenerationError) {

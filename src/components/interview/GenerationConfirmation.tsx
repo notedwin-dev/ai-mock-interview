@@ -109,7 +109,7 @@ export function GenerationConfirmation({
             onChange={(event) =>
               setDraft({ ...draft, category: event.target.value as ConfirmableConfig["category"] })
             }>
-            <option value="general">General</option>
+            <option value="general">Mixed (Technical + Behavioral)</option>
             <option value="technical">Technical</option>
             <option value="behavioral">Behavioral</option>
           </select>

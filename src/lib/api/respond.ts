@@ -29,7 +29,27 @@ export function llmErrorProviderResponse(error: LlmError): Response {
   );
 }
 
+/** Thrown by parseJsonBody for a malformed JSON request body (400, not 500). */
+export class InvalidJsonBodyError extends Error {
+  constructor() {
+    super("The request body is not valid JSON.");
+    this.name = "InvalidJsonBodyError";
+  }
+}
+
+/** Parses a JSON body at the route boundary so bad input never reaches 500. */
+export async function parseJsonBody(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    throw new InvalidJsonBodyError();
+  }
+}
+
 export function errorResponse(error: unknown): Response {
+  if (error instanceof InvalidJsonBodyError) {
+    return jsonError(400, "invalid_input", error.message);
+  }
   if (error instanceof ResumeFileError) {
     return jsonError(
       error.code === "file_too_large" ? 413 : 415,

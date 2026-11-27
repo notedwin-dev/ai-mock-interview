@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { requireApiAccount } from "@/lib/auth/guard";
 import {
   InvitationError,
@@ -23,7 +23,7 @@ export async function POST(
 
   let body: z.infer<typeof bodySchema>;
   try {
-    body = bodySchema.parse(await request.json());
+    body = bodySchema.parse(await parseJsonBody(request));
   } catch {
     return jsonError(400, "invalid_input", "A valid invitation action is required.");
   }

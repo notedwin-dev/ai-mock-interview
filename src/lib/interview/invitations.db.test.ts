@@ -92,6 +92,7 @@ d("invitation links (TT-21)", () => {
       evaluationMode: "balanced",
       runtimeMode: "custom",
       status: "scheduled",
+      scheduledAt: null,
     });
     expect(await resolveInvitation(createToken())).toBeNull(); // unknown link
     expect(await resolveInvitation("not-a-token")).toBeNull();

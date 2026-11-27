@@ -199,6 +199,9 @@ model InterviewSession {
   providerRouteSnapshot   Json      @map("provider_route_snapshot") @db.JsonB
   interviewerPromptVersion String   @map("interviewer_prompt_version") @db.VarChar(50)
   status                  String    @default("scheduled") @map("status") @db.VarChar(20)
+  /// Candidate-owned planned start time. Informational only: the interview
+  /// still starts when the candidate explicitly joins the waiting room.
+  scheduledAt             DateTime? @map("scheduled_at") @db.Timestamptz(6)
   failureCode             String?   @map("failure_code") @db.VarChar(60)
   /// SHA-256 of the invitation capability; the raw token exists only in the shared link.
   invitationTokenHash     String?   @unique @map("invitation_token_hash") @db.VarChar(64)
@@ -222,6 +225,7 @@ model InterviewSession {
   recordings MediaRecording[]
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, scheduledAt])
   @@index([categoryId])
   @@index([questionTemplateId])
   @@map("interview_session")

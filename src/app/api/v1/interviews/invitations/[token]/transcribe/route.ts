@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { jsonError } from "@/lib/api/respond";
-import { AsrError, transcribeAudio } from "@/lib/ai/asr";
-import type { ProviderRoute } from "@/lib/providers/provider-route";
+// Boundary parser (TT-8) plus the provider-aware ASR wire type; both sides
+// describe the same structural route, so keep the narrower ASR seam.
+import { jsonError, parseJsonBody } from "@/lib/api/respond";
+import { AsrError, transcribeAudio, type AsrRoute } from "@/lib/ai/asr";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 
@@ -31,7 +32,7 @@ export async function POST(
 
     let body: z.infer<typeof bodySchema>;
     try {
-      body = bodySchema.parse(await request.json());
+      body = bodySchema.parse(await parseJsonBody(request));
     } catch {
       return jsonError(400, "invalid_input", "A valid audio recording is required.");
     }
@@ -55,7 +56,7 @@ export async function POST(
         "Voice input needs an enabled speech-recognition provider. Type your answer instead.",
       );
     }
-    const route: ProviderRoute = {
+    const route: AsrRoute = {
       providerName: resolved.providerName,
       providerType: resolved.providerType,
       baseUrl: resolved.baseUrl,
@@ -68,6 +69,15 @@ export async function POST(
       return Response.json({ text });
     } catch (error) {
       if (error instanceof AsrError) {
+        if (error.code === "unsupported") {
+          // Fail closed at the boundary (NFR-REL-002): the enabled provider
+          // cannot serve transcription — never ride a wrong wire silently.
+          return jsonError(
+            422,
+            "voice_unsupported",
+            "The enabled speech-recognition provider cannot transcribe recordings.",
+          );
+        }
         return jsonError(
           error.code === "empty_transcript" ? 422 : 502,
           error.code === "empty_transcript" ? "no_speech" : "provider_failed",

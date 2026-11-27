@@ -1,20 +1,43 @@
 import { PRESET_MODEL_SUGGESTIONS } from "@/lib/providers/registry";
-import type { ProviderRoute } from "@/lib/providers/provider-route";
 
 /**
- * Interviewer voice adapter (TT-9; ADR-0005/006). The exact configured model
- * id is always sent: Fish Audio silently serves its PAID s2.1-pro when the
- * `model` header is omitted. Credentials are used only for this outbound
- * call; failures are sanitised so no key or provider URL reaches the UI.
+ * Interviewer voice adapter (TT-9/TT-26; ADR-0005/006, ADR-030 + OWNER-020/021).
  *
- * Provider gate (fail closed, FR-PROVIDER-006): `fish-audio` uses its native
- * `/v1/tts` wire, and custom OpenAI-compatible endpoints use the documented
- * `/audio/speech` wire. The registry also declares `tts` for `elevenlabs`
- * (and `openai`), but their native TTS wires are not implemented here — a
- * non-ElevenLabs/other-preset route is refused with `unsupported_provider`
- * before any network call instead of failing opaquely with a generic 502.
- * The ElevenLabs TTS wire is a separate, owner-approved slice.
+ * Provider dispatch: the exact configured model id is ALWAYS sent (never
+ * substituted — Fish Audio silently serves its PAID s2.1-pro when the `model`
+ * header is omitted, and the same rule holds for every other wire):
+ *
+ * - `elevenlabs` preset / api.elevenlabs.io base → native
+ *   `POST {base}/v1/text-to-speech/{modelId}?output_format=mp3_44100_128`
+ *   with the `xi-api-key` header and JSON `{text, model_id}`.
+ *   OWNER-021 (free tier): Voice Library voices are NOT available through the
+ *   API on the free plan, so no `voice` field is ever sent — the provider's
+ *   default/premade voice is used, and no voice selector exists that could
+ *   pick a Voice Library voice. If/when the catalogue gains a voice setting,
+ *   only premade voice ids may be used.
+ * - `openai` preset / api.openai.com base (or any other OpenAI-compatible
+ *   target) → `POST {base}/audio/speech` with Bearer key.
+ * - `google` preset → Google's OpenAI-compatible root
+ *   `{base}/v1beta/openai/audio/speech`: the registry base
+ *   `generativelanguage.googleapis.com` lacks the `/v1beta/openai` sub-root,
+ *   and the live-verified path (docs/FEASIBILITY.md) is the OpenAI-compatible
+ *   one. The Gemini **realtime** voice path is untouched and unrelated.
+ * - `fish-audio` preset / fish.audio base → native `POST {base}/v1/tts` with
+ *   the model selected by the `model` request header.
+ *
+ * Credentials are used only for this outbound call; failures are sanitised so
+ * no key or provider URL reaches the UI (NFR-SEC-008). The deadline covers the
+ * WHOLE request, including body consumption, so a stalled provider loses its
+ * voice rather than blocking the persisted turn.
  */
+export interface TtsRoute {
+  providerName: string;
+  providerType: string;
+  baseUrl: string;
+  modelId: string;
+  apiKey: string;
+}
+
 export class TtsError extends Error {
   readonly code: "unsupported_provider" | "generation_failed" | "invalid_audio";
 
@@ -32,8 +55,38 @@ export interface TtsDeps {
   fetchImpl?: typeof fetch;
 }
 
-function isFishAudio(route: ProviderRoute): boolean {
-  return route.providerName === "fish-audio" || /^https?:\/\/(?:[^/]*\.)?fish\.audio(?:[/:]|$)/i.test(route.baseUrl);
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isFishAudio(route: TtsRoute): boolean {
+  return (
+    route.providerName === "fish-audio" ||
+    hostOf(route.baseUrl) === "fish.audio" ||
+    hostOf(route.baseUrl).endsWith(".fish.audio")
+  );
+}
+
+function isElevenLabs(route: TtsRoute): boolean {
+  return (
+    route.providerName.toLowerCase() === "elevenlabs" ||
+    hostOf(route.baseUrl) === "api.elevenlabs.io"
+  );
+}
+
+/**
+ * Google preset rows carry the registry base without the OpenAI-compatible
+ * sub-root; the wire there (audio/speech) is the live-verified
+ * OpenAI-compatible one (docs/FEASIBILITY.md). Custom rows keep their base.
+ */
+function googleOpenAiBase(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
+  if (base.includes("/v1beta/openai")) return base;
+  return `${base}/v1beta/openai`;
 }
 
 /**
@@ -47,7 +100,7 @@ const FISH_AUDIO_MODEL_IDS: ReadonlySet<string> = new Set(
   (PRESET_MODEL_SUGGESTIONS["fish-audio"]?.tts ?? []).map((model) => model.modelId),
 );
 
-function assertFishAudioModelSupported(route: ProviderRoute): void {
+function assertFishAudioModelSupported(route: TtsRoute): void {
   if (FISH_AUDIO_MODEL_IDS.has(route.modelId)) return;
   throw new TtsError(
     "unsupported_provider",
@@ -55,23 +108,32 @@ function assertFishAudioModelSupported(route: ProviderRoute): void {
   );
 }
 
+/** Presets whose native runtime wire is implemented here (ADR-030 + OWNER-020). */
+const SUPPORTED_TTS_PRESETS: ReadonlySet<string> = new Set([
+  "fish-audio",
+  "elevenlabs",
+  "openai",
+  "google",
+]);
+
 /**
  * Pre-flight gate for the TTS wire (fail closed, FR-PROVIDER-006). Checks the
  * PURE provider rule WITHOUT a network call so callers can reject before any
  * side effect (e.g. the room checks before persisting the turn):
- *   - `fish-audio` preset / a custom endpoint on a fish.audio host → native
- *     `/v1/tts` wire with a documented model id, supported.
- *   - any other custom OpenAI-compatible endpoint → documented
- *     `/audio/speech` wire, supported (ids are not restricted there).
- *   - any OTHER preset (elevenlabs, openai, …) → wire not implemented here;
- *     throws `TtsError("unsupported_provider")` which the route maps to 409
- *     with a typed, actionable message.
+ *   - a preset with an implemented native/OpenAI-compatible wire is supported;
+ *   - any other preset is registry drift — a typed `unsupported_provider`
+ *     beats a silent 502;
+ *   - custom OpenAI-compatible endpoints are supported with unrestricted ids;
+ *   - Fish Audio must use a documented model id (no paid-model substitution).
  */
-export function assertTtsWireSupported(route: ProviderRoute): void {
-  if (route.providerType === "preset" && route.providerName !== "fish-audio") {
+export function assertTtsWireSupported(route: TtsRoute): void {
+  if (
+    route.providerType === "preset" &&
+    !SUPPORTED_TTS_PRESETS.has(route.providerName.toLowerCase())
+  ) {
     throw new TtsError(
       "unsupported_provider",
-      "Interviewer voice currently supports Fish Audio and custom OpenAI-compatible voice endpoints. Configure one of those, or continue in text.",
+      "This provider has no interviewer voice wire. Configure a supported voice provider, or continue in text.",
     );
   }
   if (isFishAudio(route)) assertFishAudioModelSupported(route);
@@ -109,23 +171,44 @@ function withDeadline<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 export async function synthesizeSpeech(
-  route: ProviderRoute,
+  route: TtsRoute,
   text: string,
   deps: TtsDeps = {},
 ): Promise<Uint8Array> {
   assertTtsWireSupported(route);
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const root = route.baseUrl.replace(/\/+$/, "");
-  const url = isFishAudio(route) ? `${root}/v1/tts` : `${root}/audio/speech`;
-  const headers: Record<string, string> = {
-    authorization: `Bearer ${route.apiKey}`,
-    "content-type": "application/json",
-  };
-  // Fish Audio selects the model via a request HEADER — always send it.
-  if (isFishAudio(route)) headers["model"] = route.modelId;
-  const body = isFishAudio(route)
-    ? JSON.stringify({ text, format: "mp3" })
-    : JSON.stringify({ model: route.modelId, input: text, voice: "alloy", response_format: "mp3" });
+  const base = route.baseUrl.replace(/\/+$/, "");
+
+  let url: string;
+  let headers: Record<string, string>;
+  let body: string;
+
+  if (isElevenLabs(route)) {
+    // Native ElevenLabs wire. No voice field: OWNER-021 — Voice Library
+    // voices are unavailable on the free tier, so the provider default is
+    // used (a catalogue voice setting, if one is ever added, must be
+    // restricted to premade voices).
+    url = `${base}/v1/text-to-speech/${encodeURIComponent(route.modelId)}?output_format=mp3_44100_128`;
+    headers = { "xi-api-key": route.apiKey, "content-type": "application/json" };
+    body = JSON.stringify({ text, model_id: route.modelId });
+  } else if (isFishAudio(route)) {
+    url = `${base}/v1/tts`;
+    headers = {
+      authorization: `Bearer ${route.apiKey}`,
+      "content-type": "application/json",
+    };
+    // Fish Audio selects the model via a request HEADER — always send it.
+    headers["model"] = route.modelId;
+    body = JSON.stringify({ text, format: "mp3" });
+  } else {
+    const openAiBase = route.providerName.toLowerCase() === "google" ? googleOpenAiBase(base) : base;
+    url = `${openAiBase}/audio/speech`;
+    headers = {
+      authorization: `Bearer ${route.apiKey}`,
+      "content-type": "application/json",
+    };
+    body = JSON.stringify({ model: route.modelId, input: text, voice: "alloy", response_format: "mp3" });
+  }
 
   const deadline = AbortSignal.timeout(SYNTHESIS_TIMEOUT_MS);
   let response: Response;

@@ -1,10 +1,9 @@
 "use client";
 
-// Combined: our mic-lifecycle hooks (useCallback) plus the runtime batch's UI
-// additions (mute control and the explicit end-interview action).
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { useOverlayFocusTrap } from "@/components/interview/use-overlay-focus-trap";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -13,12 +12,10 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  * Live interview room (FR-INTERVIEW-003/004, TT-8 re-layer): two participant
  * panels with AI states and a chronological transcript in an independently
  * openable OVERLAY (never a sidebar). All turns go through the token-scoped
- * API; the camera is never an AI input (ADR-005). Microphone audio is sent to
- * the configured ASR provider only after the candidate presses Record answer.
+ * API; the camera is never an AI input (ADR-005). Continuous ASR runs only
+ * while the candidate has explicitly turned the microphone on (owner decision
+ * 2026-11-25); typed answers remain available alongside it.
  */
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
-
 /** Candidate-facing wording; storage-level message kinds stay out of the UI. */
 function messageKindLabel(message: TranscriptEntry): string {
   if (message.speakerType === "candidate") return "Answer";
@@ -32,51 +29,46 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [ended, setEnded] = useState(false);
-  // Monotonic counter for applied turn results: the initial transcript load
-  // may only overwrite messages when no turn has been applied since it
-  // started, so a slow load can never clobber a completed turn.
-  const appliedTurnsRef = useRef(0);
-  // The idempotency key retained with the unanswered draft: a resubmission of
-  // the SAME answer reuses it (the server deduplicates the turn); a different
-  // answer or a received response discards it.
-  const pendingKeyRef = useRef<{ text: string; key: string } | null>(null);
-  const overlayRef = useRef<HTMLDivElement | null>(null);
-  const [recording, setRecording] = useState(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   // True while a getUserMedia request is in flight (ignores duplicate activation).
   const acquisitionPendingRef = useRef(false);
-  // Identity of the current microphone acquisition. Bumping it cancels a
-  // pending getUserMedia result and tells the recorder's onstop not to submit.
+  // Generation identity: bumping it cancels a pending acquisition and any
+  // in-flight transcription/turn submission from the previous mic session.
   const recordingGenerationRef = useRef(0);
-  // The recorder whose onstop must NOT submit (cancelled by end/unmount/cancel).
-  // onstop always releases the tracks; only submitting is gated.
+  // The recorder whose onstop must NOT flush a final window (end/unmount).
   const cancelledRecorderRef = useRef<MediaRecorder | null>(null);
-  // Draft and transcription identities: a transcription may only replace the
-  // draft it started from, and only the newest request may apply.
+  // A transcription may only replace the draft it started from, and only the
+  // newest request may apply its result.
   const draftRevisionRef = useRef(0);
   const transcriptionRequestRef = useRef(0);
+  // Monotonic applied-turn counter: a slow initial transcript load may not
+  // overwrite messages once a turn has been applied.
+  const appliedTurnsRef = useRef(0);
+  // Stable per-answer idempotency key: a retry of the SAME answer replays the
+  // original turn instead of creating a duplicate.
+  const pendingKeyRef = useRef<{ text: string; key: string } | null>(null);
+  // Streaming ASR bridge state (Gemini Live transcription relay).
+  const streamModeRef = useRef(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamIdRef = useRef<string | null>(null);
 
-  // Releases a microphone track; a track already ended (e.g. by MediaRecorder.stop())
-  // is a no-op. Declared before releaseRecording so the callback sees it.
+  /** Releases a track; an already-ended track is a no-op. */
   const stopCaptureTrack = useCallback((track: MediaStreamTrack) => {
     if (track.readyState !== "ended") track.stop();
   }, []);
 
-  /**
-   * Stops the active capture and invalidates any pending acquisition. With
-   * `cancelled: true` the active recorder's onstop will neither submit the audio
-   * nor touch the (already released) stream — used when the interview ends or
-   * the room unmounts, so a cancel can never post a turn.
-   */
+  /** Stops capture and invalidates every pending result. Used on end/unmount
+   *  so no microphone audio can outlive the room or post a late turn. */
   const releaseRecording = useCallback((cancelled: boolean) => {
     cancelledRecorderRef.current = cancelled ? recorderRef.current : null;
-    // Bump the generation BEFORE stopping, for a recorder that has no onstop
-    // installed yet (still starting in an ended/unmounted room).
+    // Bump BEFORE stopping, for a recorder that has no onstop installed yet.
     recordingGenerationRef.current += 1;
     const recorder = recorderRef.current;
     recorderRef.current = null;
@@ -84,22 +76,34 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       try {
         recorder.stop();
       } catch {
-        // start() threw after allocating the recorder: nothing is capturing and
-        // onstop will not fire, so the tracks are released below instead.
+        // start() threw after allocating the recorder: tracks are released below.
+      }
+    }
+    if (streamModeRef.current) {
+      const id = streamIdRef.current;
+      (streamRef.current as (MediaStream & { __stopRelay?: () => void }) | null)?.__stopRelay?.();
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+      streamModeRef.current = false;
+      streamIdRef.current = null;
+      if (id) {
+        void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
       }
     }
     streamRef.current?.getTracks().forEach((track) => stopCaptureTrack(track));
     streamRef.current = null;
-  }, [stopCaptureTrack]);
+  }, [stopCaptureTrack, token]);
 
-  // Unmount and interview end both cancel capture: a recording must never
-  // outlive the room or be submitted after the interview has ended.
+  /** Overlay dialog behaviour is shared with the WebRTC room (TT-8 dedup). */
+  useOverlayFocusTrap(overlayOpen, overlayRef, () => setOverlayOpen(false));
+
+  // End and unmount both cancel capture: a recording must never post a turn
+  // after the interview has ended or the component has gone away.
   useEffect(() => {
     if (!ended) return;
     releaseRecording(true);
   }, [ended, releaseRecording]);
 
-  // Unmount releases the microphone too (and suppresses any in-flight submit).
   useEffect(() => () => releaseRecording(true), [releaseRecording]);
 
   useEffect(() => {
@@ -120,44 +124,43 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     return () => { active = false; };
   }, [token]);
 
-  // Conversation overlay focus management: move focus inside when it opens,
-  // keep Tab navigation within it, close on Escape and restore focus to the
-  // opener when it closes.
-  useEffect(() => {
-    if (!overlayOpen) return;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const panel = overlayRef.current;
-    const focusables = panel
-      ? Array.from(
-          panel.querySelectorAll<HTMLElement>(
-            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-          ),
-        )
-      : [];
-    (focusables[0] ?? panel)?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setOverlayOpen(false);
-        return;
+  /** Retains one key per answer text so retries deduplicate server-side. */
+  function idempotencyKeyFor(contentText: string): string {
+    const pending = pendingKeyRef.current;
+    const key = pending?.text === contentText ? pending.key : crypto.randomUUID();
+    pendingKeyRef.current = { text: contentText, key };
+    return key;
+  }
+
+  /** Applies a turn result to the transcript, playback and lifecycle. */
+  function applyTurnResult(body: {
+    messages?: TranscriptEntry[];
+    error?: { message: string };
+    endCall?: boolean;
+    audioBase64?: string | null;
+  }): boolean {
+    appliedTurnsRef.current += 1;
+    setMessages(body.messages ?? []);
+    pendingKeyRef.current = null;
+    let audioPlaying = false;
+    if (body.audioBase64) {
+      try {
+        const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
+        audio.onended = () => setState("listening");
+        void audio.play().catch(() => undefined);
+        audioPlaying = true;
+      } catch {
+        // Autoplay blocked — the transcript reply is still visible.
       }
-      if (event.key !== "Tab" || focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, [overlayOpen]);
+    }
+    // Only claim "speaking" while audio is actually playing; end wins over both.
+    setState(body.endCall || !audioPlaying ? "listening" : "speaking");
+    if (body.endCall) {
+      releaseRecording(true);
+      setEnded(true);
+    }
+    return true;
+  }
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -165,9 +168,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     if (!contentText || state === "thinking") return;
     setError(null);
     setState("thinking");
-    const pending = pendingKeyRef.current;
-    const idempotencyKey = pending?.text === contentText ? pending.key : crypto.randomUUID();
-    pendingKeyRef.current = { text: contentText, key: idempotencyKey };
+    const idempotencyKey = idempotencyKeyFor(contentText);
     try {
       const response = await fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`, {
         method: "POST",
@@ -181,59 +182,38 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         audioBase64?: string | null;
       };
       if (!response.ok) {
-        // The draft and its idempotency key are preserved so the candidate
-        // can retry the exact same answer.
+        // The draft and its key are preserved so the candidate can retry the
+        // exact same answer (the server deduplicates it).
         setError(body.error?.message ?? "The interviewer could not respond.");
         setState("listening");
         return;
       }
-      appliedTurnsRef.current += 1;
-      setMessages(body.messages ?? []);
       draftRevisionRef.current += 1;
       setDraft("");
-      pendingKeyRef.current = null;
-      // Voice playback is best-effort: the transcript is the source of truth.
-      let audioPlaying = false;
-      if (body.audioBase64) {
-        try {
-          const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
-          audio.onended = () => setState("listening");
-          void audio.play().catch(() => undefined);
-          audioPlaying = true;
-        } catch {
-          // Browser blocked autoplay — the text reply is still visible.
-        }
-      }
-      // Only claim "speaking" while audio is actually playing; end wins over
-      // both, and capture is cancelled so no late audio can post a turn.
-      setState(body.endCall || !audioPlaying ? "listening" : "speaking");
-      if (body.endCall) {
-        releaseRecording(true);
-        setRecording(false);
-        setEnded(true);
-      }
+      applyTurnResult(body);
     } catch {
       setError("The request could not reach the server.");
       setState("listening");
     }
   }
 
-  async function submitAudio(blob: Blob, recorderMime: string) {
-    // Identity of this transcription: it may only replace the draft it
-    // started from, and only the newest request may apply its result. The
-    // revision is bumped on every candidate-side draft change.
+  /**
+   * Continuous transcription (owner decision 2026-11-25): while the microphone
+   * is on, audio windows are transcribed by the configured ASR provider and
+   * recognised speech becomes a candidate turn. Silence is ignored. A window
+   * that resolves after its mic session was cancelled is discarded.
+   */
+  async function submitWindow(blob: Blob, recorderMime: string) {
+    const generation = recordingGenerationRef.current;
     const request = ++transcriptionRequestRef.current;
-    const startedAtRevision = draftRevisionRef.current;
-    const isCurrent = () =>
-      request === transcriptionRequestRef.current &&
-      startedAtRevision === draftRevisionRef.current;
+    const isCurrent = () => generation === recordingGenerationRef.current && request === transcriptionRequestRef.current && !ended;
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
       let binary = "";
       for (let offset = 0; offset < bytes.length; offset += 0x8000) {
         binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
       }
-      const response = await fetch(
+      const asr = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/transcribe`,
         {
           method: "POST",
@@ -245,49 +225,160 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         },
       );
       if (!isCurrent()) return;
-      const body = (await response.json()) as { text?: string; error?: { message: string } };
-      if (!response.ok) {
-        setVoiceNotice(body.error?.message ?? "The recording could not be transcribed.");
+      const asrBody = (await asr.json().catch(() => null)) as { text?: string; error?: { message: string } } | null;
+      if (!isCurrent()) return;
+      if (!asr.ok || !asrBody?.text?.trim()) return; // silence is normal between turns
+      const contentText = asrBody.text.trim();
+      const response = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contentText, idempotencyKey: idempotencyKeyFor(contentText) }),
+        },
+      );
+      if (!isCurrent()) return;
+      const body = (await response.json().catch(() => null)) as {
+        messages?: TranscriptEntry[];
+        error?: { message: string };
+        endCall?: boolean;
+        audioBase64?: string | null;
+      } | null;
+      if (!response.ok || !body) {
+        setVoiceNotice(body?.error?.message ?? "The interview could not process that answer.");
         return;
       }
-      // The transcript goes into the input for review — nothing is sent until
-      // the candidate explicitly presses Send. A draft the candidate typed or
-      // edited while this request was in flight is never clobbered.
-      draftRevisionRef.current += 1;
-      setDraft(body.text ?? "");
-      setVoiceNotice("Voice transcribed — review the text, then press Send.");
+      applyTurnResult(body);
     } catch {
       if (!isCurrent()) return;
-      setVoiceNotice("The recording could not be transcribed.");
+      setVoiceNotice("Transcription failed. Check your connection and try turning the microphone on again.");
     }
   }
 
-  function toggleMute() {
-    const next = !muted;
-    setMuted(next);
-    streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !next; });
+  /** Feed a live-transcription result into the interview as a candidate turn. */
+  async function submitLiveTranscript(text: string, generation: number) {
+    const contentText = text.trim();
+    if (!contentText || generation !== recordingGenerationRef.current || ended) return;
+    const response = await fetch(
+      `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contentText, idempotencyKey: idempotencyKeyFor(contentText) }),
+      },
+    );
+    if (generation !== recordingGenerationRef.current || ended) return;
+    const body = (await response.json().catch(() => null)) as {
+      messages?: TranscriptEntry[];
+      error?: { message: string };
+      endCall?: boolean;
+      audioBase64?: string | null;
+    } | null;
+    if (!response.ok || !body) return;
+    applyTurnResult(body);
   }
 
-  async function startRecording() {
+  /** Open the server-side Gemini Live transcription bridge for this mic session. */
+  async function openLiveBridge(): Promise<boolean> {
+    const generation = recordingGenerationRef.current;
+    const es = new EventSource(
+      `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`,
+    );
+    eventSourceRef.current = es;
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 12000);
+      es.onmessage = (event) => {
+        if (generation !== recordingGenerationRef.current) return;
+        const data = JSON.parse(event.data) as { type: string; streamId?: string; text?: string; message?: string };
+        if (data.type === "ready" && data.streamId) {
+          streamIdRef.current = data.streamId;
+          streamModeRef.current = true;
+          clearTimeout(timer);
+          resolve(true);
+        } else if (data.type === "transcript" && data.text) {
+          void submitLiveTranscript(data.text, generation);
+        } else if (data.type === "error") {
+          setVoiceNotice(data.message ?? "Live transcription failed.");
+        }
+      };
+      es.onerror = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+    });
+  }
+
+  /** Capture 16 kHz 16-bit mono PCM from the live microphone stream. */
+  function startPcmRelay(stream: MediaStream, onPcm: (base64: string) => void) {
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processor.onaudioprocess = (event) => {
+      if (ended) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const pcm = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
+      }
+      const bytes = new Uint8Array(pcm.buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      onPcm(btoa(binary));
+    };
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    return () => {
+      processor.disconnect();
+      source.disconnect();
+      void ctx.close();
+    };
+  }
+
+  async function startMic() {
     // One microphone request at a time: a second activation while the first is
-    // still pending is ignored instead of acquiring a second stream (and
-    // leaking the first).
-    if (acquisitionPendingRef.current || recorderRef.current?.state === "recording") return;
+    // pending is ignored instead of acquiring a second stream (and leaking it).
+    if (acquisitionPendingRef.current || recorderRef.current?.state === "recording" || ended) return;
     setVoiceNotice(null);
     acquisitionPendingRef.current = true;
     const generation = ++recordingGenerationRef.current;
     try {
+      const configResponse = await fetch(
+        `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/config`,
+      );
+      const config = configResponse.ok
+        ? (await configResponse.json()) as { mode?: string }
+        : { mode: "batch" };
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (generation !== recordingGenerationRef.current) {
-        // The room ended / unmounted / recorded again while the permission
-        // prompt was open: this acquisition is stale. Release every track so
-        // the microphone is free and the indicator goes away.
+      if (generation !== recordingGenerationRef.current || ended) {
+        // The room ended/unmounted or a newer activation started while the
+        // permission prompt was open: release every track.
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         return;
       }
-      // Honour the mute preference chosen in the room/waiting room.
-      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
       streamRef.current = stream;
+
+      if (config.mode === "stream" && (await openLiveBridge())) {
+        if (generation !== recordingGenerationRef.current || ended) {
+          stream.getTracks().forEach((track) => stopCaptureTrack(track));
+          return;
+        }
+        const stopRelay = startPcmRelay(stream, (base64) => {
+          const id = streamIdRef.current;
+          if (!id) return;
+          void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ streamId: id, audioBase64: base64 }),
+          }).catch(() => undefined);
+        });
+        (stream as MediaStream & { __stopRelay?: () => void }).__stopRelay = stopRelay;
+        streamModeRef.current = true;
+        setMuted(false);
+        return;
+      }
 
       let recorder: MediaRecorder;
       try {
@@ -297,37 +388,36 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         streamRef.current = null;
         throw error;
       }
-
-      const chunks: Blob[] = [];
+      let pending: Blob[] = [];
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
+        if (event.data.size > 0) pending.push(event.data);
       };
       recorder.onstop = () => {
-        // Cancel (the interview ended or the room unmounted) must never post a
-        // turn; a normal stop submits once and never leaves the mic open.
+        // Cancel (end/unmount) never posts a turn; a normal stop flushes the
+        // final window and always releases the tracks.
         const cancel = cancelledRecorderRef.current === recorder;
         if (cancelledRecorderRef.current === recorder) cancelledRecorderRef.current = null;
+        if (!cancel && pending.length > 0) {
+          const window = new Blob(pending, { type: recorder.mimeType || "audio/webm" });
+          pending = [];
+          void submitWindow(window, recorder.mimeType);
+        }
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         if (streamRef.current === stream) streamRef.current = null;
         if (recorderRef.current === recorder) recorderRef.current = null;
-        if (!cancel && chunks.length > 0) {
-          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-          void submitAudio(blob, recorder.mimeType);
-        }
-        setRecording(false);
       };
       recorderRef.current = recorder;
       try {
-        recorder.start();
+        // A window every 4 s keeps transcription near-real-time; each call is
+        // idempotency-keyed.
+        recorder.start(4000);
       } catch (error) {
-        // start() threw after the recorder was allocated: release the tracks
-        // right away and both refs before surfacing the failure.
         recorderRef.current = null;
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         if (streamRef.current === stream) streamRef.current = null;
         throw error;
       }
-      setRecording(true);
+      setMuted(false);
     } catch {
       setVoiceNotice("Microphone access was not granted. You can type your answer instead.");
     } finally {
@@ -335,7 +425,28 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
   }
 
-  const lastInterviewer = [...messages].reverse().find((m) => m.speakerType === "interviewer");
+  function toggleMic() {
+    if (!muted) {
+      setMuted(true);
+      if (streamModeRef.current) {
+        const id = streamIdRef.current;
+        (streamRef.current as (MediaStream & { __stopRelay?: () => void }) | null)?.__stopRelay?.();
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        streamModeRef.current = false;
+        streamIdRef.current = null;
+        if (id) {
+          void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
+        }
+      } else {
+        // onstop flushes the final audio window before releasing the tracks.
+        recorderRef.current?.stop();
+      }
+      streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; });
+      return;
+    }
+    void startMic();
+  }
 
   return (
     <div className="flex min-h-[calc(100vh-2rem)] flex-col gap-4">
@@ -350,36 +461,22 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         </button>
       </header>
 
+      {/*
+       * Profile / video frames. A frame shows ONLY the participant's picture
+       * (avatar here; a local camera preview would sit in the same slot).
+       * Speaker state is conveyed by a quiet ring, never by text. Transcripts,
+       * statuses and controls live in their own surfaces: the conversation
+       * overlay and the answer bar below.
+       */}
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
-        <section aria-label="AI interviewer" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className={`flex h-20 w-20 items-center justify-center rounded-full border text-2xl font-bold ${state === "speaking" ? "border-emerald-400 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"}`}>A</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">AI Interviewer</h2>
-          <p className="mt-1 text-xs capitalize text-ink-muted">
-            {state === "thinking" ? "thinking…" : state === "speaking" ? "speaking" : "listening"}
-          </p>
-          {lastInterviewer ? (
-            <p className="mt-4 max-w-md text-sm leading-relaxed text-ink-soft">{lastInterviewer.contentText}</p>
-          ) : (
-            <p className="mt-4 max-w-md text-sm text-ink-muted">Introduce yourself to start the interview.</p>
-          )}
+        <section aria-label="AI interviewer" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8">
+          <span aria-hidden className={`flex h-24 w-24 items-center justify-center rounded-full border-2 text-3xl font-bold transition-colors ${state === "speaking" ? "border-emerald-400 bg-emerald-400/15 text-emerald-300 animate-pulse" : "border-line bg-raised text-ink-soft"}`}>A</span>
+          <span className="sr-only">{state === "speaking" ? "AI interviewer is speaking" : "AI interviewer"}</span>
         </section>
 
-        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
-          <span aria-hidden className="flex h-20 w-20 items-center justify-center rounded-full border border-line bg-raised text-2xl font-bold text-ink-soft">Y</span>
-          <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">{muted ? "Microphone muted" : "Microphone ready"}</p>
-          <button
-            type="button"
-            onClick={toggleMute}
-            aria-pressed={muted}
-            className={`${GHOST} mt-4`}>
-            {muted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-            {muted ? "Unmute" : "Mute"}
-          </button>
-          <p className="mt-3 text-xs text-ink-muted">Type your answers below.</p>
-          <p className="mt-3 max-w-xs text-xs text-ink-muted">
-            Your camera is never used as AI input. Microphone audio is sent to the configured ASR provider only when you press Record answer.
-          </p>
+        <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8">
+          <span aria-hidden className="flex h-24 w-24 items-center justify-center rounded-full border-2 border-line bg-raised text-3xl font-bold text-ink-soft">Y</span>
+          <span className="sr-only">You</span>
         </section>
       </div>
 
@@ -388,38 +485,41 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           The interview has ended. Your transcript has been saved.
         </div>
       ) : (
+        <>
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-line bg-surface px-4 py-2">
+          <p className="text-xs text-ink-muted">
+            Your camera is never used as AI input. While the microphone is on, your speech is transcribed in real time and shared with the interviewer.
+          </p>
+          <button
+            type="button"
+            onClick={toggleMic}
+            aria-pressed={!muted}
+            className="btn-ghost">
+            {muted ? <Mic className="h-4 w-4" aria-hidden /> : <MicOff className="h-4 w-4" aria-hidden />}
+            {muted ? "Turn on microphone" : "Turn off microphone"}
+          </button>
+        </div>
         <form onSubmit={(event) => void send(event)} className="flex flex-col gap-2 rounded-2xl border border-line bg-surface p-4 sm:flex-row sm:items-center">
           <input
             value={draft}
             onChange={(event) => {
-              // A candidate edit invalidates any in-flight transcription result:
-              // it must never overwrite text the candidate typed afterwards.
+              // A candidate edit invalidates any in-flight transcription
+              // result: it must never overwrite text typed afterwards.
               draftRevisionRef.current += 1;
               setDraft(event.target.value);
             }}
             className="h-11 flex-1 rounded-full border border-line bg-raised px-5 text-sm text-ink outline-none placeholder:text-ink-muted focus:border-emerald-400/70"
-            placeholder="Type your answer…"
+            placeholder="Or type your answer…"
             maxLength={5000}
             aria-label="Your interview answer"
             disabled={state === "thinking"}
           />
-          <button
-            type="button"
-            onClick={() => (recording ? recorderRef.current?.stop() : void startRecording())}
-            className="btn-ghost"
-            aria-label={recording ? "Stop recording" : "Record answer"}
-          >
-            {recording ? (
-              <><span aria-hidden className="h-2.5 w-2.5 rounded-full bg-red-400" /> Stop recording</>
-            ) : (
-              <><Mic className="h-4 w-4" aria-hidden /> Record answer</>
-            )}
-          </button>
           <button type="submit" disabled={!draft.trim() || state === "thinking"} className="btn-primary">
             {state === "thinking" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
             Send
           </button>
         </form>
+        </>
       )}
       {!ended ? (
         <div className="flex justify-center">

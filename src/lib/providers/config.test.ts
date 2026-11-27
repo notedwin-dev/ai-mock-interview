@@ -160,14 +160,26 @@ describe("validateProviderRules", () => {
     }
   });
 
-  it("rejects a preset used for a capability it does not declare (openai+tts)", () => {
-    try {
+  it("accepts a preset used for a capability it declares (openai+tts, OWNER-020)", () => {
+    // OWNER-020 amended ADR-030: OpenAI is now an official TTS preset, so
+    // tts is a declared capability and must be accepted.
+    expect(() =>
       validateProviderRules({
         providerType: "preset",
         providerName: "openai",
-        capabilities: { tts: { modelId: "tts-1" } },
+        capabilities: { tts: { modelId: "gpt-4o-mini-tts" } },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a preset used for a capability it does not declare (deepseek+asr)", () => {
+    try {
+      validateProviderRules({
+        providerType: "preset",
+        providerName: "deepseek",
+        capabilities: { asr: { modelId: "x" } },
       });
-      expect.unreachable("openai cannot serve tts in the registry");
+      expect.unreachable("deepseek only serves llm+scorer in the registry");
     } catch (error) {
       expect(error).toBeInstanceOf(ProviderConfigError);
       expect((error as ProviderConfigError).code).toBe("capability_not_supported");

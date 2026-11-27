@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import { updateResumeSharing } from "@/lib/profile/service";
 
 /**
@@ -16,7 +16,7 @@ export async function PUT(
 
   try {
     const { resumeId } = await ctx.params;
-    const body = await request.json();
+    const body = await parseJsonBody(request);
     const resume = await updateResumeSharing(account.account.userId, resumeId, body);
     return Response.json({ resume });
   } catch (error) {

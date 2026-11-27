@@ -55,9 +55,9 @@ export function closingLine() {
 }
 
 /**
- * The model gets the COMPLETE ordered list of five questions and owns the flow.
+ * The model gets the COMPLETE ordered list of six questions and owns the flow.
  * It must ask them one at a time, wait for each answer, never start the mock
- * interview, and submit all five values through the tool when done.
+ * interview, and submit all six values through the tool when done.
  */
 export function buildInstructions(userName) {
   const questions = GENERATION_FIELDS.map(
@@ -85,7 +85,7 @@ const CATEGORY_BY_TYPE = {
   mixed: "general",
 };
 
-/** Turns the five submitted answers into the existing approved agent config. */
+/** Turns the six submitted answers into the existing approved agent config. */
 export function mapAnswersToConfig(answers) {
   const role = String(answers.role ?? "").trim();
   const type = String(answers.type ?? "").trim().toLowerCase();

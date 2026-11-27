@@ -1,4 +1,5 @@
-import { jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
+// Privacy-safe LLM errors and the TT-8 boundary parser are both needed here.
+import { jsonError, llmErrorProviderResponse, parseJsonBody } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { synthesizeSpeech } from "@/lib/ai/tts";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
@@ -50,7 +51,7 @@ export async function POST(
     const { token } = await ctx.params;
     let body: unknown;
     try {
-      body = await request.json();
+      body = await parseJsonBody(request);
     } catch {
       return jsonError(400, "invalid_input", "A valid interview turn is required.");
     }

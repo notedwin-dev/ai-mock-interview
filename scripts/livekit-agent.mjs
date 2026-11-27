@@ -9,6 +9,7 @@ import {
   greeting,
   TOOL_PARAMETERS,
 } from "../src/lib/interview/generation-contract.mjs";
+import { AIMIS_REALTIME_MODEL_ID } from "../src/lib/utils/constants.mjs";
 
 /**
  * AIMIS single LiveKit agent (Gemini Live). One deployment serves both roles:
@@ -18,7 +19,9 @@ import {
  * carries the role instead of using two agent names.
  */
 export const AGENT_NAME = "aimis-agent";
-export const REALTIME_MODEL = "gemini-3.1-flash-live-preview";
+// The agent's exact model ID is admin-fixed and shared with the app through the
+// constants module — never hardcoded here (owner decision 2026-11-23).
+export const REALTIME_MODEL = AIMIS_REALTIME_MODEL_ID;
 const API_BASE = process.env.APP_URL || "http://localhost:3000";
 
 /* ------------------------------ shared helpers ------------------------------ */
@@ -51,6 +54,11 @@ export function buildInstructions(meta) {
 }
 
 function sessionFor(instructions) {
+  // Gemini Live extended-thinking models require an explicit thinking level;
+  // non-thinking models must omit it entirely (per Gemini Live docs).
+  const thinkingOptions = REALTIME_MODEL.includes("thinking")
+    ? { thinkingConfig: { thinkingLevel: "low" } }
+    : {};
   return new voice.AgentSession({
     llm: new google.beta.realtime.RealtimeModel({
       model: REALTIME_MODEL,
@@ -58,6 +66,7 @@ function sessionFor(instructions) {
       instructions,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
+      ...thinkingOptions,
     }),
   });
 }
@@ -77,6 +86,12 @@ function captionPublisher(ctx) {
       { topic: CAPTION_TOPIC, reliable: isFinal },
     );
   }
+  publish.done = function done() {
+    void ctx.room.localParticipant.publishData(
+      encoder.encode(JSON.stringify({ done: true })),
+      { topic: CAPTION_TOPIC, reliable: true },
+    );
+  };
   return publish;
 }
 
@@ -117,10 +132,13 @@ export async function runGeneratorJob(ctx, meta) {
         );
         const body = await response.json().catch(() => null);
         if (!response.ok) throw new Error(body?.error?.message ?? "generation failed");
+        // say() waits for playout; only then tell the client the call is over.
         await say(closingLine());
+        publish.done();
       } catch (error) {
         console.error("generation failed", error instanceof Error ? error.message : "unknown");
         await say("I could not save your interview. Please try again.");
+        publish.done();
       } finally {
         await new Promise((resolve) => setTimeout(resolve, 2000));
         ctx.shutdown("generation finished");

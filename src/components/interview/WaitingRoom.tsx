@@ -18,12 +18,6 @@ import { evaluationModeLabel } from "@/lib/interview/labels";
  * camera-only preview + device-preference + autojoin flow; its request-generation
  * guards survive here as `cameraRequestRef` / `mountedRef`.
  */
-const PRIMARY =
-  "inline-flex h-11 items-center gap-2 rounded-full bg-emerald-400 px-6 text-sm font-semibold text-emerald-950 outline-none transition-all hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:ring-2 focus-visible:ring-emerald-400";
-
-const PILL =
-  "h-10 max-w-full rounded-full border border-line bg-surface pl-8 pr-3 text-xs text-ink outline-none transition-colors focus:border-emerald-400/70";
-
 export function WaitingRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -137,6 +131,13 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
           {interview.jobRole} ┬╖ {interview.categoryNameSnapshot} ┬╖{" "}
           {evaluationModeLabel(interview.evaluationMode)} mode
         </p>
+        {interview.scheduledAt ? (
+          <p className="mt-1 text-sm text-ink-muted">
+            Scheduled for {new Intl.DateTimeFormat("en-GB", {
+              day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+            }).format(new Date(interview.scheduledAt))} · you can still join now or come back later.
+          </p>
+        ) : null}
       </div>
 
       <div className="grid items-start gap-8 md:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
@@ -201,7 +202,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={micId}
                 onChange={(event) => setMicId(event.target.value)}
                 aria-label="Microphone input"
-                className={PILL}>
+                className="device-pill">
                 {micOptions.length === 0 ? <option value="">Microphone</option> : null}
                 {micOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -217,7 +218,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={speakerId}
                 onChange={(event) => setSpeakerId(event.target.value)}
                 aria-label="Speaker output"
-                className={PILL}>
+                className="device-pill">
                 {speakerOptions.length === 0 ? <option value="">Speaker</option> : null}
                 {speakerOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -233,7 +234,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
                 value={cameraId}
                 onChange={(event) => changeCamera(event.target.value)}
                 aria-label="Camera"
-                className={PILL}>
+                className="device-pill">
                 {cameraOptions.length === 0 ? <option value="">Camera</option> : null}
                 {cameraOptions.map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
@@ -264,13 +265,13 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
             type="button"
             onClick={join}
             disabled={busy}
-            className={`${PRIMARY} w-full justify-center`}>
+            className="btn-primary w-full justify-center px-6">
             Join now
           </button>
           <Link
-            href={`/interview/${token}`}
+            href="/dashboard"
             className="flex h-11 w-full items-center justify-center rounded-full border border-line bg-surface px-6 text-sm font-medium text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400">
-            Back to interview details
+            Back to Dashboard
           </Link>
         </div>
       </div>
