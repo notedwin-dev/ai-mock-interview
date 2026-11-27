@@ -69,12 +69,6 @@ describe("POST /api/v1/interviews/invitations/[token]/transcribe", () => {
     expect(unconfigured.status).toBe(409);
     expect(await unconfigured.json()).toMatchObject({ error: { code: "voice_not_configured" } });
 
-    mocks.transcribeAudio.mockRejectedValueOnce(new AsrError("unsupported_provider", "only Google secret-key"));
-    const unsupported = await POST(request(validBody), ctx);
-    expect(unsupported.status).toBe(409);
-    const unsupportedBody = await unsupported.json();
-    expect(unsupportedBody).toMatchObject({ error: { code: "asr_provider_unsupported" } });
-
     mocks.transcribeAudio.mockRejectedValueOnce(new AsrError("generation_failed", "provider rejected secret-key"));
     const failed = await POST(request(validBody), ctx);
     expect(failed.status).toBe(502);

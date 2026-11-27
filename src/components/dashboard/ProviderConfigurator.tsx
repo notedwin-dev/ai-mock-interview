@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Capability, ModelSuggestion } from "@/lib/providers/registry";
+import { REALTIME_PROVIDERS, realtimeModelFor } from "@/lib/providers/realtime-models";
 import { PRESET_ADAPTERS, PRESET_MODEL_SUGGESTIONS } from "@/lib/providers/registry";
 import type { ProviderConfigSummary } from "@/lib/providers/config";
 import type {
@@ -243,6 +244,16 @@ interface ProviderConfiguratorProps {
 
 export function ProviderConfigurator({ initialConfigurations }: ProviderConfiguratorProps) {
   const [rows, setRows] = useState<ProviderConfigSummary[]>(initialConfigurations);
+  // ADR-006: pick ONE runtime before any credential is entered.
+  const [mode, setMode] = useState<"realtime" | "custom" | null>(() => {
+    if (initialConfigurations.some((row) => row.capabilities.realtime)) return "realtime";
+    if (
+      initialConfigurations.some(
+        (row) => row.capabilities.llm || row.capabilities.asr || row.capabilities.tts,
+      )
+    ) return "custom";
+    return null;
+  });
   const [modelsByRow, setModelsByRow] = useState<Record<string, RowModelList>>({});
   const [probeByRow, setProbeByRow] = useState<Record<string, ConfigurationProbeResult>>({});
   const [pending, setPending] = useState<string | null>(null);
@@ -394,15 +405,24 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
    * Option 1 add flow (one row per provider): without an existing row the
    * provider configuration is created with only the realtime capability;
    * with one, the realtime capability is PATCHed onto the stored row and the
-   * existing credential stays untouched (an apiKey-less patch never
-   * re-encrypts). Model IDs are never invented: the form takes the exact ID
-   * and discovery loads the account's list after saving.
+   * existing credential stays untouched. Realtime models are admin-fixed:
+   * the candidate only supplies a credential, never a model ID.
    */
   async function addRealtime(
     providerName: string,
     apiKey: string | null,
-    modelId: string,
   ): Promise<boolean> {
+    const modelId = realtimeModelFor(providerName);
+    if (!modelId) {
+      setActionError((current) => ({
+        ...current,
+        [`realtime:${providerName}`]: {
+          code: "invalid_input",
+          message: "This realtime provider is not available.",
+        },
+      }));
+      return false;
+    }
     const key = `realtime:${providerName}`;
     const existing = rows.find(
       (row) => row.providerType === "preset" && row.providerName === providerName,
@@ -451,61 +471,88 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     return error === null;
   }
 
+  if (mode === null) {
+    return (
+      <ModeSelector
+        onSelect={(selected) => setMode(selected)}
+        configured={rows.length > 0}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <ReadinessStrip rows={rows} onJump={(capability) => setCollapsed((c) => ({ ...c, [capability]: false }))} />
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface px-5 py-3">
+        <span className="text-sm text-ink-muted">
+          Runtime:{" "}
+          <strong className="text-ink">
+            {mode === "realtime" ? "Pre-configured Mode (Fixed Providers)" : "Advanced Mode (Custom Providers)"}
+          </strong>
+        </span>
+        <button
+          type="button"
+          onClick={() => setMode(null)}
+          disabled={rows.length > 0}
+          className={GHOST_PILL}
+        >
+          Change mode
+        </button>
+      </div>
+      {rows.length > 0 ? (
+        <p className="text-xs text-ink-muted" role="status">
+          A runtime with saved credentials is fixed — delete its configuration before
+          changing modes.
+        </p>
+      ) : null}
 
-      <RealtimeOptionCard
-        rows={rows}
-        modelsByRow={modelsByRow}
-        probeByRow={probeByRow}
-        pending={pending}
-        actionError={actionError}
-        onFindModels={findModels}
-        onProbe={runProbe}
-        onPatch={patchRow}
-        onDelete={deleteRow}
-        onAddRealtime={addRealtime}
-      />
-
-      <section
-        aria-labelledby="custom-config-heading"
-        className="overflow-hidden rounded-3xl border border-line bg-surface"
-      >
-        <OptionCardHeader
-          id="custom-config-heading"
-          title="Custom Configuration"
-          badge="Composable pipeline"
-          subtitle="Compose the interview pipeline from independently configured capabilities."
+      {mode === "realtime" ? (
+        <PreconfiguredModePanel
+          rows={rows}
+          pending={pending}
+          actionError={actionError}
+          probeByRow={probeByRow}
+          onProbe={runProbe}
+          onPatch={patchRow}
+          onDelete={deleteRow}
+          onAddRealtime={addRealtime}
         />
-        <div className="border-t border-line">
-          {CAPABILITY_SECTIONS.map((section) => (
-            <CapabilitySection
-              key={section.capability}
-              section={section}
-              rows={rows}
-              collapsed={collapsed[section.capability]}
-              onToggle={() =>
-                setCollapsed((c) => ({ ...c, [section.capability]: !c[section.capability] }))
-              }
-              modelsByRow={modelsByRow}
-              probeByRow={probeByRow}
-              pending={pending}
-              actionError={actionError}
-              onFindModels={findModels}
-              onProbe={runProbe}
-              onPatch={patchRow}
-              onDelete={deleteRow}
-              onCreated={async () => {
-                await refresh();
-              }}
-            />
-          ))}
-          <p className="px-5 pb-5 text-xs text-ink-muted sm:px-6">
-            Users independently select providers and models for each capability.
-          </p>
-        </div>
-      </section>
+      ) : (
+        <section
+          aria-labelledby="custom-config-heading"
+          className="overflow-hidden rounded-3xl border border-line bg-surface"
+        >
+          <OptionCardHeader
+            id="custom-config-heading"
+            title="Advanced Mode"
+            badge="Custom providers"
+            subtitle="Pick a provider tag per capability, or Custom to supply your own endpoint. Each capability stays independent."
+          />
+          <div className="border-t border-line">
+            {CAPABILITY_SECTIONS.map((section) => (
+              <CapabilitySection
+                key={section.capability}
+                section={section}
+                rows={rows}
+                collapsed={collapsed[section.capability]}
+                onToggle={() =>
+                  setCollapsed((c) => ({ ...c, [section.capability]: !c[section.capability] }))
+                }
+                modelsByRow={modelsByRow}
+                probeByRow={probeByRow}
+                pending={pending}
+                actionError={actionError}
+                onFindModels={findModels}
+                onProbe={runProbe}
+                onPatch={patchRow}
+                onDelete={deleteRow}
+                onCreated={async () => {
+                  await refresh();
+                }}
+              />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -531,75 +578,264 @@ function readinessFor(rows: ProviderConfigSummary[], capability: Capability) {
   };
 }
 
-function ReadinessStrip({
-  rows,
-  onJump,
+/* --------------------------- mode selection --------------------------------- */
+
+function ModeSelector({
+  onSelect,
+  configured,
 }: {
-  rows: ProviderConfigSummary[];
-  onJump: (capability: Capability) => void;
+  onSelect: (mode: "realtime" | "custom") => void;
+  configured: boolean;
 }) {
   return (
-    <section aria-label="Capability readiness" className="rounded-2xl border border-line bg-surface p-4 sm:p-5">
-      <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:gap-3">
-        {CAPABILITY_SECTIONS.map(({ capability, title, Icon }) => {
-          const readiness = readinessFor(rows, capability);
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center justify-center gap-3 text-xs text-ink-muted" aria-label="Configuration steps">
+        {["Choose mode", "Configure credentials", "Verify & enable"].map((step, index) => (
+          <span key={step} className="flex items-center gap-3">
+            <span className={`flex h-6 w-6 items-center justify-center rounded-full border ${index === 0 ? "border-emerald-400 bg-emerald-400 text-emerald-950" : "border-line text-ink-muted"}`}>
+              {index + 1}
+            </span>
+            {step}
+            {index < 2 ? <span aria-hidden>→</span> : null}
+          </span>
+        ))}
+      </div>
+      <h1 className="text-center font-display text-2xl font-semibold tracking-tight text-ink">
+        Configure your preferred AI model providers
+      </h1>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-3xl border border-line bg-surface p-6">
+          <h2 className="font-display text-lg font-semibold text-ink">Pre-configured Mode (Fixed Providers)</h2>
+          <p className="mt-2 text-sm text-ink-muted">
+            One native realtime agent handles voice, understanding and speech. The
+            model is fixed by the administrator — you only add a credential.
+          </p>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            {REALTIME_PROVIDERS.map((spec) => (
+              <div key={spec.providerName} className={`flex flex-col items-center gap-2 rounded-2xl border border-line bg-raised/40 p-3 text-center ${spec.modelId ? "" : "opacity-50"}`}>
+                <MonogramTile providerName={spec.providerName} monogram={spec.monogram} />
+                <span className="text-xs text-ink">{spec.title}</span>
+                {spec.modelId ? null : <span className="text-[10px] text-ink-muted">Unavailable</span>}
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => onSelect("realtime")}
+            className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
+          >
+            Choose pre-configured
+          </button>
+        </section>
+        <section className="rounded-3xl border border-line bg-surface p-6">
+          <h2 className="font-display text-lg font-semibold text-ink">Advanced Mode (Custom Providers)</h2>
+          <p className="mt-2 text-sm leading-relaxed text-ink-muted">
+            You can customize your preferred ASR, LLM, TTS and scorer providers in
+            this mode. Each capability gets its own provider tag, API key, Base URL
+            and exact model ID.
+          </p>
+          <button
+            type="button"
+            onClick={() => onSelect("custom")}
+            className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
+          >
+            Choose advanced
+          </button>
+        </section>
+      </div>
+      {configured ? (
+        <p className="text-center text-xs text-ink-muted" role="status">
+          A runtime is already configured — delete its saved configuration first to
+          switch modes.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+interface PreconfiguredModePanelProps {
+  rows: ProviderConfigSummary[];
+  pending: string | null;
+  actionError: Record<string, ApiError>;
+  probeByRow: Record<string, ConfigurationProbeResult>;
+  onProbe: (row: ProviderConfigSummary) => void;
+  onPatch: (row: ProviderConfigSummary, patch: Record<string, unknown>, key: string) => Promise<boolean>;
+  onDelete: (row: ProviderConfigSummary) => void;
+  onAddRealtime: (providerName: string, apiKey: string | null) => Promise<boolean>;
+}
+
+function PreconfiguredModePanel(props: PreconfiguredModePanelProps) {
+  const [formFor, setFormFor] = useState<string | null>(null);
+  return (
+    <section aria-labelledby="preconfigured-heading" className="rounded-3xl border border-line bg-surface p-5 sm:p-6">
+      <h2 id="preconfigured-heading" className="font-display text-lg font-semibold text-ink">
+        Pre-configured Realtime Agents
+      </h2>
+      <p className="mt-1 text-sm text-ink-muted">
+        Pick one native agent. Its model is fixed by the administrator; only a
+        credential is required.
+      </p>
+      <div className="mt-5 grid gap-4 sm:grid-cols-2">
+        {REALTIME_PROVIDERS.map((spec) => {
+          const configured = props.rows.find(
+            (row) => row.providerType === "preset" && row.providerName === spec.providerName,
+          );
+          const available = Boolean(spec.modelId);
           return (
-            <li key={capability}>
-              <button
-                type="button"
-                onClick={() => onJump(capability)}
-                className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1.5 text-left outline-none transition-colors hover:bg-raised focus-visible:ring-2 focus-visible:ring-emerald-400"
-              >
-                <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-raised text-ink-soft">
-                  <Icon className="h-4 w-4" aria-hidden />
-                  <span
-                    aria-hidden
-                    className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${readiness.dot}`}
-                  />
-                </span>
-                <span className="flex min-w-0 flex-1 flex-col leading-tight">
-                  <span className="text-sm font-medium text-ink">{title}</span>
-                  <span className={`mt-0.5 truncate text-xs ${readiness.text}`}>
-                    {readiness.names ? `${readiness.names} — ${readiness.label}` : readiness.label}
-                  </span>
-                </span>
-              </button>
-            </li>
+            <div key={spec.providerName} className="rounded-2xl border border-line bg-raised/40 p-4">
+              <div className="flex items-start gap-3">
+                <MonogramTile providerName={spec.providerName} monogram={spec.monogram} />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-ink">{spec.title}</p>
+                  <p className="mt-0.5 text-xs text-ink-muted">{spec.note}</p>
+                  {spec.modelId ? (
+                    <p className="mt-1 text-xs text-ink-soft">Model: <code className="rounded bg-surface px-1.5 py-0.5">{spec.modelId}</code></p>
+                  ) : null}
+                  {configured ? (
+                    <p className={`mt-1 text-xs ${configured.credentialStatus === "valid" ? "text-emerald-400" : "text-amber-300"}`}>
+                      {configured.credentialStatus === "valid" ? "Validated" : "Not validated yet"} · {configured.isEnabled ? "enabled" : "disabled"}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              {configured ? (
+                <ConfiguredRealtimeRow row={configured} {...props} />
+              ) : formFor === spec.providerName && available ? (
+                <FixedKeyForm
+                  providerName={spec.providerName}
+                  modelId={spec.modelId!}
+                  formKey={`realtime:${spec.providerName}`}
+                  pending={props.pending}
+                  actionError={props.actionError}
+                  onSubmit={async (apiKey) => {
+                    const ok = await props.onAddRealtime(spec.providerName, apiKey);
+                    if (ok) setFormFor(null);
+                    return ok;
+                  }}
+                  onCancel={() => setFormFor(null)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setFormFor(spec.providerName)}
+                  disabled={!available || props.pending !== null}
+                  className={`${GHOST_PILL} mt-4 w-full justify-center`}
+                >
+                  {available ? "Set up" : "Unavailable"}
+                </button>
+              )}
+            </div>
           );
         })}
-      </ul>
+      </div>
     </section>
   );
 }
 
-/* ----------------------- option 1: realtime agents -------------------------- */
+function ConfiguredRealtimeRow({
+  row,
+  pending,
+  actionError,
+  probeByRow,
+  onProbe,
+  onPatch,
+  onDelete,
+}: {
+  row: ProviderConfigSummary;
+  pending: string | null;
+  actionError: Record<string, ApiError>;
+  probeByRow: Record<string, ConfigurationProbeResult>;
+  onProbe: (row: ProviderConfigSummary) => void;
+  onPatch: (row: ProviderConfigSummary, patch: Record<string, unknown>, key: string) => Promise<boolean>;
+  onDelete: (row: ProviderConfigSummary) => void;
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const probe = probeByRow[row.userProviderConfigurationId]?.capabilities.find(
+    (result) => result.capability === "realtime",
+  );
+  return (
+    <div className="mt-3 flex flex-col gap-2 border-t border-line pt-3">
+      <div className="flex flex-wrap gap-2">
+        <button type="button" onClick={() => onProbe(row)} disabled={pending !== null} className={GHOST_PILL}>Test capability</button>
+        <button
+          type="button"
+          onClick={() => void onPatch(row, { isEnabled: !row.isEnabled }, `${row.userProviderConfigurationId}:enable`)}
+          disabled={pending !== null}
+          className={GHOST_PILL}
+        >
+          {row.isEnabled ? "Disable" : "Enable"}
+        </button>
+        {!confirm ? (
+          <button type="button" onClick={() => setConfirm(true)} disabled={pending !== null} className={DANGER_PILL}>Delete</button>
+        ) : (
+          <>
+            <button type="button" onClick={() => onDelete(row)} disabled={pending !== null} className={DANGER_PILL}>Confirm delete</button>
+            <button type="button" onClick={() => setConfirm(false)} className={GHOST_PILL}>Keep</button>
+          </>
+        )}
+      </div>
+      {probe ? <p className="text-xs text-ink-muted">Last test: {probe.status}</p> : null}
+      {actionError[`${row.userProviderConfigurationId}:enable`] ? (
+        <p className="text-xs text-red-400">{actionError[`${row.userProviderConfigurationId}:enable`]!.message}</p>
+      ) : null}
+    </div>
+  );
+}
 
-/**
- * Register Option A ("Pre-configured Realtime Agents", ADR-006): native
- * realtime sessions that replace the composed ASR/LLM/TTS pipeline. Only the
- * two provider-native presets are offered; the realtime model ID comes from
- * the user (discovery + manual entry) because the owner-maintained catalogue
- * lists no realtime agent model IDs yet.
- */
-const REALTIME_OPTIONS = [
-  {
-    providerName: "google",
-    optionTitle: "Gemini Live",
-    monogram: "G",
-    blurb: "Native realtime voice session on the Gemini Live API.",
-  },
-  {
-    providerName: "openai",
-    optionTitle: "OpenAI Realtime",
-    monogram: "OA",
-    blurb: "Native realtime voice session on the OpenAI Realtime API.",
-  },
-] as const satisfies ReadonlyArray<{
+function FixedKeyForm({
+  providerName,
+  modelId,
+  formKey,
+  pending,
+  actionError,
+  onSubmit,
+  onCancel,
+}: {
   providerName: string;
-  optionTitle: string;
-  monogram: string;
-  blurb: string;
-}>;
+  modelId: string;
+  formKey: string;
+  pending: string | null;
+  actionError: Record<string, ApiError>;
+  onSubmit: (apiKey: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <form
+      className="mt-4 flex flex-col gap-3 rounded-xl border border-emerald-400/40 bg-surface p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!apiKey.trim()) { setError("An API key is required."); return; }
+        void onSubmit(apiKey.trim());
+      }}
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-ink">Set up {providerName}</span>
+        <button type="button" onClick={onCancel} className={GHOST_PILL}>Cancel</button>
+      </div>
+      <p className="text-xs text-ink-muted">Fixed model: <code className="rounded bg-raised px-1.5 py-0.5">{modelId}</code></p>
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-ink-muted">API key</span>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(event) => setApiKey(event.target.value)}
+          className={FIELD_CLASS}
+          placeholder="Paste the provider API key"
+          autoComplete="off"
+          maxLength={4096}
+          aria-label={`API key for ${providerName}`}
+        />
+      </label>
+      {error ? <p className="text-xs text-red-400">{error}</p> : null}
+      {actionError[formKey] ? <p className="text-xs text-red-400">{actionError[formKey]!.message}</p> : null}
+      <button type="submit" disabled={pending !== null} className={PRIMARY_PILL}>Save configuration</button>
+    </form>
+  );
+}
+
+/* --------------------------- shared presentation ----------------------------- */
 
 /** Subtle monogram tiles — clean initials, no trademark artwork. */
 const MONOGRAM_TILE: Record<string, string> = {
@@ -615,6 +851,52 @@ function MonogramTile({ providerName, monogram }: { providerName: string; monogr
     >
       {monogram}
     </span>
+  );
+}
+
+/** Two-letter monogram used in Advanced mode provider tags. */
+function providerMonogram(name: string): string {
+  const words = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
+}
+
+function ProviderTag({
+  label,
+  selected,
+  dimmed,
+  onClick,
+}: {
+  label: string;
+  selected: boolean;
+  dimmed: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      disabled={dimmed}
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-emerald-400 ${
+        dimmed
+          ? "cursor-not-allowed border-line bg-surface/40 text-ink-muted opacity-40"
+          : selected
+            ? "border-emerald-400 bg-emerald-400/10 text-ink"
+            : "cursor-pointer border-line bg-surface text-ink-soft hover:border-emerald-400/70 hover:text-ink"
+      }`}
+    >
+      <span
+        aria-hidden
+        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border text-[10px] font-bold tracking-wide ${
+          selected ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-300" : "border-line bg-raised text-ink-soft"
+        }`}
+      >
+        {providerMonogram(label)}
+      </span>
+      {label}
+    </button>
   );
 }
 
@@ -641,389 +923,6 @@ function OptionCardHeader({
       </div>
       <p className="text-sm text-ink-muted">{subtitle}</p>
     </div>
-  );
-}
-
-interface RealtimeOptionCardProps {
-  rows: ProviderConfigSummary[];
-  modelsByRow: Record<string, RowModelList>;
-  probeByRow: Record<string, ConfigurationProbeResult>;
-  pending: string | null;
-  actionError: Record<string, ApiError>;
-  onFindModels: (row: ProviderConfigSummary) => void;
-  onProbe: (row: ProviderConfigSummary) => void;
-  onPatch: (
-    row: ProviderConfigSummary,
-    patch: Record<string, unknown>,
-    key: string,
-  ) => Promise<boolean>;
-  onDelete: (row: ProviderConfigSummary) => void;
-  onAddRealtime: (
-    providerName: string,
-    apiKey: string | null,
-    modelId: string,
-  ) => Promise<boolean>;
-}
-
-function RealtimeOptionCard(props: RealtimeOptionCardProps) {
-  const [formOpenFor, setFormOpenFor] = useState<string | null>(null);
-  return (
-    <section
-      aria-labelledby="realtime-agents-heading"
-      className="overflow-hidden rounded-3xl border border-line bg-surface"
-    >
-      <OptionCardHeader
-        id="realtime-agents-heading"
-        title="Pre-configured Realtime Agents"
-        badge="Native integrations"
-        subtitle="Runs the whole interview as one native realtime session — users don't configure separate ASR, LLM and TTS models in this mode."
-      />
-      <div className="divide-y divide-line border-t border-line">
-        {REALTIME_OPTIONS.map((option) => (
-          <NativeRealtimeBlock
-            key={option.providerName}
-            option={option}
-            formOpen={formOpenFor === option.providerName}
-            onToggleForm={() =>
-              setFormOpenFor((current) =>
-                current === option.providerName ? null : option.providerName,
-              )
-            }
-            {...props}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-type NativeRealtimeOption = (typeof REALTIME_OPTIONS)[number];
-
-/**
- * One provider block: monogram card header (status + action) and, when
- * configured, the realtime row with the same row-card treatment as Option 2.
- * Without a stored row the block offers create (API key + model); with one
- * missing only the realtime capability it offers the PATCH flow.
- */
-function NativeRealtimeBlock({
-  option,
-  formOpen,
-  onToggleForm,
-  rows,
-  modelsByRow,
-  probeByRow,
-  pending,
-  actionError,
-  onFindModels,
-  onProbe,
-  onPatch,
-  onDelete,
-  onAddRealtime,
-}: RealtimeOptionCardProps & {
-  option: NativeRealtimeOption;
-  formOpen: boolean;
-  onToggleForm: () => void;
-}) {
-  const row =
-    rows.find(
-      (candidate) =>
-        candidate.providerType === "preset" && candidate.providerName === option.providerName,
-    ) ?? null;
-  const realtime = row?.capabilities.realtime ?? null;
-  const formKey = `realtime:${option.providerName}`;
-  // PATCH path: the stored-key model list lives here so it can load when the
-  // form OPENS (a click handler, not a mount effect) without ever seeing the
-  // stored credential.
-  const [storedList, setStoredList] = useState<ModelListState>(IDLE_MODEL_LIST);
-
-  async function loadStoredModels(): Promise<ModelListState> {
-    setStoredList({ state: "loading", models: [], source: null });
-    const response = await callApi<DiscoveryResult>(
-      `/api/v1/providers/configurations/${encodeURIComponent(option.providerName)}/models`,
-      { cache: "no-store" },
-    );
-    const raw: RowModelList = {
-      state: "done",
-      result: response.ok
-        ? response.data
-        : { ok: false, errorCode: "provider_error", detail: response.error.message },
-    };
-    const resolved = resolveModelList(raw, []);
-    setStoredList(resolved);
-    return resolved;
-  }
-
-  const status = !row
-    ? { text: "Not set up", cls: "text-ink-muted", dot: "bg-ink-muted/60" }
-    : realtime
-      ? (() => {
-          const credential = CREDENTIAL_STATUS[row.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated!;
-          return {
-            text: `${credential.word} · ${row.isEnabled ? "enabled" : "disabled"}`,
-            cls: credential.text,
-            dot: credential.dot,
-          };
-        })()
-    : { text: "Configured — realtime capability not added yet", cls: "text-amber-300", dot: "bg-amber-400" };
-
-  return (
-    <article className="p-5 sm:p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <MonogramTile providerName={option.providerName} monogram={option.monogram} />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-ink">{option.optionTitle}</p>
-            <p className="mt-0.5 text-sm text-ink-muted">{option.blurb}</p>
-            <span className={`mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium ${status.cls}`}>
-              <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-              {status.text}
-            </span>
-          </div>
-        </div>
-        {!row ? (
-          <button type="button" onClick={onToggleForm} disabled={pending !== null} className={PRIMARY_PILL}>
-            <Plus className="h-4 w-4" aria-hidden />
-            Set up
-          </button>
-        ) : !realtime ? (
-          <button
-            type="button"
-            onClick={() => {
-              onToggleForm();
-              void loadStoredModels();
-            }}
-            disabled={pending !== null}
-            className={GHOST_PILL}
-          >
-            <Plus className="h-4 w-4" aria-hidden />
-            Add realtime
-          </button>
-        ) : null}
-      </div>
-
-      {formOpen ? (
-        <RealtimeAddForm
-          option={option}
-          needsKey={!row}
-          formKey={formKey}
-          pending={pending}
-          actionError={actionError}
-          storedList={storedList}
-          onReloadStored={loadStoredModels}
-          onSubmit={(apiKey, modelId) => onAddRealtime(option.providerName, apiKey, modelId)}
-          onCancel={onToggleForm}
-        />
-      ) : null}
-
-      {row && realtime ? (
-        <div className="mt-4">
-          <ConfigurationRowCard
-            row={row}
-            capability="realtime"
-            modelsByRow={modelsByRow}
-            probeByRow={probeByRow}
-            pending={pending}
-            actionError={actionError}
-            onFindModels={onFindModels}
-            onProbe={onProbe}
-            onPatch={onPatch}
-            onDelete={onDelete}
-          />
-        </div>
-      ) : null}
-    </article>
-  );
-}
-
-function RealtimeAddForm({
-  option,
-  needsKey,
-  formKey,
-  pending,
-  actionError,
-  storedList,
-  onReloadStored,
-  onSubmit,
-  onCancel,
-}: {
-  option: NativeRealtimeOption;
-  needsKey: boolean;
-  formKey: string;
-  pending: string | null;
-  actionError: Record<string, ApiError>;
-  /** PATCH path: the block owns the stored-key list state (loaded on open). */
-  storedList: ModelListState;
-  onReloadStored: () => Promise<ModelListState>;
-  onSubmit: (apiKey: string | null, modelId: string) => Promise<boolean>;
-  onCancel: () => void;
-}) {
-  const [apiKey, setApiKey] = useState("");
-  const [modelId, setModelId] = useState("");
-  const [error, setError] = useState<ApiError | null>(null);
-  const [typedList, setTypedList] = useState<ModelListState>(IDLE_MODEL_LIST);
-  const list = needsKey ? typedList : storedList;
-
-  // Owner directive 2026-11-16: the form never asks for a model ID — it lists
-  // the provider's models and the user picks one. Both native realtime
-  // presets expose a model-list endpoint, so there is no manual fallback:
-  // create loads through the transient discovery endpoint with the typed key;
-  // the PATCH path (credential already stored) loads through the stored-row
-  // endpoint without ever seeing the key.
-  async function loadList(): Promise<ModelListState> {
-    if (!needsKey) return onReloadStored();
-    const trimmed = apiKey.trim();
-    if (!trimmed) return IDLE_MODEL_LIST;
-    setTypedList({ state: "loading", models: [], source: null });
-    const response = await callApi<DiscoveryResult>("/api/v1/providers/discover-models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        providerType: "preset",
-        providerName: option.providerName,
-        apiKey: trimmed,
-      }),
-    });
-    const raw: RowModelList = {
-      state: "done",
-      result: response.ok
-        ? response.data
-        : { ok: false, errorCode: "provider_error", detail: response.error.message },
-    };
-    const resolved = resolveModelList(raw, []);
-    setTypedList(resolved);
-    return resolved;
-  }
-
-  async function submit() {
-    setError(null);
-    if (needsKey && !apiKey.trim()) {
-      setError({ code: "missing_credential", message: "An API key is required." });
-      return;
-    }
-    let current = list;
-    if (current.state !== "ready") {
-      current = await loadList();
-    }
-    if (current.state !== "ready") {
-      setError({ code: "invalid_input", message: "Load the model list first, then select a model." });
-      return;
-    }
-    if (!modelId) {
-      setError({ code: "invalid_input", message: "Select a model from the list." });
-      return;
-    }
-    const ok = await onSubmit(needsKey ? apiKey.trim() : null, modelId);
-    if (ok) onCancel();
-  }
-
-  return (
-    <form
-      className="mt-4 flex flex-col gap-4 rounded-2xl border border-emerald-400/40 bg-raised/40 p-4"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium text-ink">
-          {needsKey ? `Set up ${option.optionTitle}` : `Add realtime to ${option.optionTitle}`}
-        </span>
-        <button type="button" onClick={onCancel} disabled={pending !== null} className={GHOST_PILL}>
-          Cancel
-        </button>
-      </div>
-      {needsKey ? (
-        <label className="flex flex-col gap-1.5">
-          <span className={LABEL_CLASS}>API key</span>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(event) => {
-              setApiKey(event.target.value);
-              setTypedList(IDLE_MODEL_LIST);
-            }}
-            onBlur={() => {
-              if (list.state === "idle" || list.state === "failed") void loadList();
-            }}
-            className={`${FIELD_CLASS} font-mono`}
-            placeholder="Paste the provider API key"
-            autoComplete="off"
-            maxLength={4096}
-          />
-          <span className="text-xs text-ink-muted">
-            The provider&apos;s model list loads automatically once the key is entered.
-          </span>
-        </label>
-      ) : (
-        <p className="rounded-xl bg-surface px-4 py-2.5 text-xs text-ink-muted">
-          {option.optionTitle} is already configured — this adds the realtime capability to
-          that configuration and keeps the stored API key.
-        </p>
-      )}
-      <div className="flex flex-col gap-1.5">
-        <span className={LABEL_CLASS}>Model</span>
-        {list.state === "ready" ? (
-          <select
-            value={modelId}
-            onChange={(event) => setModelId(event.target.value)}
-            className={FIELD_CLASS}
-            aria-label={`Model for ${option.optionTitle}`}
-          >
-            <option value="" disabled>
-              Select a model…
-            </option>
-            {list.models.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <div className="flex h-11 items-center gap-2 rounded-full bg-raised px-5 text-sm text-ink-muted">
-            {list.state === "loading" ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                Loading the model list…
-              </>
-            ) : list.state === "failed" ? (
-              "The model list could not be loaded."
-            ) : (
-              "The provider's model list appears here once the API key is entered."
-            )}
-          </div>
-        )}
-        {list.state === "ready" && list.source === "discovery" ? (
-          <span className="text-xs text-ink-muted">
-            {list.models.length} models loaded from the provider&apos;s list — pick the
-            realtime model your account exposes.
-          </span>
-        ) : null}
-        {list.note ? <span className="text-xs text-amber-300">{list.note}</span> : null}
-        {list.state === "failed" ? (
-          <span>
-            <button
-              type="button"
-              onClick={() => void loadList()}
-              disabled={pending !== null}
-              className={GHOST_PILL}
-            >
-              <RefreshCw className="h-4 w-4" aria-hidden />
-              Load models
-            </button>
-          </span>
-        ) : null}
-      </div>
-      {error ? <p className="text-xs text-red-400">{error.message}</p> : null}
-      {actionError[formKey] ? (
-        <p className="text-xs text-red-400">{actionError[formKey]!.message}</p>
-      ) : null}
-      <div>
-        <button type="submit" disabled={pending !== null} className={PRIMARY_PILL}>
-          {pending === formKey ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
-          {needsKey ? "Create configuration" : "Add realtime capability"}
-        </button>
-      </div>
-    </form>
   );
 }
 
@@ -1095,8 +994,7 @@ function CapabilitySection(props: CapabilitySectionProps) {
         <div className="flex flex-col gap-4 border-t border-line p-5 sm:p-6">
           {serving.length === 0 ? (
             <p className="rounded-xl border border-dashed border-line bg-surface/50 px-4 py-3 text-sm text-ink-muted">
-              No configuration serves this capability yet. Add a pre-configured
-              provider or a custom OpenAI-compatible endpoint below.
+              No configuration serves this capability yet. Pick a provider tag below.
             </p>
           ) : (
             serving.map((row) => (
@@ -1115,7 +1013,11 @@ function CapabilitySection(props: CapabilitySectionProps) {
               />
             ))
           )}
-          <AddProviderArea capability={section.capability} onCreated={props.onCreated} />
+          <AddProviderArea
+            capability={section.capability}
+            rows={props.rows}
+            onCreated={props.onCreated}
+          />
         </div>
       ) : null}
     </section>
@@ -1174,7 +1076,7 @@ function ConfigurationRowCard({
             {friendlyProviderName(row)}
           </span>
           <span className="rounded-full bg-surface px-2.5 py-1 text-xs text-ink-muted">
-            {row.providerType === "preset" ? "Pre-configured provider" : "Custom OpenAI-compatible"}
+            {row.providerType === "preset" ? "Preset" : "Custom endpoint"}
           </span>
           {row.baseUrl ? (
             <span className="max-w-full truncate rounded-full bg-surface px-2.5 py-1 text-xs text-ink-muted">
@@ -1307,7 +1209,7 @@ function ConfigurationRowCard({
         <span className={LABEL_CLASS}>API key</span>
         {!editingKey ? (
           <div className="mt-1.5 flex items-center gap-3">
-            <span className="text-sm text-ink-soft">Stored — write-only, never shown again (ADR-0005).</span>
+            <span className="text-sm text-ink-soft">Stored — write-only, never shown again.</span>
             <button type="button" onClick={() => { setKeyDraft(""); setEditingKey(true); }} className={GHOST_PILL}>
               Replace key
             </button>
@@ -1461,9 +1363,11 @@ function ProbeResultView({
 
 function AddProviderArea({
   capability,
+  rows,
   onCreated,
 }: {
   capability: Capability;
+  rows: ProviderConfigSummary[];
   onCreated: (created: ProviderConfigSummary) => void;
 }) {
   const [mode, setMode] = useState<"idle" | "preset" | "custom">("idle");
@@ -1476,10 +1380,18 @@ function AddProviderArea({
   const [pendingCreate, setPendingCreate] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
-  const presetsForCapability = useMemo(
-    () => PRESET_ADAPTERS.filter((preset) => preset.capabilities.includes(capability)),
-    [capability],
-  );
+  // Saved providers collapse: once a preset serves this capability it is
+  // removed from the tag list, so it can never be added twice.
+  const presetsForCapability = useMemo(() => {
+    const configured = new Set(
+      rows
+        .filter((row) => row.providerType === "preset" && row.capabilities[capability])
+        .map((row) => row.providerName),
+    );
+    return PRESET_ADAPTERS.filter(
+      (preset) => preset.capabilities.includes(capability) && !configured.has(preset.providerName),
+    );
+  }, [capability, rows]);
   const chosenPreset = presetName
     ? PRESET_ADAPTERS.find((p) => p.providerName === presetName) ?? null
     : null;
@@ -1584,41 +1496,36 @@ function AddProviderArea({
 
   const allowManual = mode === "custom" && list.state === "failed";
 
+  // One tag row, visible in both states: selecting a tag greys out the rest,
+  // and saved providers are filtered out of the list entirely.
+  const tagRow = (
+    <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Provider tags">
+      {presetsForCapability.map((preset) => {
+        const selected = mode === "preset" && presetName === preset.providerName;
+        return (
+          <ProviderTag
+            key={preset.providerName}
+            label={preset.displayName}
+            selected={selected}
+            dimmed={mode !== "idle" && !selected}
+            onClick={() => { setMode("preset"); setPresetName(preset.providerName); }}
+          />
+        );
+      })}
+      <ProviderTag
+        label="Custom"
+        selected={mode === "custom"}
+        dimmed={mode !== "idle" && mode !== "custom"}
+        onClick={() => setMode("custom")}
+      />
+    </div>
+  );
+
   if (mode === "idle") {
     return (
       <div className="rounded-2xl border border-line bg-raised/40 p-4 sm:p-5">
         <span className={LABEL_CLASS}>Add a provider for this capability</span>
-        <div className="mt-3 flex flex-col gap-3">
-          <div>
-            <p className="text-xs font-medium text-ink-soft">Pre-configured providers</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {presetsForCapability.map((preset) => (
-                <button
-                  key={preset.providerName}
-                  type="button"
-                  onClick={() => { setMode("preset"); setPresetName(preset.providerName); }}
-                  className="cursor-pointer rounded-full border border-line bg-surface px-4 py-2 text-sm text-ink-soft outline-none transition-colors hover:border-emerald-400/70 hover:text-ink focus-visible:ring-2 focus-visible:ring-emerald-400"
-                >
-                  <Plus className="mr-1.5 inline h-3.5 w-3.5" aria-hidden />
-                  {preset.displayName}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="text-xs font-medium text-ink-soft">Custom configuration</p>
-            <div className="mt-2">
-              <button
-                type="button"
-                onClick={() => setMode("custom")}
-                className="cursor-pointer rounded-full border border-line bg-surface px-4 py-2 text-sm text-ink-soft outline-none transition-colors hover:border-emerald-400/70 hover:text-ink focus-visible:ring-2 focus-visible:ring-emerald-400"
-              >
-                <Plus className="mr-1.5 inline h-3.5 w-3.5" aria-hidden />
-                Custom OpenAI-compatible endpoint
-              </button>
-            </div>
-          </div>
-        </div>
+        {tagRow}
       </div>
     );
   }
@@ -1634,8 +1541,9 @@ function AddProviderArea({
           Cancel
         </button>
       </div>
+      {tagRow}
 
-      <div className="mt-4 flex flex-col gap-4">
+      <div className="mt-4 flex flex-col gap-4 border-t border-line pt-4">
         {mode === "preset" && chosenPreset ? (
           <p className="rounded-xl bg-surface px-4 py-2.5 text-xs text-ink-muted">
             Base URL is the provider&apos;s documented endpoint

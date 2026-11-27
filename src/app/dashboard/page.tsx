@@ -5,11 +5,9 @@ import {
   listProviderConfigurations,
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
-import {
-  CapabilityStrip,
-  ConsoleBanner,
-} from "@/components/dashboard/CapabilityStrip";
+import { ConsoleBanner } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
+import { selectRuntime } from "@/lib/interview/runtime";
 
 // Opt out of instant-navigation validation so this segment is allowed to
 // block on the server while the auth guard (connection()-based) resolves —
@@ -74,15 +72,18 @@ async function DashboardContent() {
     sessionsFailed = true;
   }
 
+  // A candidate needs ONE runtime: a native realtime agent or the custom LLM
+  // pipeline. The scorer is independent and never gates launching (ADR-006).
+  const runtime = selectRuntime(configurations);
+
   return (
     <div className="flex flex-col gap-8 lg:gap-10">
       <ConsoleBanner
         configurations={configurations}
         readinessFailed={readinessFailed}
-      />
-      <CapabilityStrip
-        configurations={configurations}
-        readinessFailed={readinessFailed}
+        runtimeReady={!readinessFailed && runtime.ready}
+        runtimeMode={runtime.mode}
+        runtimeProvider={runtime.servingProvider}
       />
 
       <section aria-labelledby="recent-sessions-heading">

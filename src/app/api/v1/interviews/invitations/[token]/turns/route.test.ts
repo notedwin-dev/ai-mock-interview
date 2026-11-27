@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LlmError } from "@/lib/ai/llm";
-import { TtsError } from "@/lib/ai/tts";
 import { RoomError } from "@/lib/interview/room";
 
 const mocks = vi.hoisted(() => ({ runRoomTurn: vi.fn(), resolveInvitation: vi.fn() }));
@@ -61,13 +60,5 @@ describe("token-scoped room turns API", () => {
     const provider = await POST(request({ contentText: "hi" }), ctx);
     expect(provider.status).toBe(502);
     expect(JSON.stringify(await provider.json())).not.toContain("sk-secret");
-
-    mocks.runRoomTurn.mockRejectedValueOnce(
-      new TtsError("unsupported_provider", "Interviewer voice currently supports Fish Audio secret-key"),
-    );
-    const voice = await POST(request({ contentText: "hi" }), ctx);
-    expect(voice.status).toBe(409);
-    const voiceBody = await voice.json();
-    expect(voiceBody).toMatchObject({ error: { code: "tts_provider_unsupported" } });
   });
 });

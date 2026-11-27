@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { jsonError } from "@/lib/api/respond";
 import { AsrError, transcribeAudio } from "@/lib/ai/asr";
+import type { ProviderRoute } from "@/lib/providers/provider-route";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 
@@ -34,10 +35,12 @@ export async function POST(
     } catch {
       return jsonError(400, "invalid_input", "A valid audio recording is required.");
     }
-    // Buffer.from never throws on a base64 decode: malformed input decodes
-    // to the longest valid prefix (or zero bytes), which the length check
-    // below turns into the same typed 400.
-    const bytes = Buffer.from(body.audioBase64, "base64");
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(body.audioBase64, "base64");
+    } catch {
+      return jsonError(400, "invalid_input", "The audio recording is malformed.");
+    }
     if (bytes.length === 0) {
       return jsonError(400, "invalid_input", "The audio recording is empty.");
     }
@@ -52,15 +55,19 @@ export async function POST(
         "Voice input needs an enabled speech-recognition provider. Type your answer instead.",
       );
     }
+    const route: ProviderRoute = {
+      providerName: resolved.providerName,
+      providerType: resolved.providerType,
+      baseUrl: resolved.baseUrl,
+      modelId: resolved.modelId,
+      apiKey: resolved.apiKey,
+    };
 
     try {
-      const text = await transcribeAudio(resolved, new Uint8Array(bytes), body.mimeType);
+      const text = await transcribeAudio(route, new Uint8Array(bytes), body.mimeType);
       return Response.json({ text });
     } catch (error) {
       if (error instanceof AsrError) {
-        if (error.code === "unsupported_provider") {
-          return jsonError(409, "asr_provider_unsupported", error.message);
-        }
         return jsonError(
           error.code === "empty_transcript" ? 422 : 502,
           error.code === "empty_transcript" ? "no_speech" : "provider_failed",

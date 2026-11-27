@@ -55,7 +55,9 @@ export function errorResponse(error: unknown): Response {
     const status =
       error.code === "not_found"
         ? 404
-        : error.code === "config_exists" || error.code === "probe_failed"
+        : error.code === "config_exists" ||
+            error.code === "probe_failed" ||
+            error.code === "runtime_conflict"
           ? 409
           : 400; // missing_credential / invalid_base_url / capability_not_supported / unknown_preset / reserved_preset_name / invalid_input
     return jsonError(status, error.code, error.message);
