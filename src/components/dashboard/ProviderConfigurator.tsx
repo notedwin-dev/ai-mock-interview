@@ -456,6 +456,17 @@ export function ProviderConfigurator({
 
   /** Owner decision 2026-11-24: pick which saved config is ACTIVE per capability. */
   async function setActive(row: ProviderConfigSummary, capability: Capability) {
+    // A new attempt supersedes every failed activation for this capability,
+    // including ones keyed to a previously selected provider; errors for
+    // other capabilities stay visible.
+    setActionError((current) => {
+      const next: Record<string, ApiError> = {};
+      const suffix = `:active:${capability}`;
+      for (const [key, error] of Object.entries(current)) {
+        if (!key.endsWith(suffix)) next[key] = error;
+      }
+      return next;
+    });
     const key = `${row.userProviderConfigurationId}:active:${capability}`;
     const error = await runAction(key, async () => {
       const response = await fetch(
@@ -527,12 +538,12 @@ export function ProviderConfigurator({
   }
 
   // Count only rows that cannot serve the selected view. A mixed row still
-  // supplies its custom cards (LLM/ASR/TTS); a scorer-only row can be used for
-  // reports while a realtime session runs, so neither is "inactive".
+  // supplies its custom cards (LLM/ASR/TTS); a scorer-only row is usable for
+  // reports in either mode, so it is never "inactive".
   const inactiveCount = rows.filter((row) =>
     mode === "realtime"
       ? !row.capabilities.realtime && !row.capabilities.scorer
-      : !(row.capabilities.llm || row.capabilities.asr || row.capabilities.tts),
+      : !(row.capabilities.llm || row.capabilities.asr || row.capabilities.tts || row.capabilities.scorer),
   ).length;
 
   if (mode === null) {

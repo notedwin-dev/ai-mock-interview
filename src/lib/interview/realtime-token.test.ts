@@ -251,7 +251,7 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
     expect((error as RealtimeTokenError).status).toBe(429);
   });
 
-  it("maps other non-2xx to a sanitized provider error that does not echo the body", async () => {
+  it("maps other non-2xx to a generic provider error that does not echo the body", async () => {
     const fetchImpl = mockFetch(
       jsonResponse(500, { message: "internal error sk_leaked_from_body should not survive" }),
       [],
@@ -261,8 +261,32 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
     );
     expect((error as RealtimeTokenError).errorCode).toBe("provider_error");
     expect(String((error as Error).message)).not.toContain("sk_leaked_from_body");
-    // Redaction rule: anything key-shaped is replaced, message is truncated.
-    expect(String((error as Error).message)).toContain("[redacted]");
+    // No provider text at all: the detail is a fixed, generic message.
+    expect(String((error as Error).message)).toBe(
+      "The provider rejected the realtime session setup.",
+    );
+  });
+
+  it("never echoes a non-sk_ key from a provider error (REDACTED-REPLY regression)", async () => {
+    // The configuration accepts arbitrary non-empty keys, so a key echoed by
+    // the provider need not match an sk_ pattern. No prefix-specific redaction
+    // is sufficient — the whole detail must be generic.
+    const echoedKey = "el_9f8e7d6c5b4a3210";
+    const fetchImpl = mockFetch(
+      jsonResponse(500, { message: `upstream failure for key ${echoedKey}` }),
+      [],
+    );
+    const error = await createRealtimeToken(elevenRoute, { fetchImpl }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(RealtimeTokenError);
+    const typed = error as RealtimeTokenError;
+    expect(typed.errorCode).toBe("provider_error");
+    expect(typed.status).toBe(500);
+    expect(typed.detail).toBe("The provider rejected the realtime session setup.");
+    expect(typed.message).toBe("The provider rejected the realtime session setup.");
+    expect(JSON.stringify(typed)).not.toContain(echoedKey);
+    expect(String(typed.stack ?? "")).not.toContain(echoedKey);
   });
 
   it("fails closed on an empty or missing client secret value", async () => {

@@ -225,6 +225,55 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("invalid");
   });
 
+  it("never leaks a non-sk_ key echoed by the provider into the probe result", async () => {
+    // A non-typed provider error can carry an arbitrary key shape (the config
+    // accepts any non-empty key); the probe detail must stay generic.
+    const echoedKey = "el_1a2b3c4d5e6f7089";
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
+      jsonFetch([]),
+      {
+        realtimeToken: async () => {
+          throw new Error(`provider rejected key ${echoedKey}`);
+        },
+      },
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "provider_error",
+      detail: "The provider rejected the realtime session setup.",
+    });
+    expect(JSON.stringify(result)).not.toContain(echoedKey);
+  });
+
+  it("never leaks a non-sk_ key echoed by the ElevenLabs minter into the probe result", async () => {
+    // End-to-end: the typed RealtimeTokenError from the real minter feeds the
+    // probe's classification, so both surfaces must omit an echoed key.
+    const echoedKey = "el_deadbeefcafebabe";
+    const fetchImpl = jsonFetch([
+      {
+        match: /api\.elevenlabs\.io\/v1\/convai\/realtime\/client_secrets/,
+        status: 500,
+        body: { message: `upstream failure for key ${echoedKey}` },
+      },
+    ]);
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { realtime: { modelId: "eleven_realtime_v1_mini" } },
+      }),
+      fetchImpl,
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "provider_error",
+      detail: "The provider rejected the realtime session setup.",
+    });
+    expect(JSON.stringify(result)).not.toContain(echoedKey);
+  });
+
   it("explains a rejected realtime API key instead of hiding the provider reason", async () => {
     const result = await runProbe(
       configRow({ capabilitiesJson: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } } }),
@@ -753,7 +802,7 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("valid");
   });
 
-  it("probes the google TTS preset on the native interactions wire with the audio output format", async () => {
+  it("rejects the google TTS preset because the interview runtime has no Google TTS wire", async () => {
     const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
     const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -786,28 +835,15 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       captureFetch,
     );
 
-    // No /audio/speech, no chat wire: Gemini TTS runs on the Interactions API
-    // (x-goog-api-key) with the exact configured model id preserved.
-    expect(seen.map((call) => call.url)).toEqual([
-      "https://generativelanguage.googleapis.com/v1beta/models",
-      "https://generativelanguage.googleapis.com/v1beta/interactions",
-    ]);
-    const ping = seen[1]!;
-    expect(ping.headers.get("x-goog-api-key")).toBe("sk-plaintext-secret");
-    const parsed = JSON.parse(ping.body!) as {
-      model: string;
-      input: Array<{ type: string; content: Array<{ type: string; text: string }> }>;
-      response_format: { type: string };
-    };
-    expect(parsed.model).toBe("gemini-3.8-flash-tts");
-    expect(parsed.input[0]!.content[0]!.text).toBe("ping"); // synthetic ping only
-    expect(parsed.response_format).toEqual({ type: "audio" });
+    // Fail closed before any provider call: settings cannot save a TTS config
+    // the room cannot serve, and a legacy row is reported as unsupported.
+    expect(seen).toEqual([]);
     expect(result.capabilities[0]).toMatchObject({
       capability: "tts",
-      status: "validated",
-      selectedModelAccepted: true,
+      status: "failed",
+      errorCode: "model_unsupported",
     });
-    expect(result.credentialStatus).toBe("valid");
+    expect(result.credentialStatus).toBe("invalid");
   });
 
   it("probes the anthropic preset on the native Messages wire (x-api-key + anthropic-version)", async () => {

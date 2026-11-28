@@ -43,6 +43,8 @@ const FINALIZE_TIMEOUT_MS = 2000;
 const CLIENT_CLOSE_GRACE_MS = 5000;
 const MAX_AUDIO_BASE64_CHARS = 128 * 1024;
 let arrivalCounter = 0;
+/** Serializes POST continuations so validation cannot reorder PCM windows. */
+let arrivalTail: Promise<void> = Promise.resolve();
 
 const audioPostSchema = z.object({
   streamId: z.uuid(),
@@ -95,17 +97,31 @@ function reap() {
 /** Relay queued PCM in capture (arrival) order, even across overlapping POSTs. */
 function drain(entry: StreamSession): Promise<void> {
   if (entry.drainInFlight) return entry.drainInFlight;
-  const run = (async () => {
+  // Reserve the slot before the loop so a reentrant caller sees it in flight.
+  let settle!: () => void;
+  let fail!: (error: unknown) => void;
+  const run = new Promise<void>((resolve, reject) => {
+    settle = () => resolve();
+    fail = (error) => reject(error);
+  });
+  entry.drainInFlight = run;
+  try {
+    // The loop has no await: everything queued up to now is sent in this tick.
     while (entry.queued.size > 0) {
       const sequence = Math.min(...entry.queued.keys());
       const audio = entry.queued.get(sequence)!;
       entry.queued.delete(sequence);
       if (streams.get(entry.id) === entry) entry.session.sendAudio(audio);
     }
-  })().finally(() => {
-    if (entry.drainInFlight === run) entry.drainInFlight = null;
-  });
-  entry.drainInFlight = run;
+    settle();
+  } catch (error) {
+    fail(error);
+  } finally {
+    // Release the slot synchronously, not in a microtask: a window queued by a
+    // later POST continuation must start a fresh drain, not await a settled
+    // one and go unsent.
+    entry.drainInFlight = null;
+  }
   return run;
 }
 
@@ -209,6 +225,12 @@ export async function GET(
           queued: new Map(),
           drainInFlight: null,
         });
+        // An already-aborted signal never fires the listener, so close the
+        // bridge explicitly instead of leaving it to occupy a stream slot.
+        if (request.signal.aborted) {
+          cleanup(id);
+          return;
+        }
         request.signal.addEventListener("abort", onAbort, { once: true });
       },
       cancel() {
@@ -236,15 +258,23 @@ export async function POST(
   request: Request,
   ctx: RouteContext<"/api/v1/interviews/invitations/[token]/asr/stream">,
 ): Promise<Response> {
-  // Captured synchronously before any await: this is the order the windows
-  // arrived at the server, which is the order they must reach the provider.
+  // Reserve this request's slot synchronously, before any await, then chain it
+  // behind earlier requests. A faster validation must not overtake a window
+  // that arrived first; rejected requests release their successor as well.
   const sequence = ++arrivalCounter;
+  const previous = arrivalTail;
+  let release!: () => void;
+  arrivalTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   try {
     const { token } = await ctx.params;
     const interview = await resolveToken(token);
     if (!interview) return jsonError(404, "invitation_not_found", "This interview link is not available.");
     const parsed = audioPostSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return jsonError(400, "invalid_input", "Invalid stream or audio payload.");
+    // Wait for every earlier window to be sent or discarded before forwarding.
+    await previous;
     const entry = streams.get(parsed.data.streamId);
     if (!entry || entry.sessionId !== interview.sessionId) {
       return jsonError(404, "invitation_not_found", "This interview link is not available.");
@@ -257,6 +287,9 @@ export async function POST(
     return Response.json({ ok: true });
   } catch {
     return jsonError(500, "internal_error", "Something went wrong. Try again.");
+  } finally {
+    // Advance past rejected requests so they never block or reach the provider.
+    release();
   }
 }
 

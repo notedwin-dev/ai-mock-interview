@@ -35,6 +35,6 @@ COPY --from=build --chown=appuser:appuser /app /app
 USER appuser
 ENV NODE_ENV=production
 
-# LiveKit Cloud requires a fixed startup command (no wrapper script) using the
-# `start` subcommand; without it the CLI prints usage and exits (CrashLoop).
-CMD ["node", "scripts/livekit-agent.mjs", "start"]
+# LiveKit Cloud requires a fixed startup command. The pnpm script supplies the
+# single `start` subcommand; invoking the script directly would print usage.
+CMD ["pnpm", "agent"]

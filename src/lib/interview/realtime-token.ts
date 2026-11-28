@@ -129,10 +129,10 @@ export type RealtimeTokenErrorCode =
   | "provider_error";
 
 /**
- * Typed realtime setup failure. `detail` is a sanitized, user-safe reason: it
- * never carries credential material (no xi-api-key value, no full provider
- * response body). The message wording is chosen so a caller that classifies
- * by message (e.g. the capability probe) maps it to the right bucket.
+ * Typed realtime setup failure. `detail` is a fixed, generic, user-safe reason:
+ * it never echoes provider response text, which may contain a credential of
+ * any shape (not just `sk_`). The `errorCode`/`status` fields carry the
+ * classification, so callers never need to parse the message.
  */
 export class RealtimeTokenError extends Error {
   readonly providerName: string;
@@ -154,23 +154,6 @@ export class RealtimeTokenError extends Error {
     this.status = status;
     this.detail = detail;
   }
-}
-
-/**
- * Sanitizes a provider error body down to a short, safe reason: extracts a
- * provider `message`/`error` string, redacts anything that looks like an
- * ElevenLabs key, and truncates. The raw body is never returned.
- */
-function sanitizedProviderReason(body: string): string {
-  const providerMessage = (
-    body.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1] ??
-    body.match(/"error"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1] ??
-    ""
-  )
-    // ElevenLabs key shape: sk_ + long token.
-    .replace(/sk_[0-9A-Za-z_-]{8,}/g, "[redacted]")
-    .slice(0, 300);
-  return providerMessage;
 }
 
 /**
@@ -239,11 +222,13 @@ async function mintElevenLabsClientSecret(
         response.status,
       );
     }
+    // Generic message only: a provider error body can echo a credential of
+    // any shape (not just `sk_`), so no part of `text` is ever surfaced in a
+    // result, a typed error or the capability probe's output.
     throw new RealtimeTokenError(
       route.providerName,
       "provider_error",
-      sanitizedProviderReason(text) ||
-        "The provider rejected the realtime session setup.",
+      "The provider rejected the realtime session setup.",
       response.status,
     );
   }

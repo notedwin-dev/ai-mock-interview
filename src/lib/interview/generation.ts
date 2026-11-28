@@ -186,9 +186,14 @@ export async function completeGeneration(id: string, workerToken: string, input:
   }
 
   try {
+    // The generation id is stable across retries, so pass it as the creation
+    // idempotency key. Even if the claim below is released after a partial
+    // failure, a retry replays the same session instead of creating a second
+    // one — the one-session guarantee is enforced at the service layer too.
     const session = await createInterviewFromAgentConfig(record.userId, {
       config,
       missingFields: [],
+      idempotencyKey: id,
     });
     await db.interviewGeneration.update({
       where: { id },
@@ -252,7 +257,7 @@ export async function confirmGeneration(
   if (!category) {
     throw new GenerationError("invalid_state", "The selected interview category is not available.");
   }
-  await db.$transaction(async (tx) => {
+  const replay = await db.$transaction(async (tx) => {
     // Claim the transition under the same transaction as the session write:
     // only one request can move completed -> confirmed, so a concurrent retry
     // can never write the candidate-reviewed session twice.
@@ -261,6 +266,20 @@ export async function confirmGeneration(
       data: { configJson: config as unknown as never, status: "confirmed" },
     });
     if (claimed.count === 0) {
+      // A concurrent request may have won the claim between our first read and
+      // this transaction. Re-read inside the transaction: a retry carrying the
+      // same normalized configuration replays the stored invitation, while a
+      // different config (or an unclaimable state) keeps failing closed.
+      const confirmed = await tx.interviewGeneration.findFirst({ where: { id, userId } });
+      if (
+        confirmed?.status === "confirmed" &&
+        confirmed.sessionId &&
+        confirmed.invitationPath &&
+        confirmed.configJson != null &&
+        stableJson(confirmed.configJson) === stableJson(config)
+      ) {
+        return { invitationPath: confirmed.invitationPath, sessionId: confirmed.sessionId };
+      }
       throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
     }
     await tx.interviewSession.update({
@@ -277,6 +296,7 @@ export async function confirmGeneration(
         categoryNameSnapshot: category.categoryName,
       },
     });
+    return null;
   });
-  return { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
+  return replay ?? { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
 }

@@ -142,7 +142,8 @@ export async function runGeneratorJob(ctx, meta) {
       } catch (error) {
         console.error("generation failed", error instanceof Error ? error.message : "unknown");
         if (!completed) await say("I could not save your interview. Please try again.");
-        publish.done();
+        // Do not signal completion on a failed save: the room would disconnect
+        // before the candidate can retry. Only the success path publishes done.
       }
       if (!completed) return { ok: false };
       await new Promise((resolve) => setTimeout(resolve, 2000));

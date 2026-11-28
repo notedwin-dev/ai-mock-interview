@@ -80,19 +80,27 @@ export function VoiceGenerationRoom() {
   useEffect(() => {
     // Each effect setup owns its startup. Strict Mode's setup-cleanup-setup
     // replays it, and cleanup invalidates this flag so work started by a dead
-    // setup can never attach a room to the live component. Request
-    // deduplication lives server-side, not in a module-level gate.
+    // setup can never attach a room to the live component. A cancelled setup
+    // sends no request; preventing duplicates once a POST is in flight is a
+    // separate idempotency/server-reuse decision, not guaranteed here.
     let active = true;
     roomRef.current = null;
     startedAtRef.current = Date.now();
 
     async function start() {
       try {
+        // Cleanup may have run before this deferred setup started: do not
+        // create an orphaned generation for a component that is already gone.
+        if (!active) return;
         const response = await fetch("/api/v1/interviews/generation", { method: "POST" });
         if (!active) return;
         const body = (await response.json().catch(() => null)) as
           | { id?: string; url?: string; token?: string; error?: { message?: string } }
           | null;
+        // Cleanup may have finished during the body read; a stale setup must
+        // not create or take ownership of a room (Leave/unmount would then
+        // target the wrong room and leave the active one publishing).
+        if (!active) return;
         if (!response.ok || !body?.id || !body?.url || !body?.token) {
           if (!active) return;
           setError(body?.error?.message ?? "Voice generation is not available right now.");
@@ -327,9 +335,12 @@ export function VoiceGenerationRoom() {
   }
 
   function repeatLast() {
-    // Prefer the planner's latest spoken line; persisted captions may only
-    // contain candidate answers or lag behind the live data channel.
-    const text = lastPlannerCaption ?? generation?.caption?.text;
+    // Repeat planner speech only. The persisted caption may be a candidate
+    // answer, and the live transcription stream can hold the only planner
+    // line before persistence catches up; never fall back to candidate text.
+    const streamText = liveCaption?.speaker === "agent" ? liveCaption.text : null;
+    const persisted = generation?.caption?.speaker === "agent" ? generation.caption.text : null;
+    const text = lastPlannerCaption ?? streamText ?? persisted;
     if (!text || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.cancel();

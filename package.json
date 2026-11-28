@@ -17,7 +17,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "agent": "node scripts/livekit-agent.mjs",
+    "agent": "node scripts/livekit-agent.mjs start",
     "agent:deploy": "docker build -f agents/Dockerfile -t aimis-agent . && lk agent deploy --image aimis-agent"
   },
   "dependencies": {

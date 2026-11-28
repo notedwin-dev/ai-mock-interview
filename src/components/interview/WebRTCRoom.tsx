@@ -22,6 +22,9 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  */
 type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
 
+/** Bound the whole transcript request, including the body read. */
+const TRANSCRIPT_POLL_TIMEOUT_MS = 10_000;
+
 /**
  * MDN: MediaStreamTrack.enabled is the actual mute switch — setting it to
  * false makes the track emit silence. LiveKit's setMicrophoneEnabled controls
@@ -88,20 +91,24 @@ export function WebRTCRoom({
     if (transcriptInFlightRef.current) return;
     transcriptInFlightRef.current = true;
     const request = ++transcriptRequestRef.current;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TRANSCRIPT_POLL_TIMEOUT_MS);
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: controller.signal },
       );
       if (!response.ok) return;
       const body = (await response.json()) as { messages: TranscriptEntry[] };
       // Keep the stale-response guard after parsing so older data can never
-      // replace messages already applied by a newer request.
+      // replace messages already applied by a newer request. An aborted read
+      // throws above and releases the slot in finally for the next poll.
       if (request !== transcriptRequestRef.current) return;
       setMessages(body.messages ?? []);
     } catch {
-      // The next poll retries; the call itself is unaffected.
+      // Network error or deadline expiry: the next poll retries.
     } finally {
+      clearTimeout(timeout);
       transcriptInFlightRef.current = false;
     }
   }, [token]);

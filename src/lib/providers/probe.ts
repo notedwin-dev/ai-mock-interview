@@ -205,8 +205,9 @@ async function classifyProbeFailure(
  * Native realtime token failures are typed (RealtimeTokenError). Classify them
  * by `errorCode`/`status` first so a "rate-limited" 429 or an auth rejection is
  * not misread by the message-only fallback below. That fallback stays for
- * provider SDK errors whose only signal is an embedded HTTP response. No
- * credential material is ever echoed.
+ * provider SDK errors whose only signal is an embedded HTTP response. Every
+ * returned `detail` is a fixed, generic string: raw provider text is never
+ * echoed, because it may contain a credential of any shape (not just `sk_`).
  */
 function describeRealtimeError(error: unknown): {
   errorCode: ProbeErrorCode;
@@ -240,18 +241,20 @@ function describeRealtimeError(error: unknown): {
         return { errorCode: "model_unsupported", detail: error.detail, endpointReachable: false };
       case "provider_error":
       default:
-        return { errorCode: "provider_error", detail: error.detail, endpointReachable };
+        return {
+          errorCode: "provider_error",
+          detail: "The provider rejected the realtime session setup.",
+          endpointReachable,
+        };
     }
   }
   const raw = error instanceof Error ? error.message : String(error);
   const lower = raw.toLowerCase();
   const statusMatch = raw.match(/\b([45]\d{2})\b/);
   const status = statusMatch ? Number(statusMatch[1]) : null;
-  const providerMessage = raw.match(/"message"\s*:\s*"([^"]+)"/)?.[1];
-  const sanitized = (providerMessage ?? "")
-    .replace(/AIza[0-9A-Za-z_-]{10,}/g, "[redacted]")
-    .replace(/sk-[0-9A-Za-z_-]{8,}/g, "[redacted]")
-    .slice(0, 300);
+  // `raw` is inspected only for the HTTP-status taxonomy below; none of it is
+  // returned as a detail, so a key echoed by the provider cannot reach a
+  // probe result (whatever its prefix/shape).
 
   if (/api[ _]?key not valid|api_key_invalid|invalid api key|unauthorized|permission_denied|authentication/.test(lower)) {
     return {
@@ -276,7 +279,7 @@ function describeRealtimeError(error: unknown): {
   }
   return {
     errorCode: "provider_error",
-    detail: sanitized || "The provider rejected the realtime session setup.",
+    detail: "The provider rejected the realtime session setup.",
     endpointReachable: status !== null,
   };
 }
@@ -397,6 +400,22 @@ export async function probeProviderConfiguration(
 
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
+    // A Google preset TTS row cannot be served by the interview runtime; fail
+    // closed here too instead of validating a configuration that would error
+    // on every answer. Existing saved rows are therefore reported as failed.
+    if (capability === "tts" && row.providerType === "preset" && row.providerName === "google") {
+      results.push({
+        capability,
+        status: "failed",
+        endpointReachable: false,
+        credentialValid: false,
+        modelsDiscovered: null,
+        selectedModelAccepted: null,
+        errorCode: "model_unsupported",
+        detail: "Google TTS is not supported by the interview runtime.",
+      });
+      continue;
+    }
 
     // Native realtime sessions (Gemini Live, OpenAI Realtime) negotiate the
     // provider's own realtime protocol — they must never be driven over the

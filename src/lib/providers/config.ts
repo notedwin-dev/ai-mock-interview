@@ -185,7 +185,11 @@ export function validateProviderRules(
   if (input.providerType === "preset") {
     const preset = getPresetAdapter(input.providerName)!;
     for (const capability of Object.keys(input.capabilities)) {
-      if (!preset.capabilities.includes(capability as Capability)) {
+      // The interview runtime has no Google TTS wire (SUPPORTED_TTS_PRESETS
+      // omits it). Reject the setting here rather than saving a configuration
+      // the room would reject on every answer.
+      const googleTtsUnsupported = input.providerName === "google" && capability === "tts";
+      if (googleTtsUnsupported || !preset.capabilities.includes(capability as Capability)) {
         throw new ProviderConfigError(
           "capability_not_supported",
           `Preset "${preset.displayName}" does not support the ${capability} capability.`,
@@ -663,10 +667,12 @@ export async function resolveForOutboundCall(
   }
 
   // Deterministic when several enabled configurations serve the same
-  // capability: a validated connection wins over an unvalidated/dummy row,
-  // then the most recently updated wins within the same status, so switching
-  // modes picks up the latest configuration the candidate saved. Our earlier
-  // "oldest wins" rule is superseded by the active-mode migration.
+  // capability: a row dedicated to just this capability was explicitly
+  // activated for it and takes precedence over a mixed row that may have been
+  // retained only to keep another capability (e.g. TTS) available. Within that
+  // pool a validated connection wins over an unvalidated/dummy row, then the
+  // most recently updated wins within the same status. Our earlier "oldest
+  // wins" rule is superseded by the active-mode migration.
   const activeMode = await getActiveRuntimeMode(parsedUser);
   const rows = await db.userProviderConfiguration.findMany({
     where: { userId: parsedUser, isEnabled: true },
@@ -689,11 +695,26 @@ export async function resolveForOutboundCall(
     }
     return true;
   });
+  // A mixed row kept enabled for another capability must not outrank the row
+  // the candidate explicitly selected for this one. When no dedicated row
+  // serves the capability, fall back to the existing mixed-row pool.
+  const dedicated = serving.filter((candidate) => {
+    const caps = capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
+    // Scorer gates reports rather than a runtime call, so it does not make a
+    // row mixed for routing purposes.
+    const runtimeCaps = Object.keys(caps).filter((key) => key !== "scorer");
+    return (
+      capability in caps &&
+      runtimeCaps.length === (capability === "scorer" ? 0 : 1) &&
+      (capability === "scorer" || runtimeCaps[0] === capability)
+    );
+  });
+  const pool = dedicated.length > 0 ? dedicated : serving;
   // Owner decision: realtime never falls back to an unvalidated credential.
   const row =
     capability === "realtime"
-      ? (serving.find((candidate) => candidate.credentialStatus === "valid") ?? null)
-      : (serving.find((candidate) => candidate.credentialStatus === "valid") ?? serving[0]);
+      ? (pool.find((candidate) => candidate.credentialStatus === "valid") ?? null)
+      : (pool.find((candidate) => candidate.credentialStatus === "valid") ?? pool[0]);
   if (!row) {
     throw new ProviderConfigError(
       "not_found",
@@ -870,10 +891,23 @@ export async function setActiveCapability(
     // switch must not silently remove another capability's selection.
     const candidates = await tx.userProviderConfiguration.findMany({
       where: { userId: parsedUser, isEnabled: true },
-      select: { userProviderConfigurationId: true, capabilitiesJson: true },
+      select: {
+        userProviderConfigurationId: true,
+        capabilitiesJson: true,
+        credentialStatus: true,
+      },
     });
     const servedBy = (candidate: { capabilitiesJson: unknown }): CapabilitiesJson =>
       capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
+    // Count coverage only when the outbound resolver would actually select the
+    // kept row for that capability: realtime is valid-only, while the other
+    // capabilities fall back to any enabled serving row. An invalid realtime
+    // row must not justify disabling the shared row that is the working route.
+    const covers = (
+      kept: { capabilitiesJson: unknown; credentialStatus: string },
+      other: Capability,
+    ): boolean =>
+      other in servedBy(kept) && (other !== "realtime" || kept.credentialStatus === "valid");
     // The chosen row plus rows that do not serve this capability are never
     // disabled; only these can keep another capability available.
     const staying = [
@@ -891,7 +925,7 @@ export async function setActiveCapability(
             !staying.some(
               (kept) =>
                 kept.userProviderConfigurationId !== candidate.userProviderConfigurationId &&
-                other in servedBy(kept),
+                covers(kept, other as Capability),
             ),
         );
       })

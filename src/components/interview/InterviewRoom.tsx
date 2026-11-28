@@ -26,6 +26,29 @@ function messageKindLabel(message: TranscriptEntry): string {
   return "Interviewer";
 }
 
+/** Turn response body shared by the typed, batch and live answer paths. */
+type TurnBody = {
+  messages?: TranscriptEntry[];
+  error?: { message: string };
+  endCall?: boolean;
+  audioBase64?: string | null;
+};
+
+/** A live answer whose delivery failed, kept with its own idempotency key. */
+type LiveRetry = { text: string; key: string; generation: number };
+
+/** Bounds a teardown wait so mic-off cannot hang on a stalled request. */
+function withDeadline<T>(work: Promise<T> | undefined, ms: number): Promise<T | undefined> {
+  if (!work) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      () => { clearTimeout(timer); resolve(undefined); },
+    );
+  });
+}
+
 export function InterviewRoom({ token, interview }: { token: string; interview: InvitationView }) {
   const [messages, setMessages] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
@@ -59,10 +82,8 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const recordingGenerationRef = useRef(0);
   // The recorder whose onstop must NOT flush a final window (end/unmount).
   const cancelledRecorderRef = useRef<MediaRecorder | null>(null);
-  // A transcription may only replace the draft it started from, and only the
-  // newest request may apply its result.
+  // A transcription may only replace the draft it started from.
   const draftRevisionRef = useRef(0);
-  const transcriptionRequestRef = useRef(0);
   // Monotonic applied-turn counter: a slow initial transcript load may not
   // overwrite messages once a turn has been applied.
   const appliedTurnsRef = useRef(0);
@@ -70,8 +91,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   // their own key so a live transcript cannot invalidate a pending typed retry.
   const pendingKeyRef = useRef<{ text: string; key: string } | null>(null);
   const voiceKeyRef = useRef<{ text: string; key: string } | null>(null);
-  // A live answer that failed to reach the server is kept for an explicit retry.
-  const [liveRetry, setLiveRetry] = useState<{ text: string; key: string; generation: number } | null>(null);
+  // Each live answer that failed to reach the server is kept with its own key
+  // so a second failure cannot hide or overwrite the first one's retry.
+  const [liveRetries, setLiveRetries] = useState<LiveRetry[]>([]);
   // Playback callbacks are token-guarded so an older reply cannot change the
   // state of a newer one.
   const playbackTokenRef = useRef(0);
@@ -82,6 +104,18 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const streamModeRef = useRef(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamIdRef = useRef<string | null>(null);
+  // A typed answer owns the "thinking" lock until its own request settles;
+  // a voice reply must not unlock the form early.
+  const typedRequestPendingRef = useRef(false);
+  // Voice results are applied in capture order, never in response order.
+  const turnSequenceRef = useRef(0);
+  const nextTurnSequenceRef = useRef(0);
+  // A null generation marks a typed turn, which must survive mic-session changes.
+  const pendingTurnResultsRef = useRef(new Map<number, { generation: number | null; body: TurnBody | null }>());
+  // Reconnects emit a new stream id; queued PCM posts must be retargeted to it.
+  const bridgeRetargetRef = useRef<((streamId: string) => void) | null>(null);
+  // Last live-bridge failure, reported when the configured bridge cannot start.
+  const bridgeErrorRef = useRef<string | null>(null);
 
   /** Releases a track; an already-ended track is a no-op. */
   const stopCaptureTrack = useCallback((track: MediaStreamTrack) => {
@@ -97,6 +131,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     cancelledRecorderRef.current = cancelled ? recorderRef.current : null;
     // Bump BEFORE stopping, for a recorder that has no onstop installed yet.
     recordingGenerationRef.current += 1;
+    // Cancelled captures still settle their ordered slots as no-ops, so the
+    // queue keeps advancing without applying their transcript.
+    bridgeRetargetRef.current = null;
     const recorder = recorderRef.current;
     recorderRef.current = null;
     if (recorder && recorder.state === "recording") {
@@ -108,7 +145,7 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     }
     if (streamModeRef.current) {
       const id = streamIdRef.current;
-      (streamRef.current as (MediaStream & { __stopRelay?: () => void }) | null)?.__stopRelay?.();
+      void (streamRef.current as (MediaStream & { __stopRelay?: () => Promise<void> }) | null)?.__stopRelay?.();
       // Ask the server to finalize before closing SSE; the provider's last
       // transcript may still be in flight. End/unmount use immediate teardown
       // rather than the mic-off grace wait.
@@ -170,13 +207,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     return key;
   }
 
-  /** Applies a turn result to the transcript, playback and lifecycle. */
-  function applyTurnResult(body: {
-    messages?: TranscriptEntry[];
-    error?: { message: string };
-    endCall?: boolean;
-    audioBase64?: string | null;
-  }): boolean {
+  /** Applies a turn result to the transcript, playback and lifecycle.
+   *  State transitions belong to the caller that owns the request. */
+  function applyTurnResult(body: TurnBody): boolean {
     appliedTurnsRef.current += 1;
     setMessages(body.messages ?? []);
     draftRevisionRef.current += 1;
@@ -201,7 +234,6 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         // Autoplay blocked — the transcript reply is still visible.
       }
     }
-    setState("listening");
     if (body.endCall) {
       releaseRecording(true);
       setEnded(true);
@@ -209,10 +241,32 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     return true;
   }
 
+  /** Applies voice results in capture order. A slow later reply cannot
+   *  overwrite the transcript of an earlier one, and results from a cancelled
+   *  mic session are discarded instead of blocking the queue. */
+  function applyOrderedTurn(sequence: number, generation: number | null, body: TurnBody | null) {
+    const pending = pendingTurnResultsRef.current;
+    pending.set(sequence, { generation, body });
+    // Consume every settled slot in order. A cancelled mic session's slots are
+    // skipped without applying their transcript, but still advance the queue.
+    while (pending.has(nextTurnSequenceRef.current)) {
+      const next = pending.get(nextTurnSequenceRef.current);
+      pending.delete(nextTurnSequenceRef.current);
+      nextTurnSequenceRef.current += 1;
+      if (!next?.body || ended) continue;
+      if (next.generation !== null && next.generation !== recordingGenerationRef.current) continue;
+      applyTurnResult(next.body);
+      // A typed request keeps the form locked until its own response arrives.
+      if (!typedRequestPendingRef.current) setState("listening");
+    }
+  }
+
   /** Adds a live-answer delivery failure to the retryable state. */
   function keepLiveAnswerForRetry(contentText: string, key: string, generation: number, message: string) {
     setVoiceNotice(message);
-    setLiveRetry({ text: contentText, key, generation });
+    setLiveRetries((current) => current.some((item) => item.key === key)
+      ? current
+      : [...current, { text: contentText, key, generation }]);
   }
 
   async function send(event: FormEvent) {
@@ -220,24 +274,24 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     const contentText = draft.trim();
     if (!contentText || state === "thinking") return;
     setError(null);
+    typedRequestPendingRef.current = true;
     setState("thinking");
     const idempotencyKey = idempotencyKeyFor(contentText);
+    // Typed turns share the capture-order queue with voice turns so a slow
+    // earlier voice reply cannot overwrite a newer typed answer.
+    const sequence = ++turnSequenceRef.current;
     try {
       const response = await fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contentText, idempotencyKey }),
       });
-      const body = (await response.json()) as {
-        messages?: TranscriptEntry[];
-        error?: { message: string };
-        endCall?: boolean;
-        audioBase64?: string | null;
-      };
+      const body = (await response.json()) as TurnBody;
       if (!response.ok) {
         // The draft and its key are preserved so the candidate can retry the
         // exact same answer (the server deduplicates it).
         setError(body.error?.message ?? "The interviewer could not respond.");
+        applyOrderedTurn(sequence, null, null);
         setState("listening");
         return;
       }
@@ -245,10 +299,16 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       // The typed operation succeeded: its retry key is no longer needed.
       pendingKeyRef.current = null;
       setDraft("");
-      applyTurnResult(body);
+      applyOrderedTurn(sequence, null, body);
+      setState("listening");
     } catch {
       setError("The request could not reach the server.");
+      applyOrderedTurn(sequence, null, null);
       setState("listening");
+    } finally {
+      // Only THIS request releases the typed-form lock; a concurrent voice
+      // turn cannot unlock the form while the typed answer is still pending.
+      typedRequestPendingRef.current = false;
     }
   }
 
@@ -260,8 +320,12 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
    */
   async function submitWindow(blob: Blob, recorderMime: string) {
     const generation = recordingGenerationRef.current;
-    const request = ++transcriptionRequestRef.current;
-    const isCurrent = () => generation === recordingGenerationRef.current && request === transcriptionRequestRef.current && !ended;
+    // Sequence at capture time: responses are applied in this order, not in
+    // the order the provider answers them.
+    const sequence = ++turnSequenceRef.current;
+    const isCurrent = () => generation === recordingGenerationRef.current && !ended;
+    // A cancelled window still settles its ordered slot as a no-op.
+    const settle = () => applyOrderedTurn(sequence, generation, null);
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
       let binary = "";
@@ -279,15 +343,19 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           }),
         },
       );
-      if (!isCurrent()) return;
+      if (!isCurrent()) { settle(); return; }
       const asrBody = (await asr.json().catch(() => null)) as { text?: string; error?: { message: string } } | null;
-      if (!isCurrent()) return;
+      if (!isCurrent()) { settle(); return; }
       // A provider failure is not silence: surface it instead of dropping it.
       if (!asr.ok) {
         setVoiceNotice(asrBody?.error?.message ?? "Transcription failed. Check your connection and try again.");
+        applyOrderedTurn(sequence, generation, null);
         return;
       }
-      if (!asrBody?.text?.trim()) return; // silence is normal between turns
+      if (!asrBody?.text?.trim()) {
+        applyOrderedTurn(sequence, generation, null); // silence is normal between turns
+        return;
+      }
       const contentText = asrBody.text.trim();
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
@@ -297,24 +365,21 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           body: JSON.stringify({ contentText, idempotencyKey: voiceIdempotencyKeyFor(contentText) }),
         },
       );
-      if (!isCurrent()) return;
-      const body = (await response.json().catch(() => null)) as {
-        messages?: TranscriptEntry[];
-        error?: { message: string };
-        endCall?: boolean;
-        audioBase64?: string | null;
-      } | null;
+      if (!isCurrent()) { settle(); return; }
+      const body = (await response.json().catch(() => null)) as TurnBody | null;
       // The interview may have ended while the turn response was being read.
-      if (!isCurrent()) return;
+      if (!isCurrent()) { settle(); return; }
       if (!response.ok || !body) {
         setVoiceNotice(body?.error?.message ?? "The interview could not process that answer.");
+        applyOrderedTurn(sequence, generation, null);
         return;
       }
       voiceKeyRef.current = null;
-      applyTurnResult(body);
+      applyOrderedTurn(sequence, generation, body);
     } catch {
-      if (!isCurrent()) return;
+      if (!isCurrent()) { settle(); return; }
       setVoiceNotice("Transcription failed. Check your connection and try turning the microphone on again.");
+      applyOrderedTurn(sequence, generation, null);
     }
   }
 
@@ -323,6 +388,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     const contentText = text.trim();
     if (!contentText || generation !== recordingGenerationRef.current || ended) return;
     const idempotencyKey = retryKey ?? voiceIdempotencyKeyFor(contentText);
+    // A retry is a new submission: it takes a new capture-order slot.
+    const sequence = ++turnSequenceRef.current;
+    const settle = () => applyOrderedTurn(sequence, generation, null);
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
@@ -332,15 +400,10 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           body: JSON.stringify({ contentText, idempotencyKey }),
         },
       );
-      if (generation !== recordingGenerationRef.current || ended) return;
-      const body = (await response.json().catch(() => null)) as {
-        messages?: TranscriptEntry[];
-        error?: { message: string };
-        endCall?: boolean;
-        audioBase64?: string | null;
-      } | null;
+      if (generation !== recordingGenerationRef.current || ended) { settle(); return; }
+      const body = (await response.json().catch(() => null)) as TurnBody | null;
       // Cleanup may have invalidated this capture during the response read.
-      if (generation !== recordingGenerationRef.current || ended) return;
+      if (generation !== recordingGenerationRef.current || ended) { settle(); return; }
       if (!response.ok || !body) {
         // Keep the recognised answer and its key: the server may have rolled
         // the candidate back, so replaying the same key is safe.
@@ -350,19 +413,21 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
           generation,
           body?.error?.message ?? "The interviewer could not accept that answer.",
         );
+        applyOrderedTurn(sequence, generation, null);
         return;
       }
       voiceKeyRef.current = null;
-      setLiveRetry(null);
-      applyTurnResult(body);
+      setLiveRetries((current) => current.filter((item) => item.key !== idempotencyKey));
+      applyOrderedTurn(sequence, generation, body);
     } catch {
-      if (generation !== recordingGenerationRef.current || ended) return;
+      if (generation !== recordingGenerationRef.current || ended) { settle(); return; }
       keepLiveAnswerForRetry(
         contentText,
         idempotencyKey,
         generation,
         "The answer could not be sent. Check your connection and retry.",
       );
+      applyOrderedTurn(sequence, generation, null);
     }
   }
 
@@ -373,28 +438,51 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`,
     );
     eventSourceRef.current = es;
+    bridgeErrorRef.current = null;
     return await new Promise<boolean>((resolve) => {
-      // On timeout/error/cancellation close and detach the bridge. Otherwise a
-      // late `ready` could flip streamModeRef after the batch fallback started.
+      let ready = false;
+      let settled = false;
+      // Before `ready` a failure closes the bridge so the caller can retry the
+      // SAME provider. After `ready` the EventSource stays open so it can
+      // reconnect — closing it would strand a live bridge with no transcript.
       const detach = () => {
         if (eventSourceRef.current === es) eventSourceRef.current = null;
         es.onmessage = null;
         es.onerror = null;
         es.close();
       };
-      const fail = () => {
+      const fail = (message: string) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         detach();
+        bridgeErrorRef.current = message;
         resolve(false);
       };
-      const timer = setTimeout(fail, 12000);
+      const timer = setTimeout(
+        () => fail("Live transcription did not start. Check your connection and try again."),
+        12000,
+      );
       es.onmessage = (event) => {
         if (generation !== recordingGenerationRef.current || ended) {
-          fail();
+          fail("Live transcription was cancelled.");
           return;
         }
         const data = JSON.parse(event.data) as { type: string; streamId?: string; text?: string; message?: string };
         if (data.type === "ready" && data.streamId) {
+          if (ready) {
+            // The bridge reconnected: retarget queued PCM posts and release the
+            // superseded server stream instead of posting into a closed one.
+            const previous = streamIdRef.current;
+            streamIdRef.current = data.streamId;
+            bridgeRetargetRef.current?.(data.streamId);
+            if (previous && previous !== data.streamId) {
+              void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(previous)}`, { method: "DELETE" }).catch(() => undefined);
+            }
+            return;
+          }
+          ready = true;
+          settled = true;
           streamIdRef.current = data.streamId;
           streamModeRef.current = true;
           clearTimeout(timer);
@@ -403,10 +491,15 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         } else if (data.type === "transcript" && data.text) {
           void submitLiveTranscript(data.text, generation);
         } else if (data.type === "error") {
-          setVoiceNotice(data.message ?? "Live transcription failed.");
+          const message = data.message ?? "Live transcription failed.";
+          if (!ready) fail(message);
+          else setVoiceNotice(message);
         }
       };
-      es.onerror = fail;
+      es.onerror = () => {
+        if (!ready) fail("Live transcription connection failed. Check your connection and try again.");
+        else setVoiceNotice("Live transcription connection lost. Reconnecting…");
+      };
     });
   }
 
@@ -443,10 +536,13 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     // pending is ignored instead of acquiring a second stream (and leaking it).
     if (acquisitionPendingRef.current || recorderRef.current?.state === "recording" || ended) return;
     setVoiceNotice(null);
-    setLiveRetry(null);
+    setLiveRetries([]);
     batchLoopRef.current = null;
     acquisitionPendingRef.current = true;
+    // Explicit mic-on intent; a Mute click during acquisition overwrites it.
+    mutedRef.current = false;
     const generation = ++recordingGenerationRef.current;
+    bridgeRetargetRef.current = null;
     try {
       const configResponse = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/config`,
@@ -457,11 +553,13 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       if (!configResponse.ok) {
         const configBody = (await configResponse.json().catch(() => null)) as { error?: { message?: string } } | null;
         setVoiceNotice(configBody?.error?.message ?? "Speech-to-text is not configured. You can type your answer instead.");
+        mutedRef.current = true;
         return;
       }
       const config = (await configResponse.json().catch(() => null)) as { mode?: string } | null;
       if (config?.mode !== "stream" && config?.mode !== "batch") {
         setVoiceNotice("Speech-to-text is not available. You can type your answer instead.");
+        mutedRef.current = true;
         return;
       }
       if (generation !== recordingGenerationRef.current || ended) return;
@@ -485,7 +583,17 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       stream.getAudioTracks().forEach((track) => { track.enabled = trackEnabled; });
       streamRef.current = stream;
 
-      if (config.mode === "stream" && (await openLiveBridge())) {
+      if (config.mode === "stream") {
+        if (!(await openLiveBridge())) {
+          // A bridge failure must stay on the configured streaming provider:
+          // never silently switch to batch transcription. The mic is released
+          // and the failure is surfaced for an explicit retry.
+          setVoiceNotice(bridgeErrorRef.current ?? "Live transcription could not start. You can type your answer instead.");
+          stream.getTracks().forEach((track) => stopCaptureTrack(track));
+          if (streamRef.current === stream) streamRef.current = null;
+          mutedRef.current = true;
+          return;
+        }
         if (generation !== recordingGenerationRef.current || ended) {
           stream.getTracks().forEach((track) => stopCaptureTrack(track));
           if (streamRef.current === stream) streamRef.current = null;
@@ -494,35 +602,47 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         // Capture this bridge's id once and serialize PCM posts per stream:
         // each window is sent only after the previous one completes, so the
         // server's arrival order matches capture order. An older bridge can
-        // never have its windows retargeted to a newer stream id.
-        const id = streamIdRef.current;
-        if (!id) {
+        // never have its windows retargeted to a newer stream id, except by an
+        // explicit reconnect of this same bridge.
+        let activeId = streamIdRef.current;
+        if (!activeId) {
           stream.getTracks().forEach((track) => stopCaptureTrack(track));
           if (streamRef.current === stream) streamRef.current = null;
           return;
         }
+        const retarget = (newId: string) => { activeId = newId; };
+        bridgeRetargetRef.current = retarget;
         let relayStopped = false;
         let pcmChain: Promise<unknown> = Promise.resolve();
         const stopRelay = startPcmRelay(stream, (base64) => {
           if (relayStopped) return;
           pcmChain = pcmChain.then(() => {
-            if (relayStopped) return;
+            // Queued windows must still drain after a mute click so the final
+            // audio reaches the provider before DELETE finalizes the stream.
             return fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ streamId: id, audioBase64: base64 }),
+              body: JSON.stringify({ streamId: activeId, audioBase64: base64 }),
             }).catch(() => undefined);
           }).catch(() => undefined);
         });
-        (stream as MediaStream & { __stopRelay?: () => void }).__stopRelay = () => {
+        (stream as MediaStream & { __stopRelay?: () => Promise<void> }).__stopRelay = async () => {
           relayStopped = true;
+          if (bridgeRetargetRef.current === retarget) bridgeRetargetRef.current = null;
           stopRelay();
+          // Wait for already-queued PCM posts, but accept no new audio.
+          await pcmChain;
         };
+        if (mutedRef.current) {
+          // A Mute click arrived while the bridge was opening: honour it.
+          void finalizeLiveBridge();
+          return;
+        }
         streamModeRef.current = true;
         setMuted(false);
         return;
       }
-      // A failed bridge must not let end/unmount resume batch acquisition.
+      // A generation change or end/unmount must not resume batch acquisition.
       if (generation !== recordingGenerationRef.current || ended) {
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         if (streamRef.current === stream) streamRef.current = null;
@@ -623,8 +743,29 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         releaseStream();
         throw error;
       }
-      setMuted(false);
+      // A Mute click during recorder setup wins over this activation.
+      if (!mutedRef.current) setMuted(false);
+      else batchLoopRef.current?.stop(false);
     } catch {
+      // A failure anywhere after acquisition (including PCM relay setup) must
+      // tear down the bridge and the tracks, not merely show a notice.
+      const stream = streamRef.current;
+      void (stream as (MediaStream & { __stopRelay?: () => Promise<void> }) | null)?.__stopRelay?.();
+      if (streamModeRef.current) {
+        const id = streamIdRef.current;
+        if (id) {
+          void fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
+        }
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        streamModeRef.current = false;
+        streamIdRef.current = null;
+        bridgeRetargetRef.current = null;
+      }
+      stream?.getTracks().forEach((track) => stopCaptureTrack(track));
+      streamRef.current = null;
+      setMuted(true);
+      mutedRef.current = true;
       setVoiceNotice("Microphone access was not granted. You can type your answer instead.");
     } finally {
       acquisitionPendingRef.current = false;
@@ -641,11 +782,20 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
     const id = streamIdRef.current;
     const es = eventSourceRef.current;
     const stream = streamRef.current;
-    (stream as (MediaStream & { __stopRelay?: () => void }) | null)?.__stopRelay?.();
+    // Stop generating PCM but let queued posts reach the server before DELETE
+    // finalizes the stream; a stalled relay cannot block mic-off indefinitely.
+    await withDeadline(
+      (stream as (MediaStream & { __stopRelay?: () => Promise<void> }) | null)?.__stopRelay?.(),
+      2500,
+    );
     streamModeRef.current = false;
     streamIdRef.current = null;
+    bridgeRetargetRef.current = null;
     if (id) {
-      await fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined);
+      await withDeadline(
+        fetch(`/api/v1/interviews/invitations/${encodeURIComponent(token)}/asr/stream?streamId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => undefined),
+        2500,
+      );
     }
     if (es) {
       await new Promise<void>((resolve) => {
@@ -671,6 +821,9 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
 
   function toggleMic() {
     if (!muted) {
+      // Explicit mic-off intent: the ref stays authoritative while the bridge
+      // drains and the tracks are released asynchronously.
+      mutedRef.current = true;
       setMuted(true);
       if (streamModeRef.current) {
         void finalizeLiveBridge();
@@ -683,6 +836,8 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
       streamRef.current?.getAudioTracks().forEach((track) => { track.enabled = false; });
       return;
     }
+    // Explicit mic-on intent; startMic checks it again after every await.
+    mutedRef.current = false;
     void startMic();
   }
 
@@ -773,19 +928,19 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         </div>
       ) : null}
       {voiceNotice ? <p className="text-sm text-amber-300" role="status">{voiceNotice}</p> : null}
-      {!ended && liveRetry ? (
+      {!ended ? liveRetries.map((retry) => (
         <button
+          key={retry.key}
           type="button"
           className="btn-ghost self-center"
           onClick={() => {
-            const retry = liveRetry;
-            setLiveRetry(null);
+            setLiveRetries((current) => current.filter((item) => item.key !== retry.key));
             void submitLiveTranscript(retry.text, retry.generation, retry.key);
           }}
         >
           Retry answer
         </button>
-      ) : null}
+      )) : null}
       {error ? <p className="text-sm text-red-400" role="alert">{error}</p> : null}
 
       {overlayOpen ? (
