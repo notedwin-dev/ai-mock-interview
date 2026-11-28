@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
@@ -15,6 +15,9 @@ import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
  * running it. Powered by the free Gemini Live + LiveKit stack already in use.
  */
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
+
+/** Advisory warning when a dispatched planner never joins the room. */
+const NO_AGENT_WARNING = "The planner did not join in time. Leave and start a new voice session.";
 
 /** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
 type LocalMicPublication = { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } };
@@ -51,9 +54,12 @@ export function VoiceGenerationRoom() {
   const audioRef = useRef<HTMLDivElement | null>(null);
   const startedAtRef = useRef(0);
   const agentPresentRef = useRef(false);
+  const noAgentWarningRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
+  const finishedRef = useRef(false);
+  const [callFinished, setCallFinished] = useState(false);
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(false);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
@@ -65,22 +71,36 @@ export function VoiceGenerationRoom() {
   const [agentPresent, setAgentPresent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /** Close the voice call once the agent's closing TTS has finished. */
+  const finishGeneration = useCallback(() => {
+    void roomRef.current?.disconnect();
+    setCallFinished(true);
+  }, []);
+
   useEffect(() => {
     // Each effect setup owns its startup. Strict Mode's setup-cleanup-setup
     // replays it, and cleanup invalidates this flag so work started by a dead
-    // setup can never attach a room to the live component. Request
-    // deduplication lives server-side, not in a module-level gate.
+    // setup can never attach a room to the live component. A cancelled setup
+    // sends no request; preventing duplicates once a POST is in flight is a
+    // separate idempotency/server-reuse decision, not guaranteed here.
     let active = true;
     roomRef.current = null;
     startedAtRef.current = Date.now();
 
     async function start() {
       try {
+        // Cleanup may have run before this deferred setup started: do not
+        // create an orphaned generation for a component that is already gone.
+        if (!active) return;
         const response = await fetch("/api/v1/interviews/generation", { method: "POST" });
         if (!active) return;
         const body = (await response.json().catch(() => null)) as
           | { id?: string; url?: string; token?: string; error?: { message?: string } }
           | null;
+        // Cleanup may have finished during the body read; a stale setup must
+        // not create or take ownership of a room (Leave/unmount would then
+        // target the wrong room and leave the active one publishing).
+        if (!active) return;
         if (!response.ok || !body?.id || !body?.url || !body?.token) {
           if (!active) return;
           setError(body?.error?.message ?? "Voice generation is not available right now.");
@@ -100,7 +120,12 @@ export function VoiceGenerationRoom() {
         });
         room.on(RoomEvent.ParticipantConnected, () => {
           agentPresentRef.current = true;
-          if (active) setAgentPresent(true);
+          if (active) {
+            setAgentPresent(true);
+            // A late join clears only the timed-out warning; never erase an
+            // unrelated mic-unavailable or room-failure error.
+            setError((current) => (current === NO_AGENT_WARNING ? null : current));
+          }
         });
         room.on(RoomEvent.ParticipantDisconnected, () => {
           agentPresentRef.current = false;
@@ -112,13 +137,38 @@ export function VoiceGenerationRoom() {
           setIsAgentSpeaking(speakers.some((speaker) => speaker.identity !== local));
           setIsUserSpeaking(speakers.some((speaker) => speaker.identity === local));
         });
+        // LiveKit Agents publishes transcriptions on the `lk.transcription`
+        // text stream, synchronised with audio playback. Consume the deltas so
+        // the candidate sees words as they are spoken, not only final lines.
+        room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
+          const speaker = (info.identity || "").startsWith("candidate") ? "candidate" : "agent";
+          // Keep this stream's text local: the data-channel handler may write a
+          // complete caption between deltas, and appending to that caption
+          // would duplicate the words already shown.
+          let buffer = "";
+          try {
+            for await (const delta of reader) {
+              if (!active) break;
+              buffer = (buffer + delta).slice(-2000);
+              setLiveCaption({ speaker, text: buffer });
+            }
+          } catch {
+            // A cancelled stream is normal when the agent changes turns.
+          }
+        });
         room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
           if (!active || topic !== CAPTION_TOPIC) return;
           try {
             const parsed = JSON.parse(new TextDecoder().decode(payload)) as {
               speaker?: string;
               text?: string;
+              done?: boolean;
             };
+            if (parsed.done) {
+              // The agent has finished playing its closing line.
+              finishGeneration();
+              return;
+            }
             if (
               typeof parsed.text === "string" &&
               parsed.text.length > 0 &&
@@ -131,8 +181,12 @@ export function VoiceGenerationRoom() {
             // Ignore malformed data messages; they never affect the call.
           }
         });
-        room.on(RoomEvent.Reconnecting, () => { if (active) setStatus("reconnecting"); });
-        room.on(RoomEvent.Reconnected, () => { if (active) setStatus("connected"); });
+        room.on(RoomEvent.Reconnecting, () => {
+          if (active) setStatus((current) => (current === "completed" ? current : "reconnecting"));
+        });
+        room.on(RoomEvent.Reconnected, () => {
+          if (active) setStatus((current) => (current === "completed" ? current : "connected"));
+        });
         room.on(RoomEvent.Disconnected, () => {
           if (active) setStatus((current) => (current === "completed" ? current : "error"));
         });
@@ -189,7 +243,7 @@ export function VoiceGenerationRoom() {
       void roomRef.current?.disconnect();
       roomRef.current = null;
     };
-  }, []);
+  }, [finishGeneration]);
 
   useEffect(() => {
     if (!generationId) return;
@@ -206,19 +260,27 @@ export function VoiceGenerationRoom() {
         const data = (await response.json()) as GenerationState;
         if (!active) return;
         setGeneration(data);
-        // Only bail out if the agent never joined at all. Once it is in the
-        // room, captions may come via the data channel rather than this poll.
+        // A failed dispatch leaves the generation "collecting" forever, so
+        // warn after a generous grace period for cloud-agent cold starts.
+        // This is advisory only: the status, room and Leave button are
+        // untouched, and the warning is emitted once per session.
         if (
           data.status === "collecting" &&
           !agentPresentRef.current &&
-          Date.now() - startedAtRef.current > 60000
+          !noAgentWarningRef.current &&
+          Date.now() - startedAtRef.current > 90_000
         ) {
-          setError("The planner did not join in time. Leave and start a new voice session.");
+          noAgentWarningRef.current = true;
+          setError(NO_AGENT_WARNING);
         }
-        if (data.status === "completed" && data.invitationPath) {
+        if (data.status === "completed" && data.invitationPath && !finishedRef.current) {
+          finishedRef.current = true;
           finished = true;
           setStatus("completed");
-          void roomRef.current?.disconnect();
+          // Do NOT disconnect yet: the worker posts this status BEFORE it
+          // speaks the closing line. Wait for the agent's done caption (or a
+          // safety timeout for older workers) so the candidate hears it.
+          setTimeout(() => finishGeneration(), 12000);
         }
       } catch {
         // Transient poll failure: the next tick retries.
@@ -233,7 +295,7 @@ export function VoiceGenerationRoom() {
       active = false;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [generationId, router]);
+  }, [generationId, router, finishGeneration]);
 
   async function toggleMute() {
     const participant = roomRef.current?.localParticipant;
@@ -262,18 +324,23 @@ export function VoiceGenerationRoom() {
       },
     );
     const body = (await response.json().catch(() => null)) as
-      | { invitationPath?: string; error?: { message?: string } }
+      | { invitationPath?: string; sessionId?: string; error?: { message?: string } }
       | null;
-    if (!response.ok || !body?.invitationPath) {
+    if (!response.ok || !body?.invitationPath || !body?.sessionId) {
       throw new Error(body?.error?.message ?? "Could not confirm the interview.");
     }
-    router.push(`${body.invitationPath}/waiting`);
+    // Confirming only applies the details. The decision happens on its own
+    // page, not embedded in the voice room.
+    router.push(`/dashboard/interview/${body.sessionId}/ready`);
   }
 
   function repeatLast() {
-    // Prefer the planner's latest spoken line; persisted captions may only
-    // contain candidate answers or lag behind the live data channel.
-    const text = lastPlannerCaption ?? generation?.caption?.text;
+    // Repeat planner speech only. The persisted caption may be a candidate
+    // answer, and the live transcription stream can hold the only planner
+    // line before persistence catches up; never fall back to candidate text.
+    const streamText = liveCaption?.speaker === "agent" ? liveCaption.text : null;
+    const persisted = generation?.caption?.speaker === "agent" ? generation.caption.text : null;
+    const text = lastPlannerCaption ?? streamText ?? persisted;
     if (!text || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.cancel();
@@ -314,7 +381,7 @@ export function VoiceGenerationRoom() {
         </button>
       </section>
 
-      {status === "completed" && generation?.config ? (
+      {status === "completed" && callFinished && generation?.config ? (
         <GenerationConfirmation config={generation.config} onConfirm={confirm} />
       ) : (
         <>

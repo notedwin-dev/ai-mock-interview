@@ -20,6 +20,8 @@ interface SessionLogProps {
     categoryNameSnapshot: string;
     evaluationMode: string;
     status: string;
+    scheduledAt: string | null;
+    invitationPath: string | null;
     createdAt: Date;
     completedAt: Date | null;
   }>;
@@ -91,17 +93,35 @@ export function PastInterviews({ sessions }: SessionLogProps) {
                   View Feedback
                 </Link>
                 <Link
+                  href={`/dashboard/interview/${session.sessionId}`}
+                  className="inline-flex h-9 items-center justify-center rounded-full border border-line px-4 text-xs font-semibold text-ink-soft transition-colors hover:border-ink-muted hover:text-ink">
+                  View transcript
+                </Link>
+                <Link
                   href="/dashboard/interview/generate"
                   className="inline-flex h-9 items-center justify-center rounded-full border border-line px-4 text-xs font-semibold text-ink-soft transition-colors hover:border-ink-muted hover:text-ink">
                   Retake Interview
                 </Link>
               </div>
             ) : (
-              <Link
-                href={`/dashboard/interview/${session.sessionId}`}
-                className="inline-flex h-9 w-fit items-center justify-center rounded-full bg-emerald-400 px-4 text-xs font-semibold text-emerald-950 transition-colors hover:bg-emerald-300">
-                Open room
-              </Link>
+              <div className="flex flex-col gap-2">
+                {session.scheduledAt ? (
+                  <p className="text-xs text-ink-muted">
+                    Scheduled for {DATE_FORMAT.format(new Date(session.scheduledAt))}
+                  </p>
+                ) : null}
+                <Link
+                  href={session.invitationPath
+                    ? `${session.invitationPath}${session.status === "active" ? "/room" : "/waiting"}`
+                    : `/dashboard/interview/${session.sessionId}`}
+                  className="inline-flex h-9 w-fit items-center justify-center rounded-full bg-emerald-400 px-4 text-xs font-semibold text-emerald-950 transition-colors hover:bg-emerald-300">
+                  {!session.invitationPath
+                    ? "Open interview"
+                    : session.status === "active"
+                      ? "Return to interview"
+                      : "Go to waiting room"}
+                </Link>
+              </div>
             )}
           </li>
         );

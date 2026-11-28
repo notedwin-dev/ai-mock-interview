@@ -8,3 +8,12 @@ storage
 coverage
 *.log
 .DS_Store
+# local private keys / credentials (git-ignored; must not enter agent or app images)
+*.pem
+*.key
+*.p12
+*.pfx
+.vercel
+.opencode/
+opencode.json
+*.tsbuildinfo

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderConfigError } from "@/lib/providers/config";
-import { RealtimeError } from "@/lib/interview/realtime-token";
+import { RealtimeError, RealtimeTokenError } from "@/lib/interview/realtime-token";
 
 const mocks = vi.hoisted(() => ({
   context: vi.fn(),
@@ -71,6 +71,36 @@ describe("POST .../realtime/token", () => {
     );
   });
 
+  it("returns only the ElevenLabs client secret and WS URL for an elevenlabs route", async () => {
+    mocks.resolveForOutboundCall.mockResolvedValueOnce({
+      providerName: "elevenlabs", providerType: "preset", baseUrl: "https://api.elevenlabs.io",
+      modelId: "eleven_realtime_v1_mini", apiKey: "sk_elevenlabs_secret_key",
+    });
+    mocks.createRealtimeToken.mockResolvedValueOnce({
+      token: "el_client_secret",
+      url: "wss://api.elevenlabs.io/v1/convai/realtime",
+      expiresAt: 1_000_000_000,
+    });
+
+    const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({
+      token: "el_client_secret",
+      url: "wss://api.elevenlabs.io/v1/convai/realtime",
+      modelId: "eleven_realtime_v1_mini",
+    });
+    // The stored provider key is write-only: it must never reach the client.
+    expect(JSON.stringify(body)).not.toContain("sk_elevenlabs_secret_key");
+    expect(mocks.createRealtimeToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: "elevenlabs",
+        modelId: "eleven_realtime_v1_mini",
+        apiKey: "sk_elevenlabs_secret_key",
+      }),
+    );
+  });
+
   it("refuses invalid links", async () => {
     mocks.context.mockResolvedValueOnce(null);
     const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
@@ -87,8 +117,9 @@ describe("POST .../realtime/token", () => {
   });
 
   it("maps an unsupported realtime provider to a typed 502", async () => {
+    // The real minter throws RealtimeTokenError for unsupported providers.
     mocks.createRealtimeToken.mockRejectedValueOnce(
-      new RealtimeError("unsupported_provider", "Live voice currently supports the Google (Gemini Live) provider only."),
+      new RealtimeTokenError("openai", "unsupported_provider", "Realtime sessions are not supported for provider \"openai\"."),
     );
     const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
     expect(response.status).toBe(502);

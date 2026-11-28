@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { getLiveKitConfig } from "@/lib/livekit/env";
@@ -32,7 +32,7 @@ const captionSchema = z
   })
   .strict();
 
-/** The five values the voice planner gathers, kept in the shared contract. */
+/** The six values the voice planner gathers, kept in the shared contract. */
 export const generationAnswersSchema = z
   .object({
     role: z.string().trim().min(1).max(150),
@@ -56,17 +56,11 @@ async function assertWorker(recordId: string, workerToken: string) {
   const provided = hashWorkerToken(workerToken);
   const expected = Buffer.from(provided, "hex");
   const stored = Buffer.from(record.workerTokenHash, "hex");
+  // crypto.timingSafeEqual throws on a length mismatch, so guard it up front.
   if (expected.length !== stored.length || !timingSafeEqual(expected, stored)) {
     throw new GenerationError("invalid_worker", "The generator credential was rejected.");
   }
   return record;
-}
-
-function timingSafeEqual(a: Buffer, b: Buffer): boolean {
-  // Node's crypto.timingSafeEqual throws on length mismatch; the caller checks.
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
-  return diff === 0;
 }
 
 /** Value-based JSON comparison: object key order must not affect a replay. */
@@ -152,37 +146,87 @@ export async function postCaption(id: string, workerToken: string, input: unknow
   });
 }
 
+/**
+ * Idempotent completion (TT-8 review fix). A retried or concurrent worker
+ * call must never create a second interview. The gate is a conditional write:
+ * `updateMany` only flips the row that is still "collecting", so exactly one
+ * caller wins the claim and proceeds; every other caller reads the (eventually
+ * completed) row and returns the existing session. On any failure the claim is
+ * released back to "collecting" so a retry can still complete.
+ */
 export async function completeGeneration(id: string, workerToken: string, input: unknown) {
   const record = await assertWorker(id, workerToken);
-  if (record.status === "completed") return { invitationPath: record.invitationPath };
+  if (record.status === "completed" || record.status === "confirmed") {
+    if (!record.sessionId) {
+      throw new GenerationError("invalid_state", "This generation has no interview to return.");
+    }
+    return { invitationPath: record.invitationPath! };
+  }
   const answers = generationAnswersSchema.parse(input);
   const config = mapAnswersToConfig(answers);
-  const session = await createInterviewFromAgentConfig(record.userId, {
-    config,
-    missingFields: [],
+
+  // Conditional write: only a "collecting" row can be claimed. The winner
+  // flips it to "completing"; losers see count === 0 and return the existing
+  // interview instead of creating a second one.
+  const claim = await db.interviewGeneration.updateMany({
+    where: { id, status: "collecting" },
+    data: { status: "completing" },
   });
-  await db.interviewGeneration.update({
-    where: { id },
-    data: {
-      status: "completed",
-      configJson: config as unknown as never,
-      sessionId: session.sessionId,
-      invitationPath: session.invitation.path,
-    },
-  });
-  return { invitationPath: session.invitation.path };
+  if (claim.count === 0) {
+    const existing = await db.interviewGeneration.findUniqueOrThrow({ where: { id } });
+    if (!existing.sessionId) {
+      // Another call holds the claim and is creating the interview; fail
+      // closed so the worker retries, rather than racing a second session.
+      throw new GenerationError(
+        "invalid_state",
+        "This generation is already completing; try again.",
+      );
+    }
+    return { invitationPath: existing.invitationPath! };
+  }
+
+  try {
+    // The generation id is stable across retries, so pass it as the creation
+    // idempotency key. Even if the claim below is released after a partial
+    // failure, a retry replays the same session instead of creating a second
+    // one — the one-session guarantee is enforced at the service layer too.
+    const session = await createInterviewFromAgentConfig(record.userId, {
+      config,
+      missingFields: [],
+      idempotencyKey: id,
+    });
+    await db.interviewGeneration.update({
+      where: { id },
+      data: {
+        status: "completed",
+        configJson: config as unknown as never,
+        sessionId: session.sessionId,
+        invitationPath: session.invitation.path,
+      },
+    });
+    return { invitationPath: session.invitation.path };
+  } catch (error) {
+    // Release the claim so a retry can complete; the failure still propagates.
+    await db.interviewGeneration.updateMany({
+      where: { id, status: "completing" },
+      data: { status: "collecting" },
+    });
+    throw error;
+  }
 }
 
 /**
  * Applies the candidate's confirmed, structured configuration to the session
  * created by the planner. The model produces a zod-validated object; the UI
- * never posts free text.
+ * never posts free text. The confirmed category is applied to the session too
+ * (id + code + name snapshots), so changing the category in the review form is
+ * not a no-op — it mirrors the manual details-edit path.
  */
 export async function confirmGeneration(
   userId: string,
   id: string,
   input: unknown,
-): Promise<{ invitationPath: string }> {
+): Promise<{ invitationPath: string; sessionId: string }> {
   const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
   if (!record) throw new GenerationError("not_found", "Generation session not found.");
   const { agentConfigSchema } = await import("./agent");
@@ -195,7 +239,7 @@ export async function confirmGeneration(
     // different configuration is a distinct outcome: it cannot rewrite the
     // session the candidate already reviewed.
     if (record.configJson != null && stableJson(record.configJson) === stableJson(config)) {
-      return { invitationPath: record.invitationPath! };
+      return { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
     }
     throw new GenerationError(
       "invalid_state",
@@ -206,7 +250,14 @@ export async function confirmGeneration(
     throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
   }
   const sessionId = record.sessionId;
-  await db.$transaction(async (tx) => {
+  const category = await db.interviewCategory.findFirst({
+    where: { categoryCode: config.category, isActive: true },
+    select: { categoryId: true, categoryName: true },
+  });
+  if (!category) {
+    throw new GenerationError("invalid_state", "The selected interview category is not available.");
+  }
+  const replay = await db.$transaction(async (tx) => {
     // Claim the transition under the same transaction as the session write:
     // only one request can move completed -> confirmed, so a concurrent retry
     // can never write the candidate-reviewed session twice.
@@ -215,6 +266,20 @@ export async function confirmGeneration(
       data: { configJson: config as unknown as never, status: "confirmed" },
     });
     if (claimed.count === 0) {
+      // A concurrent request may have won the claim between our first read and
+      // this transaction. Re-read inside the transaction: a retry carrying the
+      // same normalized configuration replays the stored invitation, while a
+      // different config (or an unclaimable state) keeps failing closed.
+      const confirmed = await tx.interviewGeneration.findFirst({ where: { id, userId } });
+      if (
+        confirmed?.status === "confirmed" &&
+        confirmed.sessionId &&
+        confirmed.invitationPath &&
+        confirmed.configJson != null &&
+        stableJson(confirmed.configJson) === stableJson(config)
+      ) {
+        return { invitationPath: confirmed.invitationPath, sessionId: confirmed.sessionId };
+      }
       throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
     }
     await tx.interviewSession.update({
@@ -226,8 +291,12 @@ export async function confirmGeneration(
         techStack: config.techStack as unknown as never,
         questionCount: config.questionCount ?? null,
         evaluationMode: config.strictness,
+        categoryId: category.categoryId,
+        categoryCodeSnapshot: config.category,
+        categoryNameSnapshot: category.categoryName,
       },
     });
+    return null;
   });
-  return { invitationPath: record.invitationPath! };
+  return replay ?? { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
 }

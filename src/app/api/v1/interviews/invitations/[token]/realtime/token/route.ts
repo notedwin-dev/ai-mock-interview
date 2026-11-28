@@ -1,21 +1,23 @@
 import { jsonError } from "@/lib/api/respond";
-import { RealtimeError, createRealtimeToken } from "@/lib/interview/realtime-token";
+import { RealtimeError, RealtimeTokenError, createRealtimeToken } from "@/lib/interview/realtime-token";
 import { buildLiveInterviewInstructions } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { getActiveRuntimeMode, resolveForOutboundCall } from "@/lib/providers/config";
 
 /**
- * POST .../realtime/token — server-side setup for the Gemini Live WebSocket
- * room (ADR-006 Option A). The link is the only capability; the provider key
- * stays here and only an ephemeral client secret reaches the browser.
+ * POST .../realtime/token — server-side setup for the token-scoped realtime
+ * WebSocket room (Gemini Live / ElevenLabs Realtime; ADR-006 Option A). The
+ * link is the only capability; the provider key stays here and only an
+ * ephemeral client secret (session token / client secret) reaches the browser.
  *
  * The AI SDK client POSTs its own `{ sessionConfig }`, but the server IGNORES
  * the request body and builds the session config itself from the interview
  * context (instructions = role/JD/question budget, FR-INTERVIEW-003), which it
- * then bakes into the client secret (Google requires the full session config
- * at token creation). This keeps the interview instructions server-owned and
- * means a malformed or missing body can never change what the live model is
- * told.
+ * then bakes into the Google client secret (Google requires the full session
+ * config at token creation). This keeps the interview instructions
+ * server-owned and means a malformed or missing body can never change what the
+ * live model is told. ElevenLabs mints its short-lived secret from the stored
+ * key natively; the browser opens the documented Realtime WebSocket with it.
  */
 export async function POST(
   _request: Request,
@@ -60,23 +62,39 @@ export async function POST(
     const instructions = buildLiveInterviewInstructions(interview);
 
     try {
-      const session = await createRealtimeToken(resolved, {
-        instructions,
-        sessionConfig: {
-          instructions,
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          outputModalities: ["audio"],
-        },
-      });
+      // Google requires the full session config at token creation, so the
+      // server-owned instructions are baked into its client secret. The
+      // ElevenLabs native mint has no session payload — the browser supplies
+      // instructions over the Realtime WebSocket instead.
+      const session =
+        resolved.providerName === "google"
+          ? await createRealtimeToken(resolved, {
+              instructions,
+              sessionConfig: {
+                instructions,
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+                outputModalities: ["audio"],
+              },
+            })
+          : await createRealtimeToken(resolved);
       return Response.json({
         token: session.token,
         url: session.url,
         modelId: resolved.modelId,
       });
     } catch (error) {
-      if (error instanceof RealtimeError && error.code === "unsupported_provider") {
-        return jsonError(502, "realtime_provider_unsupported", error.message);
+      // The real minter throws RealtimeTokenError; the legacy RealtimeError
+      // shape is kept for compatibility with older callers and tests.
+      if (
+        (error instanceof RealtimeError && error.code === "unsupported_provider") ||
+        (error instanceof RealtimeTokenError && error.errorCode === "unsupported_provider")
+      ) {
+        return jsonError(
+          502,
+          "realtime_provider_unsupported",
+          "This realtime provider is not supported.",
+        );
       }
       return jsonError(502, "realtime_setup_failed", "The realtime session could not be created.");
     }

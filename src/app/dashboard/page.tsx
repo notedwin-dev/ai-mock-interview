@@ -8,6 +8,7 @@ import {
 } from "@/lib/providers/config";
 import { ConsoleBanner } from "@/components/dashboard/CapabilityStrip";
 import { PastInterviews } from "@/components/dashboard/PastInterviews";
+import { UpcomingInterviews } from "@/components/dashboard/UpcomingInterviews";
 import { selectRuntime } from "@/lib/interview/runtime";
 
 // Opt out of instant-navigation validation so this segment is allowed to
@@ -33,12 +34,31 @@ interface RecentSessionRow {
   categoryNameSnapshot: string;
   evaluationMode: string;
   status: string;
+  scheduledAt: Date | null;
+  invitationPath: string | null;
   createdAt: Date;
   completedAt: Date | null;
 }
 
-function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
-  return db.interviewSession.findMany({
+/** One metadata query for a page of sessions, instead of one query per card. */
+async function loadInvitationPaths(
+  sessionIds: string[],
+): Promise<Map<string, string | null>> {
+  if (sessionIds.length === 0) return new Map();
+  const generations = await db.interviewGeneration.findMany({
+    where: { sessionId: { in: sessionIds } },
+    select: { sessionId: true, invitationPath: true },
+  });
+  const paths = new Map<string, string | null>();
+  for (const generation of generations) {
+    if (!generation.sessionId || paths.has(generation.sessionId)) continue;
+    paths.set(generation.sessionId, generation.invitationPath ?? null);
+  }
+  return paths;
+}
+
+async function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
+  const sessions = await db.interviewSession.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
     take: 6,
@@ -48,10 +68,50 @@ function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
       categoryNameSnapshot: true,
       evaluationMode: true,
       status: true,
+      scheduledAt: true,
       createdAt: true,
       completedAt: true,
     },
   });
+  const invitationPaths = await loadInvitationPaths(sessions.map((session) => session.sessionId));
+  return sessions.map((session) => ({
+    ...session,
+    invitationPath: invitationPaths.get(session.sessionId) ?? null,
+  }));
+}
+
+interface UpcomingSessionRow {
+  sessionId: string;
+  jobRole: string;
+  categoryNameSnapshot: string;
+  evaluationMode: string;
+  scheduledAt: Date | null;
+  invitationPath: string | null;
+}
+
+/** Not-started sessions the candidate can still edit, schedule or join. */
+async function loadUpcomingSessions(userId: string): Promise<UpcomingSessionRow[]> {
+  const sessions = await db.interviewSession.findMany({
+    where: {
+      userId,
+      startedAt: null,
+      completedAt: null,
+      status: { in: ["created", "scheduled"] },
+    },
+    orderBy: [{ scheduledAt: "asc" }, { createdAt: "desc" }],
+    select: {
+      sessionId: true,
+      jobRole: true,
+      categoryNameSnapshot: true,
+      evaluationMode: true,
+      scheduledAt: true,
+    },
+  });
+  const invitationPaths = await loadInvitationPaths(sessions.map((session) => session.sessionId));
+  return sessions.map((session) => ({
+    ...session,
+    invitationPath: invitationPaths.get(session.sessionId) ?? null,
+  }));
 }
 
 async function DashboardContent() {
@@ -72,9 +132,13 @@ async function DashboardContent() {
   }
 
   let recentSessions: RecentSessionRow[] = [];
+  let upcomingSessions: UpcomingSessionRow[] = [];
   let sessionsFailed = false;
   try {
-    recentSessions = await loadRecentSessions(account.userId);
+    [recentSessions, upcomingSessions] = await Promise.all([
+      loadRecentSessions(account.userId),
+      loadUpcomingSessions(account.userId),
+    ]);
   } catch {
     sessionsFailed = true;
   }
@@ -92,6 +156,31 @@ async function DashboardContent() {
         runtimeMode={runtime.mode}
         runtimeProvider={runtime.servingProvider}
       />
+
+      <section aria-labelledby="upcoming-sessions-heading">
+        <div className="flex items-baseline justify-between gap-4">
+          <h2
+            id="upcoming-sessions-heading"
+            className="font-display text-xl font-semibold tracking-tight text-ink"
+          >
+            Your interviews waiting to happen
+          </h2>
+        </div>
+        <div className="mt-4">
+          {sessionsFailed ? (
+            <p className="py-6 text-sm text-ink-muted">
+              Your interview list could not be loaded. Try again in a moment.
+            </p>
+          ) : (
+            <UpcomingInterviews
+              sessions={upcomingSessions.map((session) => ({
+                ...session,
+                scheduledAt: session.scheduledAt?.toISOString() ?? null,
+              }))}
+            />
+          )}
+        </div>
+      </section>
 
       <section aria-labelledby="recent-sessions-heading">
         <div className="flex items-baseline justify-between gap-4">
@@ -113,7 +202,12 @@ async function DashboardContent() {
               Your session list could not be loaded. Try again in a moment.
             </p>
           ) : (
-            <PastInterviews sessions={recentSessions} />
+            <PastInterviews
+              sessions={recentSessions.map((session) => ({
+                ...session,
+                scheduledAt: session.scheduledAt?.toISOString() ?? null,
+              }))}
+            />
           )}
         </div>
       </section>

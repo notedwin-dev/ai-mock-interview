@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { errorResponse, jsonError, llmErrorProviderResponse } from "@/lib/api/respond";
+// Both fixes are retained: the privacy-safe LlmError envelope and the
+// TT-8 boundary parser that turns malformed JSON into a 400, not a 500.
+import { errorResponse, jsonError, llmErrorProviderResponse, parseJsonBody } from "@/lib/api/respond";
 import { LlmError } from "@/lib/ai/llm";
 import { requireApiAccount } from "@/lib/auth/guard";
 import {
@@ -65,7 +67,7 @@ export async function POST(request: Request): Promise<Response> {
 
   let body: z.infer<typeof requestSchema>;
   try {
-    body = requestSchema.parse(await request.json());
+    body = requestSchema.parse(await parseJsonBody(request));
   } catch {
     return jsonError(400, "invalid_input", "A valid agent action is required.");
   }

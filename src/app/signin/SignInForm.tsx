@@ -6,8 +6,6 @@ import type { AuthFormState } from "@/lib/auth/validation";
 
 const initialState: AuthFormState = {};
 
-const FIELD_CLASS =
-  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
 const LABEL_CLASS = "text-sm font-medium text-ink-soft";
 
 export function SignInForm() {
@@ -28,7 +26,7 @@ export function SignInForm() {
           type="email"
           required
           autoComplete="email"
-          className={FIELD_CLASS}
+          className="field"
         />
       </div>
       <div className="flex flex-col gap-1.5">
@@ -41,7 +39,7 @@ export function SignInForm() {
           type="password"
           required
           autoComplete="current-password"
-          className={FIELD_CLASS}
+          className="field"
         />
       </div>
       {state.error ? (

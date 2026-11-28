@@ -6,8 +6,6 @@ import type { AuthFormState } from "@/lib/auth/validation";
 
 const initialState: AuthFormState = {};
 
-const FIELD_CLASS =
-  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
 const LABEL_CLASS = "text-sm font-medium text-ink-soft";
 
 export function SignUpForm() {
@@ -29,7 +27,7 @@ export function SignUpForm() {
           required
           maxLength={100}
           autoComplete="name"
-          className={FIELD_CLASS}
+          className="field"
         />
       </div>
       <div className="flex flex-col gap-1.5">
@@ -42,7 +40,7 @@ export function SignUpForm() {
           type="email"
           required
           autoComplete="email"
-          className={FIELD_CLASS}
+          className="field"
         />
       </div>
       <div className="flex flex-col gap-1.5">
@@ -56,7 +54,7 @@ export function SignUpForm() {
           required
           minLength={8}
           autoComplete="new-password"
-          className={FIELD_CLASS}
+          className="field"
         />
         <p className="text-xs text-ink-muted">
           At least 8 characters with a letter and a digit.
@@ -70,7 +68,7 @@ export function SignUpForm() {
           id="role"
           name="role"
           defaultValue="candidate"
-          className={FIELD_CLASS}
+          className="field"
         >
           <option value="candidate">Candidate — practise interviews</option>
           <option value="recruiter">Recruiter — discover public profiles</option>

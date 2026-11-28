@@ -22,8 +22,6 @@ import type { ProviderConfigSummary } from "@/lib/providers/config";
  * (FR-SETUP-005 acceptance wording).
  */
 
-const FIELD_CLASS =
-  "h-11 rounded-full border border-transparent bg-raised px-5 text-sm text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20";
 const LABEL_CLASS = "text-sm font-medium text-ink";
 const ERROR_CLASS = "text-xs text-red-400";
 
@@ -154,7 +152,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           maxLength={150}
           required
           placeholder="Select the role you want to practise"
-          className={FIELD_CLASS}
+          className="field"
         />
         {fieldErrors.jobRole ? (
           <p className={ERROR_CLASS}>{fieldErrors.jobRole}</p>
@@ -196,7 +194,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
           name="categoryId"
           value={categoryId ?? ""}
           onChange={(event) => setCategoryId(event.target.value || null)}
-          className={FIELD_CLASS}
+          className="field"
         >
           <option value="" disabled>
             Select an interview type
@@ -225,7 +223,7 @@ export function SetupForm({ categories, configurations }: SetupFormProps) {
               (event.target.value || null) as EvaluationMode | null,
             )
           }
-          className={FIELD_CLASS}
+          className="field"
         >
           <option value="" disabled>
             Select an evaluation mode

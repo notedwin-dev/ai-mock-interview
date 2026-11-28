@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { probeProviderConfiguration, discoverProviderModels, discoverCandidateModels, type ProbeDeps } from "./probe";
 import { encryptApiKey } from "./encryption";
+import { RealtimeTokenError } from "@/lib/interview/realtime-token";
 
 /**
  * Unit tests for the capability probe service (FR-PROVIDER-006). Network
@@ -139,9 +140,12 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("invalid");
   });
 
-  it("reports non-OpenAI presets as skipped and never validates them (M2 adapters)", async () => {
+  it("reports presets without a registered probe wire as skipped and never validates them", async () => {
+    // Every ADR-030 preset now has a native wire; an UNREGISTERED preset
+    // name (registry drift vs stored data) must fail closed as skipped,
+    // never be probed and never be silently "validated".
     const result = await runProbe(
-      configRow({ providerType: "preset", providerName: "anthropic", baseUrl: null }),
+      configRow({ providerType: "preset", providerName: "does-not-exist", baseUrl: null }),
       jsonFetch([]), // must not be called at all
     );
     expect(result.capabilities[0]).toMatchObject({
@@ -154,19 +158,120 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("unvalidated");
   });
 
-  it("reports the realtime capability skipped and never touches any wire (native realtime protocol)", async () => {
+  it("validates realtime by minting a short-lived native session without touching chat wires", async () => {
+    // The WS-probe/adapter fix: realtime is verified on its native wire with a
+    // neutral session config — never a chat wire and never interview content.
+    const realtimeToken = vi.fn(async () => ({ token: "auth_short", url: "wss://live.example" }));
     const result = await runProbe(
-      configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
-      jsonFetch([]), // must not be called at all — realtime never hits these wires
+      configRow({ capabilitiesJson: { realtime: { modelId: "gemini-3.1-flash-live-preview" } } }),
+      jsonFetch([]), // must not be called — realtime uses its own native wire
+      { realtimeToken },
     );
     expect(result.capabilities[0]).toMatchObject({
       capability: "realtime",
-      status: "skipped",
-      endpointReachable: false,
-      credentialValid: false,
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
     });
-    // Skipped ≠ validated: the configuration stays unvalidated, never "valid".
-    expect(result.credentialStatus).toBe("unvalidated");
+    // Our neutral session config is still passed to the native minter.
+    expect(realtimeToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelId: "gemini-3.1-flash-live-preview",
+        apiKey: "sk-plaintext-secret",
+      }),
+      expect.objectContaining({
+        sessionConfig: expect.objectContaining({ instructions: expect.stringContaining("Connectivity probe") }),
+      }),
+    );
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("validates ElevenLabs realtime via the native client-secret wire (no injected token)", async () => {
+    const fetchImpl = jsonFetch([
+      {
+        match: /api\.elevenlabs\.io\/v1\/convai\/realtime\/client_secrets/,
+        status: 200,
+        body: { value: "sk_short_lived_secret", expires_at: 1_700_000_000 },
+      },
+    ]);
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { realtime: { modelId: "eleven_realtime_v1_mini" } },
+      }),
+      fetchImpl,
+      {}, // no realtimeToken injection — the real minter must run
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "realtime",
+      status: "validated",
+      endpointReachable: true,
+      credentialValid: true,
+    });
+    expect(result.credentialStatus).toBe("valid");
+    expect(JSON.stringify(result)).not.toContain("sk-plaintext-secret");
+  });
+
+  it("fails realtime when the provider rejects the native session, without leaking the key", async () => {
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "bad-model" } } }),
+      jsonFetch([]),
+      { realtimeToken: async () => { throw new Error("provider refused sk-plaintext-secret"); } },
+    );
+    expect(result.capabilities[0]).toMatchObject({ status: "failed", credentialValid: false });
+    expect(JSON.stringify(result)).not.toContain("sk-plaintext-secret");
+    expect(result.credentialStatus).toBe("invalid");
+  });
+
+  it("never leaks a non-sk_ key echoed by the provider into the probe result", async () => {
+    // A non-typed provider error can carry an arbitrary key shape (the config
+    // accepts any non-empty key); the probe detail must stay generic.
+    const echoedKey = "el_1a2b3c4d5e6f7089";
+    const result = await runProbe(
+      configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
+      jsonFetch([]),
+      {
+        realtimeToken: async () => {
+          throw new Error(`provider rejected key ${echoedKey}`);
+        },
+      },
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "provider_error",
+      detail: "The provider rejected the realtime session setup.",
+    });
+    expect(JSON.stringify(result)).not.toContain(echoedKey);
+  });
+
+  it("never leaks a non-sk_ key echoed by the ElevenLabs minter into the probe result", async () => {
+    // End-to-end: the typed RealtimeTokenError from the real minter feeds the
+    // probe's classification, so both surfaces must omit an echoed key.
+    const echoedKey = "el_deadbeefcafebabe";
+    const fetchImpl = jsonFetch([
+      {
+        match: /api\.elevenlabs\.io\/v1\/convai\/realtime\/client_secrets/,
+        status: 500,
+        body: { message: `upstream failure for key ${echoedKey}` },
+      },
+    ]);
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { realtime: { modelId: "eleven_realtime_v1_mini" } },
+      }),
+      fetchImpl,
+    );
+    expect(result.capabilities[0]).toMatchObject({
+      status: "failed",
+      errorCode: "provider_error",
+      detail: "The provider rejected the realtime session setup.",
+    });
+    expect(JSON.stringify(result)).not.toContain(echoedKey);
   });
 
   it("explains a rejected realtime API key instead of hiding the provider reason", async () => {
@@ -185,6 +290,38 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       endpointReachable: true,
       detail: "The provider rejected the API key.",
     });
+  });
+
+  it("classifies typed realtime errors by errorCode and status, not message wording", async () => {
+    const cases = [
+      {
+        error: new RealtimeTokenError("elevenlabs", "rate_limited", "Provider rate-limited the request.", 429),
+        errorCode: "rate_limited",
+        endpointReachable: true,
+      },
+      {
+        error: new RealtimeTokenError("elevenlabs", "authentication_failed", "Credential rejected.", 401),
+        errorCode: "authentication_failed",
+        endpointReachable: true,
+      },
+      {
+        error: new RealtimeTokenError("openai", "unsupported_provider", "No verified realtime wire."),
+        errorCode: "model_unsupported",
+        endpointReachable: false,
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const result = await runProbe(
+        configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
+        jsonFetch([]),
+        { realtimeToken: async () => { throw testCase.error; } },
+      );
+      expect(result.capabilities[0]).toMatchObject({
+        status: "failed",
+        errorCode: testCase.errorCode,
+        endpointReachable: testCase.endpointReachable,
+      });
+    }
   });
 
   it("skips realtime even on a probeable preset while still validating the row's other capabilities", async () => {
@@ -246,9 +383,9 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       { status: "invalid", disabled: true },
     ]);
 
-    // All skipped (M2-adapter preset) → no status write.
+    // All skipped (preset with no registered probe wire) → no status write.
     await runProbe(
-      configRow({ providerType: "preset", providerName: "anthropic", baseUrl: null }),
+      configRow({ providerType: "preset", providerName: "does-not-exist", baseUrl: null }),
       jsonFetch([]),
       { save },
     );
@@ -406,6 +543,133 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.credentialStatus).toBe("valid");
   });
 
+  it("probes a custom row pointing at fish.audio on the native TTS wire, matching the runtime", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1\/tts$/.test(url)) {
+        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "custom",
+        providerName: "fish-byok",
+        baseUrl: "https://api.fish.audio",
+        capabilitiesJson: { tts: { modelId: "s2.1-pro-free" } },
+      }),
+      captureFetch,
+    );
+
+    // The runtime TTS adapter routes fish.audio URLs to POST /v1/tts with the
+    // `model` header — the probe must validate the SAME wire it certifies.
+    expect(seen).toHaveLength(1);
+    const ping = seen[0]!;
+    expect(ping.url).toBe("https://api.fish.audio/v1/tts");
+    expect(ping.headers.get("model")).toBe("s2.1-pro-free");
+    expect(JSON.parse(ping.body!)).toEqual({ text: "ping", format: "mp3" });
+    expect(result.capabilities[0]).toMatchObject({ status: "validated" });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("probes a custom row on a non-fish host with the OpenAI-shaped TTS wire", async () => {
+    const seen: string[] = [];
+    const captureFetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push(url);
+      const body = /\/audio\/speech$/.test(url)
+        ? new Uint8Array([1, 2, 3])
+        : { data: /\/models$/.test(url) ? [{ id: "tts-1" }] : { id: "ping" } };
+      return new Response(JSON.stringify(body ?? {}), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({ baseUrl: "https://tts.example.com/v1", capabilitiesJson: { tts: { modelId: "tts-1" } } }),
+      captureFetch,
+    );
+
+    expect(seen).toContain("https://tts.example.com/v1/audio/speech");
+    expect(seen.some((url) => /\/v1\/tts$/.test(url))).toBe(false);
+    expect(result.capabilities[0]).toMatchObject({ status: "validated" });
+  });
+
+  it("probes a custom row on api.elevenlabs.io on the native TTS wire, matching runtime dispatch", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1\/text-to-speech\/JBFqnCBsd6RMkjVDRZzb$/.test(url)) {
+        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "custom",
+        providerName: "relay",
+        baseUrl: "https://api.elevenlabs.io",
+        capabilitiesJson: { tts: { modelId: "eleven_v4" } },
+      }),
+      captureFetch,
+    );
+
+    // The canonical host — not the row name — selects the native wire, just
+    // as in the runtime TTS adapter. No OpenAI-shaped model-list call.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb");
+    expect(seen[0]!.headers.get("xi-api-key")).toBe("sk-plaintext-secret");
+    expect(seen[0]!.headers.get("authorization")).toBeNull();
+    expect(JSON.parse(seen[0]!.body!)).toMatchObject({ text: "ping", model_id: "eleven_v4" });
+    expect(result.capabilities[0]).toMatchObject({ capability: "tts", status: "validated" });
+  });
+
+  it("probes a custom row on api.anthropic.com on the native Messages wire", async () => {
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, headers: new Headers(init?.headers ?? undefined) });
+      if (/\/models$/.test(url)) {
+        return new Response(JSON.stringify({ error: { message: "Not found" } }), { status: 404 });
+      }
+      if (/\/v1\/messages$/.test(url)) {
+        return new Response(JSON.stringify({ id: "msg_ping" }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "custom",
+        providerName: "relay",
+        baseUrl: "https://api.anthropic.com",
+        capabilitiesJson: { llm: { modelId: "claude-opus-5-5" } },
+      }),
+      captureFetch,
+    );
+
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://api.anthropic.com/models",
+      "https://api.anthropic.com/v1/messages",
+    ]);
+    const ping = seen[1]!;
+    expect(ping.headers.get("x-api-key")).toBe("sk-plaintext-secret");
+    expect(ping.headers.get("authorization")).toBeNull();
+    expect(ping.headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(result.capabilities[0]).toMatchObject({ capability: "llm", status: "validated" });
+  });
+
   it("classifies a payment-required rejection (402) in the quota family, not as an auth failure", async () => {
     const result = await runProbe(configRow(), jsonFetch([
       { match: /\/models$/, status: 200, body: { data: [{ id: "test-model" }] } },
@@ -442,7 +706,363 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(result.capabilities[0]!.detail).toMatch(/credit|payment/i);
     expect(result.credentialStatus).toBe("invalid");
   });
+
+  it("probes the google preset ASR on the native interactions wire (x-goog-api-key, models/ shape)", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1beta\/interactions$/.test(url)) {
+        return new Response(JSON.stringify({ output_text: "ping" }), { status: 200 });
+      }
+      if (/\/v1beta\/models$/.test(url)) {
+        return new Response(JSON.stringify({ models: [{ name: "models/gemini-3.5-transcribe" }] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "google",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "gemini-3.5-transcribe" } },
+      }),
+      captureFetch,
+    );
+
+    // The list call and the capability call use different credential forms on
+    // the SAME base — the exact wire the runtime ASR adapter speaks.
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://generativelanguage.googleapis.com/v1beta/models",
+      "https://generativelanguage.googleapis.com/v1beta/interactions",
+    ]);
+    const ping = seen[1]!;
+    expect(ping.headers.get("x-goog-api-key")).toBe("sk-plaintext-secret");
+    expect(ping.headers.get("authorization")).toBeNull();
+    const parsed = JSON.parse(ping.body!) as {
+      model: string;
+      input: Array<{ type: string; data: string; mime_type: string }>;
+    };
+    expect(parsed.model).toBe("models/gemini-3.5-transcribe");
+    expect(parsed.input).toHaveLength(1);
+    expect(parsed.input[0]!.mime_type).toBe("audio/wav");
+    // The inline audio is the synthesised probe WAV, never real content.
+    const wavHead = Buffer.from(parseBase64WavHead(parsed.input[0]!.data)).subarray(0, 4).toString("ascii");
+    expect(wavHead).toBe("RIFF");
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "asr",
+      status: "validated",
+      modelsDiscovered: ["gemini-3.5-transcribe"],
+      selectedModelAccepted: true,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("probes google LLM/scorer on the OpenAI-compatible /v1beta/openai surface with Bearer auth", async () => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, auth: new Headers(init?.headers ?? undefined).get("authorization") });
+      if (/\/v1beta\/openai\/chat\/completions$/.test(url)) {
+        return new Response(JSON.stringify({ id: "chatcmpl-ping" }), { status: 200 });
+      }
+      if (/\/v1beta\/models$/.test(url)) {
+        return new Response(JSON.stringify({ models: [{ name: "models/gemini-3.6-flash" }] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "google",
+        baseUrl: null,
+        capabilitiesJson: { llm: { modelId: "gemini-3.6-flash" }, scorer: { modelId: "gemini-3.6-flash" } },
+      }),
+      captureFetch,
+    );
+
+    // The model list stays on the native wire (one call per capability, the
+    // probe has no cross-capability cache); the chat pings move to the
+    // documented OpenAI-compatible base with Bearer auth.
+    expect(seen).toEqual([
+      { url: "https://generativelanguage.googleapis.com/v1beta/models", auth: null },
+      { url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", auth: "Bearer sk-plaintext-secret" },
+      { url: "https://generativelanguage.googleapis.com/v1beta/models", auth: null },
+      { url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", auth: "Bearer sk-plaintext-secret" },
+    ]);
+    expect(result.capabilities.map((r) => r.capability)).toEqual(["llm", "scorer"]);
+    expect(result.capabilities.every((r) => r.status === "validated")).toBe(true);
+    expect(result.capabilities.every((r) => r.selectedModelAccepted === true)).toBe(true);
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("rejects the google TTS preset because the interview runtime has no Google TTS wire", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1beta\/interactions$/.test(url)) {
+        return new Response(
+          JSON.stringify({
+            steps: [{ type: "model_output", content: [{ type: "audio", data: Buffer.from([1, 2, 3]).toString("base64") }] }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (/\/v1beta\/models$/.test(url)) {
+        return new Response(JSON.stringify({ models: [{ name: "models/gemini-3.8-flash-tts" }] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "google",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "gemini-3.8-flash-tts" } },
+      }),
+      captureFetch,
+    );
+
+    // Fail closed before any provider call: settings cannot save a TTS config
+    // the room cannot serve, and a legacy row is reported as unsupported.
+    expect(seen).toEqual([]);
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "failed",
+      errorCode: "model_unsupported",
+    });
+    expect(result.credentialStatus).toBe("invalid");
+  });
+
+  it("probes the anthropic preset on the native Messages wire (x-api-key + anthropic-version)", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/models$/.test(url)) {
+        // Anthropic has no model-list endpoint: 404 is "when supported".
+        return new Response(JSON.stringify({ error: { type: "not_found_error" } }), { status: 404 });
+      }
+      if (/\/v1\/messages$/.test(url)) {
+        return new Response(JSON.stringify({ id: "msg_ping", type: "message" }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "anthropic",
+        baseUrl: null,
+        capabilitiesJson: { llm: { modelId: "claude-opus-5-5" }, scorer: { modelId: "claude-opus-5-5" } },
+      }),
+      captureFetch,
+    );
+
+    // llm and scorer each run their own list + ping (no cross-capability
+    // cache); the list is absent (404 → "when supported"), the ping is on the
+    // native Messages wire with x-api-key + anthropic-version.
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://api.anthropic.com/models",
+      "https://api.anthropic.com/v1/messages",
+      "https://api.anthropic.com/models",
+      "https://api.anthropic.com/v1/messages",
+    ]);
+    const ping = seen[1]!;
+    expect(ping.headers.get("x-api-key")).toBe("sk-plaintext-secret");
+    expect(ping.headers.get("authorization")).toBeNull();
+    expect(ping.headers.get("anthropic-version")).toBe("2023-06-01");
+    const parsed = JSON.parse(ping.body!) as {
+      model: string;
+      max_tokens: number;
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(parsed).toEqual({
+      model: "claude-opus-5-5",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "ping" }],
+    });
+    // No list endpoint → modelsDiscovered stays null and the claim does not
+    // overclaim, while the row still validates end to end.
+    expect(result.capabilities.every((r) => r.status === "validated")).toBe(true);
+    expect(result.capabilities.every((r) => r.modelsDiscovered === null)).toBe(true);
+    expect(result.capabilities.every((r) => r.selectedModelAccepted === null)).toBe(true);
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("maps anthropic error statuses into the probe taxonomy (401 auth, 404 model, 429 rate limit)", async () => {
+    const runWithStatus = (status: number, body: unknown) =>
+      runProbe(
+        configRow({
+          providerType: "preset",
+          providerName: "anthropic",
+          baseUrl: null,
+          capabilitiesJson: { llm: { modelId: "claude-opus-5-5" } },
+        }),
+        jsonFetch([
+          { match: /\/models$/, status: 404, body: {} },
+          { match: /\/v1\/messages$/, status, body },
+        ]),
+      );
+
+    const auth = await runWithStatus(401, { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } });
+    expect(auth.capabilities[0]).toMatchObject({ status: "failed", errorCode: "authentication_failed", credentialValid: false });
+    expect(JSON.stringify(auth)).not.toContain("sk-plaintext-secret");
+
+    const missing = await runWithStatus(404, { type: "error", error: { type: "not_found_error", message: "model:claude-nope" } });
+    // Anthropic's /v1/messages endpoint always exists — a 404 there is an
+    // unknown model, mapped to model_unsupported (not endpoint_not_found).
+    expect(missing.capabilities[0]).toMatchObject({ status: "failed", errorCode: "model_unsupported", credentialValid: true });
+
+    const throttled = await runWithStatus(429, { type: "error", error: { type: "rate_limit_error", message: "over" } });
+    expect(throttled.capabilities[0]).toMatchObject({ status: "failed", errorCode: "rate_limited", credentialValid: true });
+
+    for (const result of [auth, missing, throttled]) {
+      expect(result.credentialStatus).toBe("invalid");
+    }
+  });
+
+  it("probes the elevenlabs preset TTS on the native /v1/text-to-speech/{voice_id} wire (xi-api-key)", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1\/text-to-speech\/JBFqnCBsd6RMkjVDRZzb$/.test(url)) {
+        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 }); // audio bytes
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "eleven_v4" } },
+      }),
+      captureFetch,
+    );
+
+    // Exactly one network call on the native TTS wire: the documented voice
+    // ID in the path, xi-api-key credential, no model-list call, no
+    // OpenAI-shaped endpoint. The exact model ID stays in the body.
+    expect(seen).toHaveLength(1);
+    const ping = seen[0]!;
+    expect(ping.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb");
+    expect(ping.headers.get("xi-api-key")).toBe("sk-plaintext-secret");
+    expect(ping.headers.get("authorization")).toBeNull();
+    expect(JSON.parse(ping.body!)).toMatchObject({ text: "ping", model_id: "eleven_v4" });
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "validated",
+      modelsDiscovered: null,
+      selectedModelAccepted: null,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("probes the elevenlabs preset ASR on the native /v1/speech-to-text wire with the synthesised WAV", async () => {
+    let sttForm: FormData | null = null;
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (/\/v1\/speech-to-text$/.test(url)) {
+        sttForm = init?.body instanceof FormData ? init.body : null;
+        return new Response(JSON.stringify({ text: "ping" }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "elevenlabs",
+        baseUrl: null,
+        capabilitiesJson: { asr: { modelId: "scribe_v2" } },
+      }),
+      captureFetch,
+    );
+
+    expect(sttForm).toBeInstanceOf(FormData);
+    expect(sttForm!.get("model_id")).toBe("scribe_v2"); // exact selected model
+    // ElevenLabs Scribe's documented multipart field is `file`, not `audio`.
+    const file = sttForm!.get("file") as File | null;
+    expect(file).toBeInstanceOf(File);
+    const wav = Buffer.from(await file!.arrayBuffer());
+    expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    // The synthetic clip must clear ElevenLabs' 100 ms minimum duration.
+    const sampleRate = wav.readUInt32LE(24);
+    const dataLength = wav.readUInt32LE(40);
+    expect(dataLength / sampleRate).toBeGreaterThanOrEqual(0.1);
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "asr",
+      status: "validated",
+      modelsDiscovered: null,
+      selectedModelAccepted: null,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
+
+  it("validates the openai TTS preset on the OpenAI-compatible /audio/speech wire", async () => {
+    const seen: Array<{ url: string; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, body: typeof init?.body === "string" ? init.body : null });
+      const body = /\/audio\/speech$/.test(url)
+        ? new Uint8Array([1, 2, 3])
+        : { data: /\/models$/.test(url) ? [{ id: "gpt-4o-mini-tts" }] : { id: "ping" } };
+      return new Response(JSON.stringify(body ?? {}), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "preset",
+        providerName: "openai",
+        baseUrl: null,
+        capabilitiesJson: { tts: { modelId: "gpt-4o-mini-tts" } },
+      }),
+      captureFetch,
+    );
+
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://api.openai.com/v1/models",
+      "https://api.openai.com/v1/audio/speech",
+    ]);
+    // The exact configured TTS model id rides the OpenAI-shaped body.
+    const speech = seen.find((call) => /\/audio\/speech$/.test(call.url))!;
+    expect(JSON.parse(speech.body!)).toMatchObject({ model: "gpt-4o-mini-tts", input: "ping" });
+    expect(result.capabilities[0]).toMatchObject({
+      capability: "tts",
+      status: "validated",
+      selectedModelAccepted: true,
+    });
+    expect(result.credentialStatus).toBe("valid");
+  });
 });
+
+function parseBase64WavHead(base64: string): ArrayBuffer {
+  const binary = Buffer.from(base64, "base64");
+  return binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength) as ArrayBuffer;
+}
 
 describe("discoverProviderModels (FR-PROVIDER-009)", () => {
   it("returns the provider's model list when the provider exposes one", async () => {

@@ -35,8 +35,6 @@ COPY --from=build --chown=appuser:appuser /app /app
 USER appuser
 ENV NODE_ENV=production
 
-ARG AGENT_ENTRY=scripts/livekit-agent.mjs
-ENV AGENT_ENTRY=${AGENT_ENTRY}
-# The LiveKit Agents CLI requires the `start` subcommand in production;
-# without it the process prints usage and exits (CrashLoop).
-CMD ["sh", "-c", "node \"$AGENT_ENTRY\" start"]
+# LiveKit Cloud requires a fixed startup command. The pnpm script supplies the
+# single `start` subcommand; invoking the script directly would print usage.
+CMD ["pnpm", "agent"]

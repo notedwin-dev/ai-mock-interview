@@ -42,6 +42,7 @@ export interface InvitationView {
   /** The one runtime this session runs (ADR-006): exactly one room UI is shown. */
   runtimeMode: string;
   status: string;
+  scheduledAt: Date | null;
 }
 
 /** Shape of a raw invitation capability: 32 bytes of base64url (43 chars). */
@@ -73,6 +74,7 @@ export async function findActiveSessionByToken(
   evaluationMode: string;
   runtimeMode: string;
   status: string;
+  scheduledAt: Date | null;
 } | null> {
   // Shared validator from the runtime batch; TOKEN_PATTERN stays exported for
   // callers that still describe the raw shape. Malformed tokens never hit the DB.
@@ -94,6 +96,7 @@ export async function findActiveSessionByToken(
       evaluationMode: true,
       runtimeMode: true,
       status: true,
+      scheduledAt: true,
     },
   });
 }
@@ -157,6 +160,7 @@ export async function resolveInvitation(token: string): Promise<InvitationView |
     evaluationMode: session.evaluationMode,
     runtimeMode: session.runtimeMode,
     status: session.status,
+    scheduledAt: session.scheduledAt,
   };
 }
 

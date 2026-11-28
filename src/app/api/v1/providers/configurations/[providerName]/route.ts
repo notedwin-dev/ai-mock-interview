@@ -1,5 +1,5 @@
 import { requireApiAccount } from "@/lib/auth/guard";
-import { errorResponse, jsonError } from "@/lib/api/respond";
+import { errorResponse, jsonError, parseJsonBody } from "@/lib/api/respond";
 import {
   deleteProviderConfiguration,
   updateProviderConfiguration,
@@ -21,7 +21,7 @@ export async function PATCH(
   try {
     const { providerName } = await ctx.params;
     const configId = new URL(request.url).searchParams.get("configId") ?? undefined;
-    const body = await request.json();
+    const body = await parseJsonBody(request);
     const configuration = await updateProviderConfiguration(
       account.account.userId,
       providerName,

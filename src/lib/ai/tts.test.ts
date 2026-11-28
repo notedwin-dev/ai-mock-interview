@@ -1,14 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderRoute } from "@/lib/providers/provider-route";
-import { assertTtsWireSupported, synthesizeSpeech, TtsError } from "./tts";
+import {
+  assertTtsWireSupported,
+  synthesizeSpeech,
+  TtsError,
+  type TtsRoute,
+} from "./tts";
 
-/** Hermetic tests for the interviewer voice adapter (TT-9; ADR-0005). */
-const fishRoute: ProviderRoute = {
+/**
+ * Hermetic tests for the provider-aware interviewer voice adapter
+ * (TT-9/TT-26; ADR-0005/006, ADR-030 + OWNER-020/021). Each wire is asserted
+ * against a mock fetch: exact endpoint, credential header (key only there,
+ * never in errors), and the EXACT configured model id in every request.
+ */
+const fishRoute: TtsRoute = {
   providerName: "fish-audio",
   providerType: "preset",
   baseUrl: "https://api.fish.audio",
   modelId: "s2.1-pro-free",
   apiKey: "sk-secret",
+};
+
+const openAiRoute: TtsRoute = {
+  providerName: "openai",
+  providerType: "preset",
+  baseUrl: "https://api.openai.com/v1",
+  modelId: "gpt-4o-mini-tts",
+  apiKey: "sk-tts-secret",
+};
+
+const googleRoute: TtsRoute = {
+  providerName: "google",
+  providerType: "preset",
+  baseUrl: "https://generativelanguage.googleapis.com",
+  modelId: "gemini-tts-2.5-flash-preview",
+  apiKey: "goog-tts-secret",
+};
+
+const elevenRoute: TtsRoute = {
+  providerName: "elevenlabs",
+  providerType: "preset",
+  baseUrl: "https://api.elevenlabs.io",
+  modelId: "eleven_v3",
+  apiKey: "xi-tts-secret",
 };
 
 function mockFetch(response: { ok: boolean; status: number; bytes?: Uint8Array }) {
@@ -43,7 +77,67 @@ describe("synthesizeSpeech", () => {
     expect(JSON.parse(calls[0]!.body)).toEqual({ text: "Hello", format: "mp3" });
   });
 
-  it("uses the OpenAI-compatible speech wire for custom gateways", async () => {
+  it("openai preset: OpenAI-compatible /audio/speech with Bearer key and exact model", async () => {
+    const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
+
+    await synthesizeSpeech(openAiRoute, "Hi there", { fetchImpl });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.openai.com/v1/audio/speech");
+    expect(calls[0]!.headers["authorization"]).toBe("Bearer sk-tts-secret");
+    expect(JSON.parse(calls[0]!.body)).toMatchObject({
+      model: "gpt-4o-mini-tts",
+      input: "Hi there",
+      voice: "alloy",
+      response_format: "mp3",
+    });
+  });
+
+  it("google preset: fail closed without calling the undocumented audio/speech wire", async () => {
+    const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
+
+    try {
+      await synthesizeSpeech(googleRoute, "Good morning", { fetchImpl });
+      expect.unreachable("an unverified speech endpoint must be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TtsError);
+      expect((error as TtsError).code).toBe("unsupported_provider");
+      expect((error as Error).message).not.toContain("goog-tts-secret");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("elevenlabs preset: native TTS path with xi-api-key, exact model, NO voice field", async () => {
+    const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
+
+    const bytes = await synthesizeSpeech(elevenRoute, "Welcome to the interview.", { fetchImpl });
+
+    expect(Array.from(bytes)).toEqual([1, 2, 3]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://api.elevenlabs.io/v1/text-to-speech/eleven_v3?output_format=mp3_44100_128",
+    );
+    expect(calls[0]!.headers["xi-api-key"]).toBe("xi-tts-secret");
+    expect(calls[0]!.headers["authorization"]).toBeUndefined();
+    const body = JSON.parse(calls[0]!.body);
+    expect(body.text).toBe("Welcome to the interview.");
+    expect(body.model_id).toBe("eleven_v3");
+    // OWNER-021: Voice Library voices are unavailable on the free tier, so the
+    // adapter must never send a voice id (provider default is correct).
+    expect(body.voice).toBeUndefined();
+  });
+
+  it("a custom row pointing at api.elevenlabs.io uses the native wire by host", async () => {
+    const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
+    const route = { ...elevenRoute, providerType: "custom", providerName: "relay" };
+
+    await synthesizeSpeech(route, "Hi", { fetchImpl });
+
+    expect(calls[0]!.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/eleven_v3?output_format=mp3_44100_128");
+    expect(calls[0]!.headers["xi-api-key"]).toBe("xi-tts-secret");
+  });
+
+  it("uses the OpenAI-compatible speech wire for other routes", async () => {
     const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
     const route: ProviderRoute = {
       providerName: "my-gateway",
@@ -60,37 +154,11 @@ describe("synthesizeSpeech", () => {
     expect(calls[0]!.headers["model"]).toBeUndefined();
   });
 
-  it("refuses presets without an implemented wire (elevenlabs, openai) before any network call", async () => {
-    // The registry declares `tts` for elevenlabs/openai, but their native
-    // wires are not implemented here: a typed unsupported_provider beats a
-    // silent 502 (fail closed, FR-PROVIDER-006).
-    const { fetchImpl } = mockFetch({ ok: true, status: 200 });
-    const elevenlabs: ProviderRoute = {
-      providerName: "elevenlabs",
-      providerType: "preset",
-      baseUrl: "https://api.elevenlabs.io",
-      modelId: "eleven_v4",
-      apiKey: "sk-secret",
-    };
-
-    await expect(synthesizeSpeech(elevenlabs, "Hi", { fetchImpl })).rejects.toMatchObject({
-      name: "TtsError",
-      code: "unsupported_provider",
-    });
-    // The pure pre-flight gate rejects the same routes without I/O, so the
-    // room can refuse the turn BEFORE persisting anything.
-    expect(() => assertTtsWireSupported(elevenlabs)).toThrowError(
-      expect.objectContaining({ code: "unsupported_provider" }),
-    );
-    expect(() => assertTtsWireSupported(fishRoute)).not.toThrow();
-    expect(() => assertTtsWireSupported({ ...elevenlabs, providerType: "custom", providerName: "my-voice" })).not.toThrow();
-  });
-
   it("refuses unrecognised Fish Audio model ids before any network call (fail closed)", async () => {
     // The native wire always sends the id in the `model` header; an id outside
     // the documented catalogue would fail opaquely at the provider.
     const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
-    const unknown: ProviderRoute = { ...fishRoute, modelId: "made-up-model" };
+    const unknown: TtsRoute = { ...fishRoute, modelId: "made-up-model" };
 
     await expect(synthesizeSpeech(unknown, "Hi", { fetchImpl })).rejects.toMatchObject({
       name: "TtsError",
@@ -147,15 +215,30 @@ describe("synthesizeSpeech", () => {
     }
   });
 
-  it("reports provider failures as typed errors without leaking the key", async () => {
-    const fetchImpl = (async () => new Response("no credit", { status: 402 })) as typeof fetch;
+  it("reports provider failures as typed errors without leaking the key (all wires)", async () => {
+    for (const route of [fishRoute, openAiRoute, elevenRoute]) {
+      const fetchImpl = (async () =>
+        new Response(`no credit for key ${route.apiKey} at ${route.baseUrl}`, { status: 402 })) as typeof fetch;
+      try {
+        await synthesizeSpeech(route, "Hi", { fetchImpl });
+        expect.unreachable("provider failure must reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(TtsError);
+        expect((error as TtsError).code).toBe("generation_failed");
+        expect((error as Error).message).not.toContain(route.apiKey);
+        expect((error as Error).message).not.toContain(route.baseUrl);
+      }
+    }
+  });
+
+  it("reports empty audio as invalid_audio", async () => {
+    const { fetchImpl } = mockFetch({ ok: true, status: 200, bytes: new Uint8Array(0) });
     try {
-      await synthesizeSpeech(fishRoute, "Hi", { fetchImpl });
-      expect.unreachable("provider failure must reject");
+      await synthesizeSpeech(openAiRoute, "Hi", { fetchImpl });
+      expect.unreachable("empty audio must reject");
     } catch (error) {
       expect(error).toBeInstanceOf(TtsError);
-      expect((error as TtsError).code).toBe("generation_failed");
-      expect((error as Error).message).not.toContain("sk-secret");
+      expect((error as TtsError).code).toBe("invalid_audio");
     }
   });
 });

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, X } from "lucide-react";
 import { Room, RoomEvent, Track, type RemoteParticipant } from "livekit-client";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
+import { useOverlayFocusTrap } from "@/components/interview/use-overlay-focus-trap";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { readDevicePreferences, saveDevicePreferences } from "@/lib/interview/device-preferences";
 import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
@@ -21,6 +22,9 @@ import type { TranscriptEntry } from "@/lib/interview/room";
  */
 type RoomStatus = "idle" | "connecting" | "connected" | "reconnecting";
 
+/** Bound the whole transcript request, including the body read. */
+const TRANSCRIPT_POLL_TIMEOUT_MS = 10_000;
+
 /**
  * MDN: MediaStreamTrack.enabled is the actual mute switch — setting it to
  * false makes the track emit silence. LiveKit's setMicrophoneEnabled controls
@@ -35,9 +39,6 @@ function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
   const track = publication?.audioTrack?.mediaStreamTrack;
   if (track) track.enabled = enabled;
 }
-
-const GHOST =
-  "inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-ink-soft outline-none transition-colors hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-emerald-400";
 
 export function WebRTCRoom({
   token,
@@ -90,20 +91,24 @@ export function WebRTCRoom({
     if (transcriptInFlightRef.current) return;
     transcriptInFlightRef.current = true;
     const request = ++transcriptRequestRef.current;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TRANSCRIPT_POLL_TIMEOUT_MS);
     try {
       const response = await fetch(
         `/api/v1/interviews/invitations/${encodeURIComponent(token)}/turns`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: controller.signal },
       );
       if (!response.ok) return;
       const body = (await response.json()) as { messages: TranscriptEntry[] };
       // Keep the stale-response guard after parsing so older data can never
-      // replace messages already applied by a newer request.
+      // replace messages already applied by a newer request. An aborted read
+      // throws above and releases the slot in finally for the next poll.
       if (request !== transcriptRequestRef.current) return;
       setMessages(body.messages ?? []);
     } catch {
-      // The next poll retries; the call itself is unaffected.
+      // Network error or deadline expiry: the next poll retries.
     } finally {
+      clearTimeout(timeout);
       transcriptInFlightRef.current = false;
     }
   }, [token]);
@@ -119,42 +124,7 @@ export function WebRTCRoom({
   }, [loadTranscript]);
 
   /** Overlay dialog: focus in, Escape to close, focus back to the opener. */
-  useEffect(() => {
-    if (!overlayOpen) return;
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    // Focus a real control, not the panel: Shift+Tab from the panel would land
-    // on the backdrop button before the dialog, escaping the focus trap.
-    const firstControl = overlayRef.current?.querySelector<HTMLElement>(
-      'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-    );
-    (firstControl ?? overlayRef.current)?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        setOverlayOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusables = overlayRef.current?.querySelectorAll<HTMLElement>(
-        'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusables || focusables.length === 0) return;
-      const first = focusables[0]!;
-      const last = focusables[focusables.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
-    };
-  }, [overlayOpen]);
+  useOverlayFocusTrap(overlayOpen, overlayRef, () => setOverlayOpen(false));
 
   const refreshParticipants = useCallback((room: Room) => {
     setParticipants([...room.remoteParticipants.values()].map((p: RemoteParticipant) => p.identity));
@@ -189,6 +159,9 @@ export function WebRTCRoom({
         return;
       }
       const body = (await response.json()) as { url: string; token: string };
+      // The user may have left while the token request was in flight. Do not
+      // create a room (or open the microphone) for an unmounted component.
+      if (leavingRef.current) return;
       // The token route has already activated the session; expose End even if
       // the LiveKit connection itself cannot be established.
       setJoined(true);
@@ -244,6 +217,13 @@ export function WebRTCRoom({
       });
 
       await room.connect(body.url, body.token);
+      // A leave during connect cannot be handled by the unmount cleanup (it
+      // only sees a still-null roomRef). Release this room before enabling the
+      // microphone so audio cannot stay live after the candidate left.
+      if (leavingRef.current) {
+        await room.disconnect();
+        return;
+      }
       // The helper re-reads the mute intent after each await, so a Mute click
       // during token fetching or publication cannot leave audio publishing.
       const published = await applyLatestMuteIntent(
@@ -355,7 +335,7 @@ export function WebRTCRoom({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => setOverlayOpen((open) => !open)} className={GHOST}>
+          <button type="button" onClick={() => setOverlayOpen((open) => !open)} className="btn-ghost">
             {overlayOpen ? <X className="h-4 w-4" aria-hidden /> : <MessageSquare className="h-4 w-4" aria-hidden />}
             {overlayOpen ? "Hide conversation" : "Open conversation"}
           </button>
@@ -412,7 +392,7 @@ export function WebRTCRoom({
           <div ref={overlayRef} tabIndex={-1} className="relative z-10 flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-line bg-surface p-5 outline-none">
             <div className="flex items-center justify-between">
               <h2 id="conversation-heading" className="font-display text-lg font-semibold text-ink">Conversation</h2>
-              <button type="button" onClick={() => setOverlayOpen(false)} className={GHOST}>Close</button>
+              <button type="button" onClick={() => setOverlayOpen(false)} className="btn-ghost">Close</button>
             </div>
             {messages.length === 0 ? (
               <p className="text-sm text-ink-muted">The conversation will appear here as it happens.</p>

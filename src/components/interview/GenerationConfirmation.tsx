@@ -99,7 +99,10 @@ export function GenerationConfirmation({
             className="h-10 rounded-full border border-line bg-raised px-4 text-sm text-ink"
             value={techStackDraft}
             onChange={(event) => setTechStackDraft(event.target.value)}
-            onBlur={() => setDraft((current) => ({ ...current, techStack: normalizeTechStack() }))}
+            onBlur={() => {
+              const techStack = normalizeTechStack();
+              setDraft((current) => ({ ...current, techStack }));
+            }}
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -144,7 +147,7 @@ export function GenerationConfirmation({
             onChange={(event) =>
               setDraft({ ...draft, category: event.target.value as ConfirmableConfig["category"] })
             }>
-            <option value="general">General</option>
+            <option value="general">Mixed (Technical + Behavioral)</option>
             <option value="technical">Technical</option>
             <option value="behavioral">Behavioral</option>
           </select>

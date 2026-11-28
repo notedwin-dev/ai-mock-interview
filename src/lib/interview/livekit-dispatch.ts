@@ -2,11 +2,12 @@ import { AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
 import type { LiveKitConfig } from "@/lib/livekit/env";
 
 /**
- * Explicit LiveKit agent dispatch (TT-8 WebRTC runtime). One dispatch per
- * interview room, carrying the interview context to the Gemini Live agent.
- * Agent failures never block the candidate from entering the room.
+ * Shared LiveKit agent dispatch (TT-8 review dedup). Both roles run on ONE
+ *  deployed agent (`AIMIS_AGENT_NAME`, Build-plan limit) and share the
+ *  ensure-room → list → dispatch flow; only the metadata differs. The role is
+ *  carried in metadata, not the agent name. Agent failures never block the
+ *  candidate from entering the room.
  */
-/** One deployed LiveKit agent serves both roles (Build plan limit). */
 export const AIMIS_AGENT_NAME = "aimis-agent";
 
 export interface DispatchContext {
@@ -43,38 +44,60 @@ export function apiHost(url: string): string {
   return url.replace(/^ws:/, "http:").replace(/^wss:/, "https:");
 }
 
-export async function dispatchInterviewerAgent(
-  context: DispatchContext,
+/**
+ * Shared ensure-room → list → dispatch flow. Returns true when this call
+ * created the agent dispatch, false when an AIMIS dispatch already exists for
+ * the room (an existing dispatch is left untouched).
+ *
+ * LiveKit Cloud may auto-create an unnamed dispatch when a room appears; that
+ * is not our agent and must not suppress our explicit dispatch, so only
+ * entries named AIMIS_AGENT_NAME count as "already dispatched".
+ */
+async function ensureRoomAndDispatch(
+  roomName: string,
+  metadata: Record<string, unknown>,
   config: LiveKitConfig,
-  deps: DispatchDeps = {},
+  deps: DispatchDeps,
 ): Promise<boolean> {
   const create =
     deps.createClient ??
     ((cfg: LiveKitConfig) =>
       new AgentDispatchClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as DispatchClient);
-
   // Dispatches require the room to exist; candidates have not connected yet.
   const createRooms =
     deps.createRoomClient ??
     ((cfg: LiveKitConfig) =>
       new RoomServiceClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as RoomClient);
   try {
-    await createRooms(config).createRoom({ name: context.room });
+    await createRooms(config).createRoom({ name: roomName });
   } catch {
     // The room may already exist — that is fine, dispatch it as-is.
   }
 
   const client = create(config);
-  // LiveKit Cloud may auto-create an unnamed dispatch when a room appears;
-  // that is not our agent and must not suppress our explicit dispatch.
-  const existing = (await client.listDispatch(context.room)).filter(
-    (entry) =>
-      (entry as { agentName?: string }).agentName === AIMIS_AGENT_NAME,
+  const existing = (await client.listDispatch(roomName)).filter(
+    (entry) => (entry as { agentName?: string }).agentName === AIMIS_AGENT_NAME,
   );
   if (existing.length > 0) return false;
 
-  await client.createDispatch(context.room, AIMIS_AGENT_NAME, {
-    metadata: JSON.stringify({
+  await client.createDispatch(roomName, AIMIS_AGENT_NAME, {
+    metadata: JSON.stringify(metadata),
+  });
+  return true;
+}
+
+/**
+ * Dispatches the interviewer agent into the interview room, carrying the
+ * interview context to the Gemini Live agent.
+ */
+export async function dispatchInterviewerAgent(
+  context: DispatchContext,
+  config: LiveKitConfig,
+  deps: DispatchDeps = {},
+): Promise<boolean> {
+  return ensureRoomAndDispatch(
+    context.room,
+    {
       role: "interviewer",
       sessionId: context.room,
       inviteToken: context.inviteToken,
@@ -84,9 +107,10 @@ export async function dispatchInterviewerAgent(
       experienceLevel: context.experienceLevel,
       techStack: context.techStack,
       questionCount: context.questionCount,
-    }),
-  });
-  return true;
+    },
+    config,
+    deps,
+  );
 }
 
 /**
@@ -99,32 +123,16 @@ export async function dispatchGeneratorAgent(
   config: LiveKitConfig,
   deps: DispatchDeps = {},
 ): Promise<boolean> {
-  const create =
-    deps.createClient ??
-    ((cfg: LiveKitConfig) =>
-      new AgentDispatchClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as DispatchClient);
-  const createRooms =
-    deps.createRoomClient ??
-    ((cfg: LiveKitConfig) =>
-      new RoomServiceClient(apiHost(cfg.url), cfg.apiKey, cfg.apiSecret) as unknown as RoomClient);
-  try {
-    await createRooms(config).createRoom({ name: context.room });
-  } catch {
-    // Room already exists — dispatch as-is.
-  }
-  const client = create(config);
-  const existing = (await client.listDispatch(context.room)).filter(
-    (entry) => (entry as { agentName?: string }).agentName === AIMIS_AGENT_NAME,
-  );
-  if (existing.length > 0) return false;
-  await client.createDispatch(context.room, AIMIS_AGENT_NAME, {
-    metadata: JSON.stringify({
+  return ensureRoomAndDispatch(
+    context.room,
+    {
       role: "generator",
       generationId: context.generationId,
       workerToken: context.workerToken,
       room: context.room,
       userName: context.userName,
-    }),
-  });
-  return true;
+    },
+    config,
+    deps,
+  );
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { jsonError } from "@/lib/api/respond";
+import { jsonError, parseJsonBody } from "@/lib/api/respond";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { InterviewError } from "@/lib/interview/service";
 
@@ -48,7 +48,7 @@ export async function POST(
 
     let body: z.infer<typeof bodySchema>;
     try {
-      body = bodySchema.parse(await request.json());
+      body = bodySchema.parse(await parseJsonBody(request));
     } catch {
       return jsonError(400, "invalid_input", "A valid set of finalized messages is required.");
     }

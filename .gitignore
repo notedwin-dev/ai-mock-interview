@@ -56,6 +56,10 @@ next-env.d.ts
 
 # OpenCode project-local agent config (machine/user-specific, not shared)
 /opencode.json
+/.opencode/
+
+# Local engineering documentation and agent instructions — never shared or committed
+/docs/
 
 # reference images
 docs/design/references/**/*.png
