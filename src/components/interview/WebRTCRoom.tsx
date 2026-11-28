@@ -56,6 +56,9 @@ export function WebRTCRoom({
   // connection is still in flight. The saved preference is only the initial
   // value; the ref is what the joining flow must re-read before publishing.
   const muteIntentRef = useRef(false);
+  // Sequence of mute toggles, so an older in-flight operation cannot apply
+  // its result over a newer intent.
+  const muteToggleRef = useRef(0);
   // Only the newest transcript request may replace the displayed messages.
   const transcriptRequestRef = useRef(0);
   // At most one transcript request in flight: a new poll must not invalidate
@@ -213,8 +216,8 @@ export function WebRTCRoom({
       room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
         if (topic !== CAPTION_TOPIC) return;
         try {
-          const parsed = JSON.parse(new TextDecoder().decode(payload)) as { text?: string };
-          if (parsed.text) setCaption(parsed.text);
+          const parsed = JSON.parse(new TextDecoder().decode(payload)) as { text?: unknown };
+          if (typeof parsed.text === "string") setCaption(parsed.text);
         } catch {
           // Ignore malformed caption packets.
         }
@@ -292,6 +295,7 @@ export function WebRTCRoom({
 
   async function toggleMute() {
     const participant = roomRef.current?.localParticipant;
+    const toggle = ++muteToggleRef.current;
     const next = !muteIntentRef.current;
     muteIntentRef.current = next;
     if (!participant) {
@@ -301,12 +305,23 @@ export function WebRTCRoom({
     }
     try {
       await participant.setMicrophoneEnabled(!next);
+      if (toggle !== muteToggleRef.current) {
+        // A newer toggle won while this request was in flight. This operation
+        // may have published a track, so reapply the latest intent and do not
+        // overwrite it with our stale result.
+        const latest = muteIntentRef.current;
+        await participant.setMicrophoneEnabled(!latest).catch(() => undefined);
+        setBrowserMicEnabled(roomRef.current, !latest);
+        setMuted(latest);
+        saveMutePreference(latest);
+        return;
+      }
       setBrowserMicEnabled(roomRef.current, !next);
       const actual = !participant.isMicrophoneEnabled;
-      muteIntentRef.current = actual;
       setMuted(actual);
       saveMutePreference(actual);
     } catch {
+      if (toggle !== muteToggleRef.current) return;
       muteIntentRef.current = true;
       setMuted(true);
       saveMutePreference(true);

@@ -225,7 +225,7 @@ function roomInstructions(context: RoomContext, primaryCount: number): string {
 export function buildLiveInterviewInstructions(context: RoomContext): string {
   return [
     "You are the AIMIS AI interviewer conducting a live voice mock interview.",
-    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
     "This is a mock interview: interview the candidate about the target role, not a real hiring decision.",
     "Ask short, focused questions one at a time and never invent facts about the candidate.",
     `Ask at most ${primaryQuestionLimit(context)} main questions in total. Close the interview briefly once you have asked them.`,
@@ -357,9 +357,17 @@ export async function runRoomTurn(
         // The reply landed. Re-assert the completion write in case it failed
         // after the reply persisted: completion is conditional and idempotent,
         // and a closing turn must not replay as an open one.
+        // Use the original turn's completion decision, not the total question
+        // count: a retry that only asked the final question stays open, while
+        // a retry of a turn that finished the interview (completion write may
+        // have failed after the closing reply) stays completed.
+        const primaryCount = history.filter(
+          (message) => message.messageKind === "primary_question",
+        ).length;
         const closing =
-          history.filter((m) => m.messageKind === "primary_question").length >=
-          primaryQuestionLimit(context);
+          context.status === "completed" ||
+          (primaryCount >= primaryQuestionLimit(context) &&
+            next.messageKind === "follow_up_question");
         if (closing) await store.complete(context.sessionId);
         return {
           messages: await store.messages(context.sessionId),
@@ -454,6 +462,11 @@ async function completeTurn(
       );
       unitId = entry.assessmentUnitId;
     } catch (error) {
+      // A completion that won the session-row lock must keep the room's stable
+      // invalid_state contract, just like the candidate append path.
+      if (error instanceof InterviewError && error.code === "invalid_state") {
+        throw new RoomError("invalid_state", error.message);
+      }
       // Only a unit-number collision is a concurrency conflict. Other failures
       // propagate untouched and must NOT roll the candidate row back.
       if (!(error instanceof UnitConflictError) || !parsed.idempotencyKey) throw error;

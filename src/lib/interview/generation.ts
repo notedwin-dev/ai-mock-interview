@@ -186,7 +186,10 @@ export async function confirmGeneration(
   const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
   if (!record) throw new GenerationError("not_found", "Generation session not found.");
   const { agentConfigSchema } = await import("./agent");
-  const config = agentConfigSchema.parse(input);
+  const parsed = agentConfigSchema.parse(input);
+  // An omitted stack is an explicit empty stack: store it that way so a
+  // replay with the same omissions compares equal and the session is stable.
+  const config = { ...parsed, techStack: parsed.techStack ?? [] };
   if (record.status === "confirmed" && record.sessionId) {
     // Replaying the same confirmation returns the original invitation. A
     // different configuration is a distinct outcome: it cannot rewrite the
@@ -220,7 +223,7 @@ export async function confirmGeneration(
         jobRole: config.jobRole,
         jobDescription: config.jobDescription || null,
         experienceLevel: config.experienceLevel ?? null,
-        techStack: config.techStack ? (config.techStack as unknown as never) : undefined,
+        techStack: config.techStack as unknown as never,
         questionCount: config.questionCount ?? null,
         evaluationMode: config.strictness,
       },

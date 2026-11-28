@@ -58,6 +58,9 @@ export function VoiceGenerationRoom() {
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [liveCaption, setLiveCaption] = useState<{ speaker: "agent" | "candidate"; text: string } | null>(null);
+  // The planner's latest spoken line, kept separately from persisted
+  // candidate captions so Repeat works before any answer has been stored.
+  const [lastPlannerCaption, setLastPlannerCaption] = useState<string | null>(null);
   const [agentPresent, setAgentPresent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,8 +118,13 @@ export function VoiceGenerationRoom() {
               speaker?: string;
               text?: string;
             };
-            if (parsed.text && (parsed.speaker === "agent" || parsed.speaker === "candidate")) {
+            if (
+              typeof parsed.text === "string" &&
+              parsed.text.length > 0 &&
+              (parsed.speaker === "agent" || parsed.speaker === "candidate")
+            ) {
               setLiveCaption({ speaker: parsed.speaker, text: parsed.text });
+              if (parsed.speaker === "agent") setLastPlannerCaption(parsed.text);
             }
           } catch {
             // Ignore malformed data messages; they never affect the call.
@@ -138,8 +146,20 @@ export function VoiceGenerationRoom() {
           void room.disconnect();
           return;
         }
+        // Participants already in the room never emit ParticipantConnected.
+        const earlyParticipant = [...room.remoteParticipants.values()].some(
+          (participant) => participant.identity !== room.localParticipant.identity,
+        );
+        if (earlyParticipant) {
+          agentPresentRef.current = true;
+          if (active) setAgentPresent(true);
+        }
+        // Apply the browser mute before publishing and re-read the latest
+        // intent afterwards: a muted candidate must never publish audio.
+        const startMuted = mutedRef.current;
+        setBrowserMicEnabled(room, !startMuted);
         try {
-          await room.localParticipant.setMicrophoneEnabled(true);
+          await room.localParticipant.setMicrophoneEnabled(!startMuted);
         } catch {
           if (active) {
             mutedRef.current = true;
@@ -171,7 +191,9 @@ export function VoiceGenerationRoom() {
   useEffect(() => {
     if (!generationId) return;
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     async function poll() {
+      let finished = false;
       try {
         const response = await fetch(
           `/api/v1/interviews/generation/${encodeURIComponent(generationId!)}`,
@@ -191,18 +213,22 @@ export function VoiceGenerationRoom() {
           setError("The planner did not join in time. Leave and start a new voice session.");
         }
         if (data.status === "completed" && data.invitationPath) {
+          finished = true;
           setStatus("completed");
           void roomRef.current?.disconnect();
         }
       } catch {
         // Transient poll failure: the next tick retries.
+      } finally {
+        // Chain the next poll only after this one settles: no overlapping
+        // requests, and no polling once the generation is completed.
+        if (active && !finished) timer = setTimeout(() => void poll(), 2000);
       }
     }
     void poll();
-    const timer = setInterval(() => void poll(), 2000);
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer !== null) clearTimeout(timer);
     };
   }, [generationId, router]);
 
@@ -242,7 +268,9 @@ export function VoiceGenerationRoom() {
   }
 
   function repeatLast() {
-    const text = generation?.caption?.text;
+    // Prefer the planner's latest spoken line; persisted captions may only
+    // contain candidate answers or lag behind the live data channel.
+    const text = lastPlannerCaption ?? generation?.caption?.text;
     if (!text || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.cancel();

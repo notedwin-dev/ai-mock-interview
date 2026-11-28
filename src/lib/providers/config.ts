@@ -419,16 +419,28 @@ export async function createProviderConfiguration(
     select: { userId: true },
   });
   if (!account) throw new ProviderConfigError("not_found", "Account not found.");
-  const inferredMode = capabilities.realtime ? "realtime" : "custom";
+  // Scoring gates reports, not an interview runtime: a scorer-only row must
+  // neither infer `custom` nor hide an existing realtime row. Only the first
+  // interview-capable configuration infers a mode.
+  const interviewCapability = (["realtime", "llm", "asr", "tts"] as const).some(
+    (capability) => capability in capabilities,
+  );
+  const inferredMode: RuntimeMode | null = interviewCapability
+    ? capabilities.realtime
+      ? "realtime"
+      : "custom"
+    : null;
   const { envelope, encryptionKeyVersion } = encryptApiKey(parsed.apiKey);
 
   const created = await withSerializableRetry(async (tx) => {
     // Atomic conditional write: infer the mode only while the account still
     // has none. A concurrent explicit choice between the check and here wins.
-    await tx.userAccount.updateMany({
-      where: { userId: parsedUser, activeRuntimeMode: null },
-      data: { activeRuntimeMode: inferredMode },
-    });
+    if (inferredMode) {
+      await tx.userAccount.updateMany({
+        where: { userId: parsedUser, activeRuntimeMode: null },
+        data: { activeRuntimeMode: inferredMode },
+      });
+    }
 
     // Runtime exclusivity is high-level only (realtime vs custom). The same
     // provider may be configured again for a DIFFERENT capability; only a row
