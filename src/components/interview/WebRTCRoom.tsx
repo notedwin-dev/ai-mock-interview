@@ -6,6 +6,7 @@ import { Room, RoomEvent, Track, type RemoteParticipant } from "livekit-client";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { readDevicePreferences, saveDevicePreferences } from "@/lib/interview/device-preferences";
+import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
 import type { TranscriptEntry } from "@/lib/interview/room";
 
@@ -243,18 +244,14 @@ export function WebRTCRoom({
       });
 
       await room.connect(body.url, body.token);
-      let micUnavailable = false;
-      // Re-read the intent after the async boundary: a Mute click while the
-      // token request was pending must not be overridden by the old snapshot.
-      const shouldPublish = !muteIntentRef.current;
-      try {
-        if (shouldPublish) {
-          await room.localParticipant.setMicrophoneEnabled(true);
-        }
-      } catch {
-        micUnavailable = true;
-      }
-      setBrowserMicEnabled(room, shouldPublish && !micUnavailable);
+      // The helper re-reads the mute intent after each await, so a Mute click
+      // during token fetching or publication cannot leave audio publishing.
+      const published = await applyLatestMuteIntent(
+        room.localParticipant,
+        () => muteIntentRef.current,
+      );
+      const micUnavailable = !published;
+      setBrowserMicEnabled(room, !muteIntentRef.current && !micUnavailable);
       // Reflect the actual track state, not the requested state — a permission
       // denial or a rejoin must never show "muted" while audio is being sent.
       const actualMuted = micUnavailable || !room.localParticipant.isMicrophoneEnabled;
@@ -303,30 +300,23 @@ export function WebRTCRoom({
       saveMutePreference(next);
       return;
     }
-    try {
-      await participant.setMicrophoneEnabled(!next);
-      if (toggle !== muteToggleRef.current) {
-        // A newer toggle won while this request was in flight. This operation
-        // may have published a track, so reapply the latest intent and do not
-        // overwrite it with our stale result.
-        const latest = muteIntentRef.current;
-        await participant.setMicrophoneEnabled(!latest).catch(() => undefined);
-        setBrowserMicEnabled(roomRef.current, !latest);
-        setMuted(latest);
-        saveMutePreference(latest);
-        return;
-      }
-      setBrowserMicEnabled(roomRef.current, !next);
-      const actual = !participant.isMicrophoneEnabled;
-      setMuted(actual);
-      saveMutePreference(actual);
-    } catch {
+    // Converge on the newest intent instead of applying a captured value:
+    // each await can be overtaken by another toggle.
+    const published = await applyLatestMuteIntent(participant, () => muteIntentRef.current);
+    if (!published) {
       if (toggle !== muteToggleRef.current) return;
       muteIntentRef.current = true;
       setMuted(true);
       saveMutePreference(true);
       setNotice("Microphone unavailable — you can listen to the interviewer.");
+      return;
     }
+    if (toggle !== muteToggleRef.current) return; // a newer toggle owns the UI write
+    const actual = !participant.isMicrophoneEnabled;
+    muteIntentRef.current = actual;
+    setBrowserMicEnabled(roomRef.current, !actual);
+    setMuted(actual);
+    saveMutePreference(actual);
   }
 
   function saveMutePreference(nextMuted: boolean) {

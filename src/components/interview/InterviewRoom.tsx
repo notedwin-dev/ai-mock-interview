@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
 import { readDevicePreferences } from "@/lib/interview/device-preferences";
+import { acquisitionTrackEnabled } from "@/lib/interview/mute-intent";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -309,8 +310,10 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         return;
       }
-      // Honour the mute preference chosen in the room/waiting room.
-      stream.getAudioTracks().forEach((track) => { track.enabled = !muted; });
+      // A Mute click while the permission prompt was pending is newer than
+      // this render's `muted`: read the ref so that intent is not lost.
+      const trackEnabled = acquisitionTrackEnabled(() => mutedRef.current);
+      stream.getAudioTracks().forEach((track) => { track.enabled = trackEnabled; });
       streamRef.current = stream;
 
       let recorder: MediaRecorder;

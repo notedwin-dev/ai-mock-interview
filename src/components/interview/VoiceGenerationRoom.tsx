@@ -7,6 +7,7 @@ import { Room, RoomEvent, Track } from "livekit-client";
 import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
+import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
 
 /**
  * Voice-driven interview generation (FR-SETUP-006). The same two-panel shape
@@ -154,22 +155,22 @@ export function VoiceGenerationRoom() {
           agentPresentRef.current = true;
           if (active) setAgentPresent(true);
         }
-        // Apply the browser mute before publishing and re-read the latest
-        // intent afterwards: a muted candidate must never publish audio.
-        const startMuted = mutedRef.current;
-        setBrowserMicEnabled(room, !startMuted);
-        try {
-          await room.localParticipant.setMicrophoneEnabled(!startMuted);
-        } catch {
-          if (active) {
-            mutedRef.current = true;
-            setMuted(true);
-            setError("Microphone unavailable — the planner cannot hear you.");
-          }
-        }
+        // Browser mute is applied before any publication exists; the helper
+        // then re-reads the intent after each async boundary, so a Mute click
+        // while publication is pending cannot leave audio flowing.
+        setBrowserMicEnabled(room, !mutedRef.current);
+        const published = await applyLatestMuteIntent(
+          room.localParticipant,
+          () => mutedRef.current,
+        );
         if (!active) {
           void room.disconnect();
           return;
+        }
+        if (!published && active) {
+          mutedRef.current = true;
+          setMuted(true);
+          setError("Microphone unavailable — the planner cannot hear you.");
         }
         setBrowserMicEnabled(room, !mutedRef.current);
         if (active) setStatus("connected");
