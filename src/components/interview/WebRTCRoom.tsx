@@ -152,6 +152,9 @@ export function WebRTCRoom({
         return;
       }
       const body = (await response.json()) as { url: string; token: string };
+      // The user may have left while the token request was in flight. Do not
+      // create a room (or open the microphone) for an unmounted component.
+      if (leavingRef.current) return;
       // The token route has already activated the session; expose End even if
       // the LiveKit connection itself cannot be established.
       setJoined(true);
@@ -207,6 +210,13 @@ export function WebRTCRoom({
       });
 
       await room.connect(body.url, body.token);
+      // A leave during connect cannot be handled by the unmount cleanup (it
+      // only sees a still-null roomRef). Release this room before enabling the
+      // microphone so audio cannot stay live after the candidate left.
+      if (leavingRef.current) {
+        await room.disconnect();
+        return;
+      }
       // The helper re-reads the mute intent after each await, so a Mute click
       // during token fetching or publication cannot leave audio publishing.
       const published = await applyLatestMuteIntent(

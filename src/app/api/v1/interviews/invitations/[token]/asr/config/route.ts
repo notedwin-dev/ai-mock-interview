@@ -1,5 +1,5 @@
 import { jsonError } from "@/lib/api/respond";
-import { isLiveTranscribeModel } from "@/lib/ai/live-transcribe";
+import { isLiveTranscribeRoute } from "@/lib/ai/live-transcribe";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { resolveForOutboundCall } from "@/lib/providers/config";
 
@@ -24,7 +24,7 @@ export async function GET(
       return jsonError(409, "voice_not_configured", "No speech-recognition provider is enabled.");
     }
     return Response.json({
-      mode: isLiveTranscribeModel(resolved.modelId) ? "stream" : "batch",
+      mode: isLiveTranscribeRoute(resolved) ? "stream" : "batch",
       providerName: resolved.providerName,
     });
   } catch {

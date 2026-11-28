@@ -830,38 +830,71 @@ export async function setActiveCapability(
   const cap = parsed.data.capability;
 
   return db.$transaction(async (tx) => {
-    const row = await tx.userProviderConfiguration.findFirst({
+    // Serialize activations for this user: overlapping calls (double submit,
+    // two dashboard tabs) must see each other's committed writes, instead of
+    // both reading "no active row" and enabling one row each.
+    await tx.$queryRaw`SELECT user_id FROM user_account WHERE user_id = ${parsedUser}::uuid FOR UPDATE`;
+
+    const sameProvider = await tx.userProviderConfiguration.findMany({
       where: { userId: parsedUser, providerName },
     });
-    if (!row) {
+    if (sameProvider.length === 0) {
       throw new ProviderConfigError(
         "not_found",
         "Provider configuration not found.",
       );
     }
-    const rowCapabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
-    if (!rowCapabilities[cap]) {
+    // One provider name may have several rows, one per capability. Select the
+    // row that actually serves the requested capability, never an arbitrary
+    // first row in database order.
+    const row = sameProvider.find(
+      (candidate) => cap in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
+    );
+    if (!row) {
       throw new ProviderConfigError(
         "capability_not_supported",
         `The configuration does not serve the ${cap} capability.`,
       );
     }
 
-    // Deactivate every other enabled row of this user that serves the
-    // capability (the selected row is always enabled afterwards). The
-    // capability check is done in JS against the user's own rows: a row is
-    // one per (user, providerName) so the set is small, and Prisma's JSON
-    // filter has no object-predicates.
+    // Apply the same enable gate as PATCH before disabling anything: a failed
+    // probe must not replace a working configuration with a broken one.
+    assertEnablementAllowed(
+      row.credentialStatus as "unvalidated" | "valid" | "invalid",
+      true,
+    );
+
+    // Deactivate other enabled rows that serve the capability, but keep a
+    // shared row enabled when it is the only enabled row for one of its OTHER
+    // capabilities: ASR, LLM and TTS are independently configurable, so a
+    // switch must not silently remove another capability's selection.
     const candidates = await tx.userProviderConfiguration.findMany({
       where: { userId: parsedUser, isEnabled: true },
       select: { userProviderConfigurationId: true, capabilitiesJson: true },
     });
+    const servedBy = (candidate: { capabilitiesJson: unknown }): CapabilitiesJson =>
+      capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
+    // The chosen row plus rows that do not serve this capability are never
+    // disabled; only these can keep another capability available.
+    const staying = [
+      row,
+      ...candidates.filter((candidate) => !(cap in servedBy(candidate))),
+    ];
     const toDisable = candidates
-      .filter(
-        (candidate) =>
-          candidate.userProviderConfigurationId !== row.userProviderConfigurationId &&
-          cap in capabilitiesJsonSchema.parse(candidate.capabilitiesJson),
-      )
+      .filter((candidate) => {
+        if (candidate.userProviderConfigurationId === row.userProviderConfigurationId) return false;
+        const caps = servedBy(candidate);
+        if (!(cap in caps)) return false;
+        return !Object.keys(caps).some(
+          (other) =>
+            other !== cap &&
+            !staying.some(
+              (kept) =>
+                kept.userProviderConfigurationId !== candidate.userProviderConfigurationId &&
+                other in servedBy(kept),
+            ),
+        );
+      })
       .map((candidate) => candidate.userProviderConfigurationId);
     if (toDisable.length > 0) {
       await tx.userProviderConfiguration.updateMany({

@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { requireAccount } from "@/lib/auth/guard";
 import { InterviewReady } from "@/components/interview/InterviewReady";
-import { getOwnInterviewTranscript } from "@/lib/interview/service";
+import { InterviewError, getOwnInterviewTranscript } from "@/lib/interview/service";
 import { db } from "@/lib/db";
 
 export const instant = false;
@@ -15,8 +15,9 @@ export default async function Page(
   let data: Awaited<ReturnType<typeof getOwnInterviewTranscript>>;
   try {
     data = await getOwnInterviewTranscript(account.userId, sessionId);
-  } catch {
-    notFound();
+  } catch (error) {
+    if (error instanceof InterviewError && error.code === "not_found") notFound();
+    throw error;
   }
   const generation = await db.interviewGeneration.findFirst({
     where: { sessionId },

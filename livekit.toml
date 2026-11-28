@@ -1,3 +1,9 @@
+# Deploy the agent image, never the root app image: the root Dockerfile starts
+# server.js (the Next.js app), while agents/Dockerfile starts the LiveKit agent.
+# `pnpm agent:deploy` builds from agents/Dockerfile and deploys the pre-built
+# image with `lk agent deploy --image aimis-agent`, so no Dockerfile is inferred
+# from the repository root.
+
 [project]
   subdomain = "ai-mock-interview-nrmn9hw8"
 

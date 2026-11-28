@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderConfigError } from "@/lib/providers/config";
-import { RealtimeError } from "@/lib/interview/realtime-token";
+import { RealtimeError, RealtimeTokenError } from "@/lib/interview/realtime-token";
 
 const mocks = vi.hoisted(() => ({
   context: vi.fn(),
@@ -117,8 +117,9 @@ describe("POST .../realtime/token", () => {
   });
 
   it("maps an unsupported realtime provider to a typed 502", async () => {
+    // The real minter throws RealtimeTokenError for unsupported providers.
     mocks.createRealtimeToken.mockRejectedValueOnce(
-      new RealtimeError("unsupported_provider", "Live voice currently supports the Google (Gemini Live) provider only."),
+      new RealtimeTokenError("openai", "unsupported_provider", "Realtime sessions are not supported for provider \"openai\"."),
     );
     const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
     expect(response.status).toBe(502);

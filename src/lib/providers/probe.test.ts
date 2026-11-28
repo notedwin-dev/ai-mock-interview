@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { probeProviderConfiguration, discoverProviderModels, discoverCandidateModels, type ProbeDeps } from "./probe";
 import { encryptApiKey } from "./encryption";
+import { RealtimeTokenError } from "@/lib/interview/realtime-token";
 
 /**
  * Unit tests for the capability probe service (FR-PROVIDER-006). Network
@@ -240,6 +241,38 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       endpointReachable: true,
       detail: "The provider rejected the API key.",
     });
+  });
+
+  it("classifies typed realtime errors by errorCode and status, not message wording", async () => {
+    const cases = [
+      {
+        error: new RealtimeTokenError("elevenlabs", "rate_limited", "Provider rate-limited the request.", 429),
+        errorCode: "rate_limited",
+        endpointReachable: true,
+      },
+      {
+        error: new RealtimeTokenError("elevenlabs", "authentication_failed", "Credential rejected.", 401),
+        errorCode: "authentication_failed",
+        endpointReachable: true,
+      },
+      {
+        error: new RealtimeTokenError("openai", "unsupported_provider", "No verified realtime wire."),
+        errorCode: "model_unsupported",
+        endpointReachable: false,
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const result = await runProbe(
+        configRow({ capabilitiesJson: { realtime: { modelId: "realtime-model" } } }),
+        jsonFetch([]),
+        { realtimeToken: async () => { throw testCase.error; } },
+      );
+      expect(result.capabilities[0]).toMatchObject({
+        status: "failed",
+        errorCode: testCase.errorCode,
+        endpointReachable: testCase.endpointReachable,
+      });
+    }
   });
 
   it("skips realtime even on a probeable preset while still validating the row's other capabilities", async () => {
@@ -516,6 +549,76 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     expect(seen).toContain("https://tts.example.com/v1/audio/speech");
     expect(seen.some((url) => /\/v1\/tts$/.test(url))).toBe(false);
     expect(result.capabilities[0]).toMatchObject({ status: "validated" });
+  });
+
+  it("probes a custom row on api.elevenlabs.io on the native TTS wire, matching runtime dispatch", async () => {
+    const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({
+        url,
+        headers: new Headers(init?.headers ?? undefined),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      if (/\/v1\/text-to-speech\/JBFqnCBsd6RMkjVDRZzb$/.test(url)) {
+        return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "custom",
+        providerName: "relay",
+        baseUrl: "https://api.elevenlabs.io",
+        capabilitiesJson: { tts: { modelId: "eleven_v4" } },
+      }),
+      captureFetch,
+    );
+
+    // The canonical host — not the row name — selects the native wire, just
+    // as in the runtime TTS adapter. No OpenAI-shaped model-list call.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb");
+    expect(seen[0]!.headers.get("xi-api-key")).toBe("sk-plaintext-secret");
+    expect(seen[0]!.headers.get("authorization")).toBeNull();
+    expect(JSON.parse(seen[0]!.body!)).toMatchObject({ text: "ping", model_id: "eleven_v4" });
+    expect(result.capabilities[0]).toMatchObject({ capability: "tts", status: "validated" });
+  });
+
+  it("probes a custom row on api.anthropic.com on the native Messages wire", async () => {
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      seen.push({ url, headers: new Headers(init?.headers ?? undefined) });
+      if (/\/models$/.test(url)) {
+        return new Response(JSON.stringify({ error: { message: "Not found" } }), { status: 404 });
+      }
+      if (/\/v1\/messages$/.test(url)) {
+        return new Response(JSON.stringify({ id: "msg_ping" }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const result = await runProbe(
+      configRow({
+        providerType: "custom",
+        providerName: "relay",
+        baseUrl: "https://api.anthropic.com",
+        capabilitiesJson: { llm: { modelId: "claude-opus-5-5" } },
+      }),
+      captureFetch,
+    );
+
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://api.anthropic.com/models",
+      "https://api.anthropic.com/v1/messages",
+    ]);
+    const ping = seen[1]!;
+    expect(ping.headers.get("x-api-key")).toBe("sk-plaintext-secret");
+    expect(ping.headers.get("authorization")).toBeNull();
+    expect(ping.headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(result.capabilities[0]).toMatchObject({ capability: "llm", status: "validated" });
   });
 
   it("classifies a payment-required rejection (402) in the quota family, not as an auth failure", async () => {
@@ -799,7 +902,7 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
     }
   });
 
-  it("probes the elevenlabs preset TTS on the native /v1/text-to-speech/{model_id} wire (xi-api-key)", async () => {
+  it("probes the elevenlabs preset TTS on the native /v1/text-to-speech/{voice_id} wire (xi-api-key)", async () => {
     const seen: Array<{ url: string; headers: Headers; body: string | null }> = [];
     const captureFetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -808,7 +911,7 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
         headers: new Headers(init?.headers ?? undefined),
         body: typeof init?.body === "string" ? init.body : null,
       });
-      if (/\/v1\/text-to-speech\/eleven_v4$/.test(url)) {
+      if (/\/v1\/text-to-speech\/JBFqnCBsd6RMkjVDRZzb$/.test(url)) {
         return new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), { status: 200 }); // audio bytes
       }
       throw new Error(`unexpected fetch: ${url}`);
@@ -824,11 +927,12 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
       captureFetch,
     );
 
-    // Exactly one network call on the native TTS wire: model id in the path,
-    // xi-api-key credential, no model-list call, no OpenAI-shaped endpoint.
+    // Exactly one network call on the native TTS wire: the documented voice
+    // ID in the path, xi-api-key credential, no model-list call, no
+    // OpenAI-shaped endpoint. The exact model ID stays in the body.
     expect(seen).toHaveLength(1);
     const ping = seen[0]!;
-    expect(ping.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/eleven_v4");
+    expect(ping.url).toBe("https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb");
     expect(ping.headers.get("xi-api-key")).toBe("sk-plaintext-secret");
     expect(ping.headers.get("authorization")).toBeNull();
     expect(JSON.parse(ping.body!)).toMatchObject({ text: "ping", model_id: "eleven_v4" });
@@ -864,10 +968,15 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
 
     expect(sttForm).toBeInstanceOf(FormData);
     expect(sttForm!.get("model_id")).toBe("scribe_v2"); // exact selected model
-    const file = sttForm!.get("audio") as File | null;
+    // ElevenLabs Scribe's documented multipart field is `file`, not `audio`.
+    const file = sttForm!.get("file") as File | null;
     expect(file).toBeInstanceOf(File);
-    const wavHead = Buffer.from(await file!.arrayBuffer()).subarray(0, 4).toString("ascii");
-    expect(wavHead).toBe("RIFF");
+    const wav = Buffer.from(await file!.arrayBuffer());
+    expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    // The synthetic clip must clear ElevenLabs' 100 ms minimum duration.
+    const sampleRate = wav.readUInt32LE(24);
+    const dataLength = wav.readUInt32LE(40);
+    expect(dataLength / sampleRate).toBeGreaterThanOrEqual(0.1);
     expect(result.capabilities[0]).toMatchObject({
       capability: "asr",
       status: "validated",

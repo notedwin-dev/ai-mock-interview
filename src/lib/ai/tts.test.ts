@@ -93,17 +93,18 @@ describe("synthesizeSpeech", () => {
     });
   });
 
-  it("google preset: OpenAI-compatible wire under the /v1beta/openai root, exact model", async () => {
+  it("google preset: fail closed without calling the undocumented audio/speech wire", async () => {
     const { fetchImpl, calls } = mockFetch({ ok: true, status: 200 });
 
-    await synthesizeSpeech(googleRoute, "Good morning", { fetchImpl });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe("https://generativelanguage.googleapis.com/v1beta/openai/audio/speech");
-    expect(calls[0]!.headers["authorization"]).toBe("Bearer goog-tts-secret");
-    const body = JSON.parse(calls[0]!.body);
-    expect(body.model).toBe("gemini-tts-2.5-flash-preview");
-    expect(body.input).toBe("Good morning");
+    try {
+      await synthesizeSpeech(googleRoute, "Good morning", { fetchImpl });
+      expect.unreachable("an unverified speech endpoint must be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TtsError);
+      expect((error as TtsError).code).toBe("unsupported_provider");
+      expect((error as Error).message).not.toContain("goog-tts-secret");
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it("elevenlabs preset: native TTS path with xi-api-key, exact model, NO voice field", async () => {
@@ -215,7 +216,7 @@ describe("synthesizeSpeech", () => {
   });
 
   it("reports provider failures as typed errors without leaking the key (all wires)", async () => {
-    for (const route of [fishRoute, openAiRoute, googleRoute, elevenRoute]) {
+    for (const route of [fishRoute, openAiRoute, elevenRoute]) {
       const fetchImpl = (async () =>
         new Response(`no credit for key ${route.apiKey} at ${route.baseUrl}`, { status: 402 })) as typeof fetch;
       try {

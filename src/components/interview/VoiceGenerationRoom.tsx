@@ -16,6 +16,9 @@ import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
  */
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
 
+/** Advisory warning when a dispatched planner never joins the room. */
+const NO_AGENT_WARNING = "The planner did not join in time. Leave and start a new voice session.";
+
 /** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
 type LocalMicPublication = { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } };
 
@@ -51,6 +54,7 @@ export function VoiceGenerationRoom() {
   const audioRef = useRef<HTMLDivElement | null>(null);
   const startedAtRef = useRef(0);
   const agentPresentRef = useRef(false);
+  const noAgentWarningRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
@@ -108,7 +112,12 @@ export function VoiceGenerationRoom() {
         });
         room.on(RoomEvent.ParticipantConnected, () => {
           agentPresentRef.current = true;
-          if (active) setAgentPresent(true);
+          if (active) {
+            setAgentPresent(true);
+            // A late join clears only the timed-out warning; never erase an
+            // unrelated mic-unavailable or room-failure error.
+            setError((current) => (current === NO_AGENT_WARNING ? null : current));
+          }
         });
         room.on(RoomEvent.ParticipantDisconnected, () => {
           agentPresentRef.current = false;
@@ -125,15 +134,15 @@ export function VoiceGenerationRoom() {
         // the candidate sees words as they are spoken, not only final lines.
         room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
           const speaker = (info.identity || "").startsWith("candidate") ? "candidate" : "agent";
+          // Keep this stream's text local: the data-channel handler may write a
+          // complete caption between deltas, and appending to that caption
+          // would duplicate the words already shown.
+          let buffer = "";
           try {
             for await (const delta of reader) {
               if (!active) break;
-              setLiveCaption((current) => {
-                if (current?.speaker === speaker) {
-                  return { speaker, text: (current.text + delta).slice(-2000) };
-                }
-                return { speaker, text: delta.slice(-2000) };
-              });
+              buffer = (buffer + delta).slice(-2000);
+              setLiveCaption({ speaker, text: buffer });
             }
           } catch {
             // A cancelled stream is normal when the agent changes turns.
@@ -164,8 +173,12 @@ export function VoiceGenerationRoom() {
             // Ignore malformed data messages; they never affect the call.
           }
         });
-        room.on(RoomEvent.Reconnecting, () => { if (active) setStatus("reconnecting"); });
-        room.on(RoomEvent.Reconnected, () => { if (active) setStatus("connected"); });
+        room.on(RoomEvent.Reconnecting, () => {
+          if (active) setStatus((current) => (current === "completed" ? current : "reconnecting"));
+        });
+        room.on(RoomEvent.Reconnected, () => {
+          if (active) setStatus((current) => (current === "completed" ? current : "connected"));
+        });
         room.on(RoomEvent.Disconnected, () => {
           if (active) setStatus((current) => (current === "completed" ? current : "error"));
         });
@@ -239,10 +252,19 @@ export function VoiceGenerationRoom() {
         const data = (await response.json()) as GenerationState;
         if (!active) return;
         setGeneration(data);
-        // No join timeout: a cloud agent can take 10-20 s to cold-start, and
-        // captions arrive over the data channel rather than through this poll.
-        // The generation completes when the worker posts its result; the
-        // candidate can leave manually at any time.
+        // A failed dispatch leaves the generation "collecting" forever, so
+        // warn after a generous grace period for cloud-agent cold starts.
+        // This is advisory only: the status, room and Leave button are
+        // untouched, and the warning is emitted once per session.
+        if (
+          data.status === "collecting" &&
+          !agentPresentRef.current &&
+          !noAgentWarningRef.current &&
+          Date.now() - startedAtRef.current > 90_000
+        ) {
+          noAgentWarningRef.current = true;
+          setError(NO_AGENT_WARNING);
+        }
         if (data.status === "completed" && data.invitationPath && !finishedRef.current) {
           finishedRef.current = true;
           finished = true;

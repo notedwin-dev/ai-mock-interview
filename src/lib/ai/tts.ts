@@ -17,11 +17,12 @@ import { PRESET_MODEL_SUGGESTIONS } from "@/lib/providers/registry";
  *   only premade voice ids may be used.
  * - `openai` preset / api.openai.com base (or any other OpenAI-compatible
  *   target) → `POST {base}/audio/speech` with Bearer key.
- * - `google` preset → Google's OpenAI-compatible root
- *   `{base}/v1beta/openai/audio/speech`: the registry base
- *   `generativelanguage.googleapis.com` lacks the `/v1beta/openai` sub-root,
- *   and the live-verified path (docs/FEASIBILITY.md) is the OpenAI-compatible
- *   one. The Gemini **realtime** voice path is untouched and unrelated.
+ * - `google` preset → no interviewer-voice wire: Google documents chat,
+ *   embeddings and images on the OpenAI-compatible surface, not speech. The
+ *   capability probe validates the native `POST /v1beta/interactions` route,
+ *   not `audio/speech`, so the preset is fail-closed as `unsupported_provider`
+ *   until a documented speech endpoint is available. Custom OpenAI-compatible
+ *   endpoints are unrestricted; the Gemini **realtime** voice path is unrelated.
  * - `fish-audio` preset / fish.audio base → native `POST {base}/v1/tts` with
  *   the model selected by the `model` request header.
  *
@@ -79,17 +80,6 @@ function isElevenLabs(route: TtsRoute): boolean {
 }
 
 /**
- * Google preset rows carry the registry base without the OpenAI-compatible
- * sub-root; the wire there (audio/speech) is the live-verified
- * OpenAI-compatible one (docs/FEASIBILITY.md). Custom rows keep their base.
- */
-function googleOpenAiBase(baseUrl: string): string {
-  const base = baseUrl.replace(/\/+$/, "");
-  if (base.includes("/v1beta/openai")) return base;
-  return `${base}/v1beta/openai`;
-}
-
-/**
  * The documented Fish Audio model catalogue (owner-maintained register,
  * FR-ADMIN-004). The native wire always sends the configured id in the `model`
  * header, so an unrecognised id would reach Fish Audio and fail opaquely (or
@@ -113,7 +103,8 @@ const SUPPORTED_TTS_PRESETS: ReadonlySet<string> = new Set([
   "fish-audio",
   "elevenlabs",
   "openai",
-  "google",
+  // "google" is deliberately absent: the probe validates /v1beta/interactions,
+  // not the undocumented /v1beta/openai/audio/speech this wire used to call.
 ]);
 
 /**
@@ -201,8 +192,9 @@ export async function synthesizeSpeech(
     headers["model"] = route.modelId;
     body = JSON.stringify({ text, format: "mp3" });
   } else {
-    const openAiBase = route.providerName.toLowerCase() === "google" ? googleOpenAiBase(base) : base;
-    url = `${openAiBase}/audio/speech`;
+    // Presets with an unverified speech endpoint are rejected by the gate.
+    // Custom OpenAI-compatible rows keep their configured base verbatim.
+    url = `${base}/audio/speech`;
     headers = {
       authorization: `Bearer ${route.apiKey}`,
       "content-type": "application/json",

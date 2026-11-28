@@ -1,5 +1,5 @@
 import { jsonError } from "@/lib/api/respond";
-import { RealtimeError, createRealtimeToken } from "@/lib/interview/realtime-token";
+import { RealtimeError, RealtimeTokenError, createRealtimeToken } from "@/lib/interview/realtime-token";
 import { buildLiveInterviewInstructions } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
 import { getActiveRuntimeMode, resolveForOutboundCall } from "@/lib/providers/config";
@@ -84,8 +84,17 @@ export async function POST(
         modelId: resolved.modelId,
       });
     } catch (error) {
-      if (error instanceof RealtimeError && error.code === "unsupported_provider") {
-        return jsonError(502, "realtime_provider_unsupported", error.message);
+      // The real minter throws RealtimeTokenError; the legacy RealtimeError
+      // shape is kept for compatibility with older callers and tests.
+      if (
+        (error instanceof RealtimeError && error.code === "unsupported_provider") ||
+        (error instanceof RealtimeTokenError && error.errorCode === "unsupported_provider")
+      ) {
+        return jsonError(
+          502,
+          "realtime_provider_unsupported",
+          "This realtime provider is not supported.",
+        );
       }
       return jsonError(502, "realtime_setup_failed", "The realtime session could not be created.");
     }

@@ -1,12 +1,41 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2, Mic, MicOff, Video, VideoOff, Volume2 } from "lucide-react";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { saveDevicePreferences } from "@/lib/interview/device-preferences";
 import { evaluationModeLabel } from "@/lib/interview/labels";
+
+// The first render must match the server's output in every time zone; local
+// formatting is applied only after hydration.
+const DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const STABLE_DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "UTC",
+});
+
+// getServerSnapshot is used for the server render and the first client render;
+// getSnapshot switches to the browser-local value only after hydration.
+const NOOP_SUBSCRIBE = () => () => {};
+function useHydrated() {
+  return useSyncExternalStore(
+    NOOP_SUBSCRIBE,
+    () => true,
+    () => false,
+  );
+}
 
 /**
  * Pre-call waiting room (FR-SETUP-007). The camera is a LOCAL-ONLY preview:
@@ -32,6 +61,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
   const [cameraId, setCameraId] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const hydrated = useHydrated();
 
   const loadDevices = useCallback(() => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -138,9 +168,7 @@ export function WaitingRoom({ token, interview }: { token: string; interview: In
         </p>
         {interview.scheduledAt ? (
           <p className="mt-1 text-sm text-ink-muted">
-            Scheduled for {new Intl.DateTimeFormat("en-GB", {
-              day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
-            }).format(new Date(interview.scheduledAt))} · you can still join now or come back later.
+            Scheduled for {(hydrated ? DATE_FORMAT : STABLE_DATE_FORMAT).format(new Date(interview.scheduledAt))} · you can still join now or come back later.
           </p>
         ) : null}
       </div>

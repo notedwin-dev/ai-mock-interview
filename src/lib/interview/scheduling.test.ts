@@ -23,6 +23,13 @@ describe("parseScheduledAt", () => {
     expect(() => parseScheduledAt("2026-11-22T08:00:00.000Z", now)).toThrow(InterviewError);
     expect(() => parseScheduledAt("2028-11-22T08:00:00.000Z", now)).toThrow(InterviewError);
   });
+
+  it("requires an explicit UTC marker or offset so the instant is host-independent", () => {
+    expect(() => parseScheduledAt("2026-11-23T09:30:00", now)).toThrow(InterviewError);
+    expect(parseScheduledAt("2026-11-23T17:30:00+08:00", now).toISOString()).toBe(
+      "2026-11-23T09:30:00.000Z",
+    );
+  });
 });
 
 describe("assertEditableSession", () => {

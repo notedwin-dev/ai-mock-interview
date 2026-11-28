@@ -39,6 +39,11 @@ export function parseScheduledAt(value: unknown, now = new Date()): Date {
   if (typeof value !== "string") {
     throw new InterviewError("invalid_input", "A valid date and time is required.");
   }
+  // An offset-less timestamp is interpreted in the server's local timezone, so
+  // the same request would store different instants on different hosts.
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value.trim())) {
+    throw new InterviewError("invalid_input", "Include a UTC offset or Z in the date and time.");
+  }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     throw new InterviewError("invalid_input", "A valid date and time is required.");
@@ -84,6 +89,25 @@ export function assertEditableSession(session: {
   }
 }
 
+/** Re-check the editability lock at write time (a start may commit after the pre-check). */
+function editableWriteWhere(sessionId: string) {
+  return {
+    sessionId,
+    status: { in: [...EDITABLE_STATUSES] },
+    startedAt: null,
+    completedAt: null,
+  };
+}
+
+function assertEditableWrite(count: number): void {
+  if (count === 0) {
+    throw new InterviewError(
+      "invalid_state",
+      "This interview has already started or completed, so its details are locked.",
+    );
+  }
+}
+
 export async function scheduleInterview(
   userId: string,
   sessionId: string,
@@ -96,30 +120,30 @@ export async function scheduleInterview(
       ? (input as { scheduledAt: unknown }).scheduledAt
       : undefined,
   );
-  const updated = await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  const updated = await db.interviewSession.updateMany({
+    where: editableWriteWhere(session.sessionId),
     data: { scheduledAt },
-    select: { sessionId: true, scheduledAt: true, status: true },
   });
+  assertEditableWrite(updated.count);
   return {
-    sessionId: updated.sessionId,
-    scheduledAt: updated.scheduledAt!.toISOString(),
-    status: updated.status,
+    sessionId: session.sessionId,
+    scheduledAt: scheduledAt.toISOString(),
+    status: session.status,
   };
 }
 
 export async function clearSchedule(userId: string, sessionId: string): Promise<ScheduledInterview> {
   const session = await loadOwnedSession(userId, sessionId);
   assertEditableSession(session);
-  const updated = await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  const updated = await db.interviewSession.updateMany({
+    where: editableWriteWhere(session.sessionId),
     data: { scheduledAt: null },
-    select: { sessionId: true, scheduledAt: true, status: true },
   });
+  assertEditableWrite(updated.count);
   return {
-    sessionId: updated.sessionId,
-    scheduledAt: updated.scheduledAt?.toISOString() ?? null,
-    status: updated.status,
+    sessionId: session.sessionId,
+    scheduledAt: null,
+    status: session.status,
   };
 }
 
@@ -138,8 +162,8 @@ export async function editInterviewDetails(
   if (!category) {
     throw new InterviewError("invalid_input", "The selected interview category is not available.");
   }
-  await db.interviewSession.update({
-    where: { sessionId: session.sessionId },
+  const updated = await db.interviewSession.updateMany({
+    where: editableWriteWhere(session.sessionId),
     data: {
       jobRole: details.jobRole,
       jobDescription: details.jobDescription || null,
@@ -152,5 +176,6 @@ export async function editInterviewDetails(
       categoryNameSnapshot: category.categoryName,
     },
   });
+  assertEditableWrite(updated.count);
   return { sessionId: session.sessionId, ...details };
 }

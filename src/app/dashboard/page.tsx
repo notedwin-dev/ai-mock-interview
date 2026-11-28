@@ -40,6 +40,23 @@ interface RecentSessionRow {
   completedAt: Date | null;
 }
 
+/** One metadata query for a page of sessions, instead of one query per card. */
+async function loadInvitationPaths(
+  sessionIds: string[],
+): Promise<Map<string, string | null>> {
+  if (sessionIds.length === 0) return new Map();
+  const generations = await db.interviewGeneration.findMany({
+    where: { sessionId: { in: sessionIds } },
+    select: { sessionId: true, invitationPath: true },
+  });
+  const paths = new Map<string, string | null>();
+  for (const generation of generations) {
+    if (!generation.sessionId || paths.has(generation.sessionId)) continue;
+    paths.set(generation.sessionId, generation.invitationPath ?? null);
+  }
+  return paths;
+}
+
 async function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
   const sessions = await db.interviewSession.findMany({
     where: { userId },
@@ -56,15 +73,11 @@ async function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
       completedAt: true,
     },
   });
-  return Promise.all(
-    sessions.map(async (session) => {
-      const generation = await db.interviewGeneration.findFirst({
-        where: { sessionId: session.sessionId },
-        select: { invitationPath: true },
-      });
-      return { ...session, invitationPath: generation?.invitationPath ?? null };
-    }),
-  );
+  const invitationPaths = await loadInvitationPaths(sessions.map((session) => session.sessionId));
+  return sessions.map((session) => ({
+    ...session,
+    invitationPath: invitationPaths.get(session.sessionId) ?? null,
+  }));
 }
 
 interface UpcomingSessionRow {
@@ -94,15 +107,11 @@ async function loadUpcomingSessions(userId: string): Promise<UpcomingSessionRow[
       scheduledAt: true,
     },
   });
-  return Promise.all(
-    sessions.map(async (session) => {
-      const generation = await db.interviewGeneration.findFirst({
-        where: { sessionId: session.sessionId },
-        select: { invitationPath: true },
-      });
-      return { ...session, invitationPath: generation?.invitationPath ?? null };
-    }),
-  );
+  const invitationPaths = await loadInvitationPaths(sessions.map((session) => session.sessionId));
+  return sessions.map((session) => ({
+    ...session,
+    invitationPath: invitationPaths.get(session.sessionId) ?? null,
+  }));
 }
 
 async function DashboardContent() {

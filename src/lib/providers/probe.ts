@@ -2,7 +2,11 @@ import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 // Reintroduced from the runtime batch: the realtime capability probe uses a
 // short-lived native session token (never interview content) to prove the key.
-import { createRealtimeToken, type LiveSessionConfig } from "@/lib/interview/realtime-token";
+import {
+  createRealtimeToken,
+  RealtimeTokenError,
+  type LiveSessionConfig,
+} from "@/lib/interview/realtime-token";
 import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } from "./config";
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
 import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
@@ -36,7 +40,8 @@ import { evaluateBaseUrl } from "./ssrf";
  *   `POST /v1/messages` with `x-api-key` + `anthropic-version`; it has no
  *   model-list endpoint (404/405 there is "when supported", not a failure).
  * - `elevenlabs` speaks its native wire: TTS is
- *   `POST /v1/text-to-speech/{model_id}` and ASR is `POST
+ *   `POST /v1/text-to-speech/{voice_id}` (model ID in the `model_id` body)
+ *   and ASR is `POST
  *   /v1/speech-to-text`, both with `xi-api-key`; it has no model-list
  *   endpoint.
  *
@@ -197,10 +202,11 @@ async function classifyProbeFailure(
 }
 
 /**
- * Native realtime token failures arrive as provider SDK errors whose message
- * embeds the HTTP response. Surface a sanitized, actionable reason instead of
- * a generic "rejected setup" so a bad key is distinguishable from a quota or
- * a missing model. No credential material is ever echoed.
+ * Native realtime token failures are typed (RealtimeTokenError). Classify them
+ * by `errorCode`/`status` first so a "rate-limited" 429 or an auth rejection is
+ * not misread by the message-only fallback below. That fallback stays for
+ * provider SDK errors whose only signal is an embedded HTTP response. No
+ * credential material is ever echoed.
  */
 function describeRealtimeError(error: unknown): {
   errorCode: ProbeErrorCode;
@@ -213,6 +219,29 @@ function describeRealtimeError(error: unknown): {
       detail: "The stored credential could not be decrypted; re-save the configuration.",
       endpointReachable: false,
     };
+  }
+  if (error instanceof RealtimeTokenError) {
+    const endpointReachable = error.status !== undefined;
+    switch (error.errorCode) {
+      case "authentication_failed":
+        return {
+          errorCode: "authentication_failed",
+          detail: "The provider rejected the API key.",
+          endpointReachable,
+        };
+      case "rate_limited":
+        return {
+          errorCode: "rate_limited",
+          detail: "The provider rate-limited the realtime session request.",
+          endpointReachable,
+        };
+      case "unsupported_provider":
+        // No provider request was made — the wire is not implemented.
+        return { errorCode: "model_unsupported", detail: error.detail, endpointReachable: false };
+      case "provider_error":
+      default:
+        return { errorCode: "provider_error", detail: error.detail, endpointReachable };
+    }
   }
   const raw = error instanceof Error ? error.message : String(error);
   const lower = raw.toLowerCase();
@@ -297,6 +326,32 @@ const PROBEABLE_PRESETS = new Set<string>([
 const FISH_AUDIO_URL_RE = /^https?:\/\/(?:[^/]*\.)?fish\.audio(?:[/:]|$)/i;
 
 /**
+ * Canonical provider hosts used by the runtime adapters (llm.ts, tts.ts,
+ * asr.ts): a custom row whose Base URL points at one of these hosts speaks the
+ * provider's native wire, whatever the row is named. Other custom hosts keep
+ * the generic OpenAI-compatible handling.
+ */
+const ELEVENLABS_API_HOST = "api.elevenlabs.io";
+const ANTHROPIC_API_HOST = "api.anthropic.com";
+
+function hostOf(url: string | null): string {
+  if (!url) return "";
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The ElevenLabs TTS URL path segment is a VOICE id, not a model id — the
+ * exact configured model id stays in the `model_id` body field. This is the
+ * premade voice from the documented text-to-speech example: a catalogue
+ * constant, not a user-selected voice or a model substitution.
+ */
+const ELEVENLABS_PROBE_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+
+/**
  * Runs the probe for one configuration and returns per-capability results.
  * Nothing here logs or persists credentials; the stored credential status is
  * updated only through the caller-facing status write-back (slice continues).
@@ -331,7 +386,14 @@ export async function probeProviderConfiguration(
   const isFishAudioPreset =
     (row.providerType === "preset" && row.providerName === "fish-audio") ||
     (customBaseUrl !== null && FISH_AUDIO_URL_RE.test(customBaseUrl));
-  const isElevenLabsPreset = row.providerType === "preset" && row.providerName === "elevenlabs";
+  // Native-wire selection matches the runtime adapters: preset name OR the
+  // canonical host on a custom row (which may be named something else).
+  const isElevenLabsWire =
+    (row.providerType === "preset" && row.providerName === "elevenlabs") ||
+    (row.providerType === "custom" && hostOf(customBaseUrl) === ELEVENLABS_API_HOST);
+  const isAnthropicWire =
+    (row.providerType === "preset" && row.providerName === "anthropic") ||
+    (row.providerType === "custom" && hostOf(customBaseUrl) === ANTHROPIC_API_HOST);
 
   for (const capability of Object.keys(capabilities) as Capability[]) {
     const settings = capabilities[capability]!;
@@ -472,7 +534,7 @@ export async function probeProviderConfiguration(
       // rows (`GET /model` lists community voices, not TTS models) and
       // ElevenLabs have no such endpoint, so nothing is requested for them.
       let modelsDiscovered: string[] | null = null;
-      if (!isFishAudioPreset && !isElevenLabsPreset) {
+      if (!isFishAudioPreset && !isElevenLabsWire) {
         modelsDiscovered = await fetchModelList(
           urlDecision.normalizedUrl,
           apiKey,
@@ -518,12 +580,12 @@ export async function probeProviderConfiguration(
               generation_config: { speech_config: [{ voice: "Kore" }] },
             }),
           };
-        } else if (isElevenLabsPreset) {
-          // Native ElevenLabs TTS: model id in the PATH, voice in the body —
-          // the TTS model_id is not a voice. The catalog's default voice is
-          // a catalogue constant, not a model substitution. Audio bytes in
-          // the 2xx response prove the model can synthesise.
-          pingUrl = `${root}/v1/text-to-speech/${encodeURIComponent(settings.modelId)}`;
+        } else if (isElevenLabsWire) {
+          // Native ElevenLabs TTS: the documented URL path segment is the
+          // voice ID (a premade catalogue voice), while the exact configured
+          // model ID travels in `model_id` in the body — never substituted.
+          // Audio bytes in the 2xx response prove the model can synthesise.
+          pingUrl = `${root}/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_PROBE_VOICE_ID)}`;
           pingRequest = {
             method: "POST",
             headers: { "xi-api-key": apiKey, "content-type": "application/json" },
@@ -568,14 +630,16 @@ export async function probeProviderConfiguration(
               ],
             }),
           };
-        } else if (isElevenLabsPreset) {
+        } else if (isElevenLabsWire) {
           // Native ElevenLabs ASR (Scribe): multipart model_id + the
           // synthesised probe WAV.
           pingUrl = `${root}/v1/speech-to-text`;
           const form = new FormData();
           form.append("model_id", settings.modelId);
+          // ElevenLabs Scribe's documented multipart field is `file`
+          // (the runtime ASR adapter sends the same field).
           form.append(
-            "audio",
+            "file",
             new Blob([synthesisedProbeWav()], { type: "audio/wav" }),
             "probe.wav",
           );
@@ -587,7 +651,7 @@ export async function probeProviderConfiguration(
           form.append("file", new Blob([synthesisedProbeWav()], { type: "audio/wav" }), "probe.wav");
           pingRequest = { method: "POST", headers, body: form };
         }
-      } else if (row.providerType === "preset" && row.providerName === "anthropic") {
+      } else if (isAnthropicWire) {
         // Native Anthropic Messages wire: `x-api-key` + the fixed API
         // version; model, max_tokens and messages match the documented
         // request shape. It has no model-list endpoint — step 1 ran against
@@ -643,8 +707,7 @@ export async function probeProviderConfiguration(
     } catch (error) {
       let failure = await classifyProbeFailure(error);
       if (
-        row.providerType === "preset" &&
-        row.providerName === "anthropic" &&
+        isAnthropicWire &&
         error instanceof ProbeHttpError &&
         error.stage === "capability" &&
         error.status === 404
@@ -712,12 +775,14 @@ function stripTrailingSlash(url: string): string {
 }
 
 /**
- * A minimal valid PCM WAV (44-byte RIFF header + a few silent samples) used
- * purely as an ASR connectivity ping. Never derived from real interview or
- * microphone audio.
+ * A minimal valid PCM WAV (44-byte RIFF header + silent samples) used purely
+ * as an ASR connectivity ping. Never derived from real interview or
+ * microphone audio. ElevenLabs Scribe requires at least 100 ms of audio, so
+ * keep the synthetic clip comfortably above that floor.
  */
 function synthesisedProbeWav(): ArrayBuffer {
-  const sampleCount = 16; // mono, 8 kHz, 8-bit PCM
+  // 8 kHz × 8-bit mono: 800 samples = 100 ms; use 200 ms to clear the limit.
+  const sampleCount = 1600;
   const dataLength = sampleCount;
   const buffer = new ArrayBuffer(44 + dataLength);
   const view = new DataView(buffer);

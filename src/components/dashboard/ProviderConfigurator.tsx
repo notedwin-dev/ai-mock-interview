@@ -1100,6 +1100,12 @@ function CapabilitySection(props: CapabilitySectionProps) {
     [rows, section.capability],
   );
   const readiness = readinessFor(rows, section.capability);
+  // runAction stores a failed activation under the row the candidate picked.
+  // Surface it here; rows are refreshed only on success, so the selector
+  // still shows the previously active configuration after a failure.
+  const activeError = serving
+    .map((row) => props.actionError[`${row.userProviderConfigurationId}:active:${section.capability}`])
+    .find((error) => error !== undefined);
 
   return (
     <section
@@ -1154,6 +1160,9 @@ function CapabilitySection(props: CapabilitySectionProps) {
                 ))}
               </select>
               <span>One active per capability; the newest saved is active by default.</span>
+              {activeError ? (
+                <span className="block w-full text-xs text-red-400" role="alert">{activeError.message}</span>
+              ) : null}
             </label>
           ) : null}
           {serving.length === 0 ? (

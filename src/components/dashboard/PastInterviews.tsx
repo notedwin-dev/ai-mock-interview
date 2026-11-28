@@ -113,9 +113,13 @@ export function PastInterviews({ sessions }: SessionLogProps) {
                 <Link
                   href={session.invitationPath
                     ? `${session.invitationPath}${session.status === "active" ? "/room" : "/waiting"}`
-                    : `/interview/${session.sessionId}${session.status === "active" ? "/room" : "/waiting"}`}
+                    : `/dashboard/interview/${session.sessionId}`}
                   className="inline-flex h-9 w-fit items-center justify-center rounded-full bg-emerald-400 px-4 text-xs font-semibold text-emerald-950 transition-colors hover:bg-emerald-300">
-                  {session.status === "active" ? "Return to interview" : "Go to waiting room"}
+                  {!session.invitationPath
+                    ? "Open interview"
+                    : session.status === "active"
+                      ? "Return to interview"
+                      : "Go to waiting room"}
                 </Link>
               </div>
             )}

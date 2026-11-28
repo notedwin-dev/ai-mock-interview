@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useSyncExternalStore, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CalendarClock, Loader2, Play } from "lucide-react";
@@ -27,12 +27,35 @@ const DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
 });
 
+// Server and browser must agree on the first render; only then switch to the
+// browser's local zone so the planned time is shown in the candidate's time.
+const STABLE_DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "UTC",
+});
+
+// getServerSnapshot is used for the server render and the first client render;
+// getSnapshot switches to the browser-local value only after hydration.
+const NOOP_SUBSCRIBE = () => () => {};
+function useHydrated() {
+  return useSyncExternalStore(
+    NOOP_SUBSCRIBE,
+    () => true,
+    () => false,
+  );
+}
+
 export function UpcomingInterviews({ sessions }: { sessions: UpcomingSession[] }) {
   const router = useRouter();
   const [active, setActive] = useState<string | null>(null);
   const [localTime, setLocalTime] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hydrated = useHydrated();
 
   if (sessions.length === 0) {
     return (
@@ -59,11 +82,14 @@ export function UpcomingInterviews({ sessions }: { sessions: UpcomingSession[] }
           | null;
         throw new Error(body?.error?.message ?? "Could not save the schedule.");
       }
-      setActive(null);
+      // Only the editor that started this request is allowed to close; another
+      // card's editor (and its input) must survive a late completion.
+      setActive((current) => (current === sessionId ? null : current));
       setLocalTime("");
       router.refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the schedule.");
+    } finally {
       setPending(false);
     }
   }
@@ -76,10 +102,11 @@ export function UpcomingInterviews({ sessions }: { sessions: UpcomingSession[] }
         method: "DELETE",
       });
       if (!response.ok) throw new Error("Could not clear the schedule.");
-      setActive(null);
+      setActive((current) => (current === sessionId ? null : current));
       router.refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not clear the schedule.");
+    } finally {
       setPending(false);
     }
   }
@@ -109,7 +136,7 @@ export function UpcomingInterviews({ sessions }: { sessions: UpcomingSession[] }
             <p className="flex items-center gap-1.5 text-xs text-ink-muted">
               <CalendarClock className="h-3.5 w-3.5" aria-hidden />
               {session.scheduledAt
-                ? `Planned for ${DATE_FORMAT.format(new Date(session.scheduledAt))}`
+                ? `Planned for ${(hydrated ? DATE_FORMAT : STABLE_DATE_FORMAT).format(new Date(session.scheduledAt))}`
                 : "Set a time whenever you are ready"}
             </p>
 
@@ -170,8 +197,9 @@ export function UpcomingInterviews({ sessions }: { sessions: UpcomingSession[] }
                 </Link>
                 <button
                   type="button"
+                  disabled={pending}
                   onClick={() => { setActive(session.sessionId); setError(null); }}
-                  className="inline-flex h-9 items-center rounded-full border border-line px-4 text-xs font-semibold text-ink-soft transition-colors hover:border-ink-muted hover:text-ink">
+                  className="inline-flex h-9 items-center rounded-full border border-line px-4 text-xs font-semibold text-ink-soft transition-colors hover:border-ink-muted hover:text-ink disabled:opacity-60">
                   {session.scheduledAt ? "Reschedule" : "Schedule"}
                 </button>
               </div>
