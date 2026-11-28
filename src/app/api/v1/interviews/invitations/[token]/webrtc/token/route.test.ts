@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ context: vi.fn(), mint: vi.fn(), dispatch: vi.fn(async () => true) }));
-vi.mock("@/lib/interview/room-store", () => ({ createDefaultRoomStore: () => ({ context: mocks.context }) }));
+const mocks = vi.hoisted(() => ({
+  context: vi.fn(),
+  activate: vi.fn(async (): Promise<"activated" | "already_active" | "rejected"> => "activated"),
+  mint: vi.fn(),
+  dispatch: vi.fn(async () => true),
+}));
+vi.mock("@/lib/interview/room-store", () => ({
+  createDefaultRoomStore: () => ({ context: mocks.context, activate: mocks.activate }),
+}));
 vi.mock("@/lib/interview/livekit-token", () => ({ mintParticipantToken: mocks.mint }));
 vi.mock("@/lib/interview/livekit-dispatch", () => ({ dispatchInterviewerAgent: mocks.dispatch }));
 vi.mock("@/lib/livekit/env", () => ({
@@ -35,6 +42,9 @@ describe("POST .../webrtc/token", () => {
       expect.objectContaining({ room: "session-1", inviteToken: TOKEN }),
       expect.objectContaining({ apiKey: "key" }),
     );
+    // Joining activates a scheduled session so the End control works before
+    // any LiveKit webhook is configured.
+    expect(mocks.activate).toHaveBeenCalledWith("session-1");
   });
 
   it("refuses invalid links", async () => {
@@ -42,5 +52,17 @@ describe("POST .../webrtc/token", () => {
     const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
     expect(response.status).toBe(404);
     expect(mocks.mint).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch or issue credentials when activation is rejected", async () => {
+    mocks.activate.mockResolvedValueOnce("rejected");
+    const response = await POST(new Request("http://localhost/x", { method: "POST" }), ctx);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: "invitation_not_found" } });
+    expect(mocks.activate).toHaveBeenCalledWith("session-1");
+    // Credential minting legitimately precedes activation (config must be
+    // usable before a join); what matters is that no agent is dispatched and
+    // no credential is returned for a rejected session.
+    expect(mocks.dispatch).not.toHaveBeenCalled();
   });
 });

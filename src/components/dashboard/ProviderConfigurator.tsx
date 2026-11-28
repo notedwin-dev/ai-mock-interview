@@ -16,7 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import type { Capability, ModelSuggestion } from "@/lib/providers/registry";
 import { REALTIME_PROVIDERS, realtimeModelFor } from "@/lib/providers/realtime-models";
 import { PRESET_ADAPTERS, PRESET_MODEL_SUGGESTIONS } from "@/lib/providers/registry";
-import type { ProviderConfigSummary } from "@/lib/providers/config";
+import type { ProviderConfigSummary, RuntimeMode } from "@/lib/providers/config";
 import type {
   CapabilityProbeResult,
   ConfigurationProbeResult,
@@ -238,14 +238,25 @@ function friendlyProviderName(row: ProviderConfigSummary): string {
   return row.providerName;
 }
 
-interface ProviderConfiguratorProps {
-  initialConfigurations: ProviderConfigSummary[];
+/** Pin row-scoped calls to the exact config when a provider serves several capabilities. */
+function rowQuery(row: ProviderConfigSummary): string {
+  return `?configId=${encodeURIComponent(row.userProviderConfigurationId)}`;
 }
 
-export function ProviderConfigurator({ initialConfigurations }: ProviderConfiguratorProps) {
+interface ProviderConfiguratorProps {
+  initialConfigurations: ProviderConfigSummary[];
+  initialActiveMode: RuntimeMode | null;
+}
+
+export function ProviderConfigurator({
+  initialConfigurations,
+  initialActiveMode,
+}: ProviderConfiguratorProps) {
   const [rows, setRows] = useState<ProviderConfigSummary[]>(initialConfigurations);
-  // ADR-006: pick ONE runtime before any credential is entered.
+  // The saved choice wins; legacy accounts with no explicit choice infer it
+  // from the rows on first visit. Modes stay switchable — no deletion needed.
   const [mode, setMode] = useState<"realtime" | "custom" | null>(() => {
+    if (initialActiveMode) return initialActiveMode;
     if (initialConfigurations.some((row) => row.capabilities.realtime)) return "realtime";
     if (
       initialConfigurations.some(
@@ -254,6 +265,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     ) return "custom";
     return null;
   });
+  const [switching, setSwitching] = useState(false);
   const [modelsByRow, setModelsByRow] = useState<Record<string, RowModelList>>({});
   const [probeByRow, setProbeByRow] = useState<Record<string, ConfigurationProbeResult>>({});
   const [pending, setPending] = useState<string | null>(null);
@@ -276,6 +288,30 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     if (result.ok) setRows(result.data.configurations);
   }
 
+  /** Switch the active runtime; saved rows of both modes are kept untouched. */
+  async function switchMode(next: RuntimeMode) {
+    setSwitching(true);
+    // Clear the previous attempt's error at the start so a stale failure is
+    // never shown while a new switch is in flight or after one succeeds.
+    setActionError((current) => {
+      const cleared = { ...current };
+      delete cleared["mode:switch"];
+      return cleared;
+    });
+    const result = await callApi<{ mode: RuntimeMode }>("/api/v1/providers/runtime-mode", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: next }),
+    });
+    setSwitching(false);
+    if (result.ok) {
+      setMode(next);
+    } else {
+      // Only a failed current attempt keeps its error.
+      setActionError((current) => ({ ...current, "mode:switch": result.error }));
+    }
+  }
+
   async function runAction(
     key: string,
     action: () => Promise<ApiError | null>,
@@ -286,8 +322,18 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
       delete next[key];
       return next;
     });
-    const error = await action();
-    setPending(null);
+    let error: ApiError | null;
+    try {
+      error = await action();
+    } catch (cause) {
+      // Never leave the button stuck on "pending" after an unexpected throw.
+      error = {
+        code: "internal_error",
+        message: cause instanceof Error ? cause.message : "The action failed. Try again.",
+      };
+    } finally {
+      setPending(null);
+    }
     if (error) setActionError((current) => ({ ...current, [key]: error }));
     return error;
   }
@@ -319,7 +365,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     }));
     await runAction(`${rowId}:models`, async () => {
       const response = await callApi<DiscoveryResult>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/models`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/models${rowQuery(row)}`,
         { cache: "no-store" },
       );
       const result: DiscoveryResult = response.ok
@@ -337,7 +383,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     const key = `${row.userProviderConfigurationId}:probe`;
     await runAction(key, async () => {
       const result = await callApi<ConfigurationProbeResult>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/probe`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}/probe${rowQuery(row)}`,
         { method: "POST" },
       );
       if (!result.ok) return result.error;
@@ -359,7 +405,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
   ): Promise<boolean> {
     const error = await runAction(key, async () => {
       const result = await callApi<{ configuration: ProviderConfigSummary }>(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}${rowQuery(row)}`,
         { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) },
       );
       if (!result.ok) return result.error;
@@ -372,6 +418,15 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
       );
       return null;
     });
+    if (!error && typeof patch.apiKey === "string") {
+      // The cached probe was produced with the old credential. Discard it
+      // only after the key save succeeds; a failed PATCH keeps the old result.
+      setProbeByRow((current) => {
+        const next = { ...current };
+        delete next[row.userProviderConfigurationId];
+        return next;
+      });
+    }
     return error === null;
   }
 
@@ -380,7 +435,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     const key = `${row.userProviderConfigurationId}:delete`;
     const error = await runAction(key, async () => {
       const response = await fetch(
-        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}`,
+        `/api/v1/providers/configurations/${encodeURIComponent(row.providerName)}${rowQuery(row)}`,
         { method: "DELETE" },
       );
       if (!response.ok && response.status !== 204) {
@@ -400,11 +455,10 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
   }
 
   /**
-   * Option 1 add flow (one row per provider): without an existing row the
-   * provider configuration is created with only the realtime capability;
-   * with one, the realtime capability is PATCHed onto the stored row and the
-   * existing credential stays untouched. Realtime models are admin-fixed:
-   * the candidate only supplies a credential, never a model ID.
+   * Realtime rows are created on their own, one per provider, carrying only
+   * the realtime capability. The same provider's LLM/ASR/TTS rows are never
+   * patched here — each capability keeps its own credential and test result.
+   * Realtime models are admin-fixed: only a credential is requested.
    */
   async function addRealtime(
     providerName: string,
@@ -422,33 +476,7 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
       return false;
     }
     const key = `realtime:${providerName}`;
-    const existing = rows.find(
-      (row) => row.providerType === "preset" && row.providerName === providerName,
-    );
     const error = await runAction(key, async () => {
-      if (existing) {
-        if (existing.capabilities.realtime) return null;
-        const result = await callApi<{ configuration: ProviderConfigSummary }>(
-          `/api/v1/providers/configurations/${encodeURIComponent(providerName)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              capabilities: { ...existing.capabilities, realtime: { modelId } },
-            }),
-          },
-        );
-        if (!result.ok) return result.error;
-        setRows((current) =>
-          current.map((candidate) =>
-            candidate.userProviderConfigurationId ===
-            result.data.configuration.userProviderConfigurationId
-              ? result.data.configuration
-              : candidate,
-          ),
-        );
-        return null;
-      }
       const result = await callApi<{ configuration: ProviderConfigSummary }>(
         "/api/v1/providers/configurations",
         {
@@ -477,11 +505,22 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
     return error === null;
   }
 
+  // Count only rows that cannot serve the selected view. A mixed row still
+  // supplies its custom cards (LLM/ASR/TTS); a scorer-only row can be used for
+  // reports while a realtime session runs, so neither is "inactive".
+  const inactiveCount = rows.filter((row) =>
+    mode === "realtime"
+      ? !row.capabilities.realtime && !row.capabilities.scorer
+      : !(row.capabilities.llm || row.capabilities.asr || row.capabilities.tts),
+  ).length;
+
   if (mode === null) {
     return (
       <ModeSelector
-        onSelect={(selected) => setMode(selected)}
+        onSelect={(selected) => void switchMode(selected)}
         configured={rows.length > 0}
+        switching={switching}
+        error={actionError["mode:switch"]}
       />
     );
   }
@@ -498,16 +537,21 @@ export function ProviderConfigurator({ initialConfigurations }: ProviderConfigur
         <button
           type="button"
           onClick={() => setMode(null)}
-          disabled={rows.length > 0}
           className={GHOST_PILL}
         >
           Change mode
         </button>
       </div>
-      {rows.length > 0 ? (
+      {inactiveCount > 0 ? (
         <p className="text-xs text-ink-muted" role="status">
-          A runtime with saved credentials is fixed — delete its configuration before
-          changing modes.
+          {inactiveCount} saved configuration{inactiveCount === 1 ? "" : "s"} from the other
+          mode {inactiveCount === 1 ? "is" : "are"} kept and inactive — switch modes to use{" "}
+          {inactiveCount === 1 ? "it" : "them"} again.
+        </p>
+      ) : null}
+      {actionError["mode:switch"] ? (
+        <p className="text-xs text-red-400" role="alert">
+          {actionError["mode:switch"]!.message}
         </p>
       ) : null}
 
@@ -569,14 +613,13 @@ function readinessFor(rows: ProviderConfigSummary[], capability: Capability) {
   const serving = rows.filter((row) => row.capabilities[capability]);
   const enabled = serving.find((row) => row.isEnabled) ?? null;
   if (serving.length === 0) {
-    return { state: "empty" as const, label: "Not set up", dot: "bg-ink-muted/60", text: "text-ink-muted", names: "" };
+    return { label: "Not set up", dot: "bg-ink-muted/60", text: "text-ink-muted", names: "" };
   }
   if (!enabled) {
-    return { state: "disabled" as const, label: "Configured, disabled", dot: "bg-ink-muted/60", text: "text-ink-muted", names: friendlyProviderName(serving[0]!) };
+    return { label: "Configured, disabled", dot: "bg-ink-muted/60", text: "text-ink-muted", names: friendlyProviderName(serving[0]!) };
   }
   const status = CREDENTIAL_STATUS[enabled.credentialStatus] ?? CREDENTIAL_STATUS.unvalidated!;
   return {
-    state: enabled.credentialStatus as "valid" | "unvalidated" | "invalid",
     label: status.word,
     dot: status.dot,
     text: status.text,
@@ -589,9 +632,13 @@ function readinessFor(rows: ProviderConfigSummary[], capability: Capability) {
 function ModeSelector({
   onSelect,
   configured,
+  switching,
+  error,
 }: {
-  onSelect: (mode: "realtime" | "custom") => void;
+  onSelect: (mode: RuntimeMode) => void;
   configured: boolean;
+  switching: boolean;
+  error?: ApiError;
 }) {
   return (
     <div className="flex flex-col gap-6">
@@ -628,9 +675,10 @@ function ModeSelector({
           <button
             type="button"
             onClick={() => onSelect("realtime")}
+            disabled={switching}
             className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
           >
-            Choose pre-configured
+            {switching ? "Switching…" : "Choose pre-configured"}
           </button>
         </section>
         <section className="rounded-3xl border border-line bg-surface p-6">
@@ -643,16 +691,21 @@ function ModeSelector({
           <button
             type="button"
             onClick={() => onSelect("custom")}
+            disabled={switching}
             className={`${PRIMARY_PILL} mt-6 w-full justify-center`}
           >
-            Choose advanced
+            {switching ? "Switching…" : "Choose advanced"}
           </button>
         </section>
       </div>
       {configured ? (
         <p className="text-center text-xs text-ink-muted" role="status">
-          A runtime is already configured — delete its saved configuration first to
-          switch modes.
+          Saved configurations are kept — switching modes never deletes them.
+        </p>
+      ) : null}
+      {error ? (
+        <p className="text-center text-xs text-red-400" role="alert">
+          {error.message}
         </p>
       ) : null}
     </div>
@@ -683,8 +736,14 @@ function PreconfiguredModePanel(props: PreconfiguredModePanelProps) {
       </p>
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         {REALTIME_PROVIDERS.map((spec) => {
+          // Only a row that actually serves `realtime` is a configured agent:
+          // the same provider may also have LLM/ASR/TTS rows, which must not
+          // be shown here (their probe result has no realtime capability).
           const configured = props.rows.find(
-            (row) => row.providerType === "preset" && row.providerName === spec.providerName,
+            (row) =>
+              row.providerType === "preset" &&
+              row.providerName === spec.providerName &&
+              Boolean(row.capabilities.realtime),
           );
           const available = Boolean(spec.modelId);
           return (
@@ -756,20 +815,30 @@ function ConfiguredRealtimeRow({
   onDelete: (row: ProviderConfigSummary) => void;
 }) {
   const [confirm, setConfirm] = useState(false);
-  const probe = probeByRow[row.userProviderConfigurationId]?.capabilities.find(
-    (result) => result.capability === "realtime",
-  );
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+  const rowId = row.userProviderConfigurationId;
+  const fullProbe = probeByRow[rowId];
+  const probe = fullProbe?.capabilities.find((result) => result.capability === "realtime") ?? null;
   return (
     <div className="mt-3 flex flex-col gap-2 border-t border-line pt-3">
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={() => onProbe(row)} disabled={pending !== null} className={GHOST_PILL}>Test capability</button>
         <button
           type="button"
-          onClick={() => void onPatch(row, { isEnabled: !row.isEnabled }, `${row.userProviderConfigurationId}:enable`)}
+          onClick={() => void onPatch(row, { isEnabled: !row.isEnabled }, `${rowId}:enable`)}
           disabled={pending !== null}
           className={GHOST_PILL}
         >
           {row.isEnabled ? "Disable" : "Enable"}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setKeyDraft(""); setEditingKey((current) => !current); }}
+          disabled={pending !== null}
+          className={GHOST_PILL}
+        >
+          Replace key
         </button>
         {!confirm ? (
           <button type="button" onClick={() => setConfirm(true)} disabled={pending !== null} className={DANGER_PILL}>Delete</button>
@@ -780,9 +849,54 @@ function ConfiguredRealtimeRow({
           </>
         )}
       </div>
-      {probe ? <p className="text-xs text-ink-muted">Last test: {probe.status}</p> : null}
-      {actionError[`${row.userProviderConfigurationId}:enable`] ? (
-        <p className="text-xs text-red-400">{actionError[`${row.userProviderConfigurationId}:enable`]!.message}</p>
+      {editingKey ? (
+        <form
+          className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!keyDraft.trim()) return;
+            void onPatch(row, { apiKey: keyDraft.trim() }, `${rowId}:key`).then((ok) => {
+              if (ok) setEditingKey(false);
+            });
+          }}
+        >
+          <span className={LABEL_CLASS}>Realtime API key</span>
+          <input
+            type="password"
+            value={keyDraft}
+            onChange={(event) => setKeyDraft(event.target.value)}
+            className={FIELD_CLASS}
+            placeholder="Paste a new provider API key"
+            autoComplete="off"
+            maxLength={4096}
+            aria-label="Replacement realtime API key"
+          />
+          {actionError[`${rowId}:key`] ? (
+            <p className="text-xs text-red-400">{actionError[`${rowId}:key`]!.message}</p>
+          ) : null}
+          <div className="flex gap-2">
+            <button type="submit" disabled={pending !== null || !keyDraft.trim()} className={PRIMARY_PILL}>
+              Save key
+            </button>
+            <button type="button" onClick={() => setEditingKey(false)} className={GHOST_PILL}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
+      {fullProbe ? (
+        <div className="rounded-xl border border-line bg-surface p-3">
+          <span className={LABEL_CLASS}>Last test result</span>
+          <ProbeResultView result={probe} capability="realtime" />
+        </div>
+      ) : null}
+      {actionError[`${rowId}:probe`] ? (
+        <p className="text-xs text-red-400">
+          {actionError[`${rowId}:probe`]!.message}
+        </p>
+      ) : null}
+      {actionError[`${rowId}:enable`] ? (
+        <p className="text-xs text-red-400">{actionError[`${rowId}:enable`]!.message}</p>
       ) : null}
     </div>
   );
@@ -1259,7 +1373,7 @@ function ConfigurationRowCard({
       {probe ? (
         <div className="mt-4 rounded-xl border border-line bg-surface p-3">
           <span className={LABEL_CLASS}>Last test result</span>
-          <ProbeResultView result={probeForCapability ?? null} fullResult={probe} capability={capability} />
+          <ProbeResultView result={probeForCapability ?? null} capability={capability} />
         </div>
       ) : null}
 
@@ -1323,21 +1437,15 @@ const PROBE_STATUS_WORDS: Record<CapabilityProbeResult["status"], { word: string
 
 function ProbeResultView({
   result,
-  fullResult,
   capability,
 }: {
   result: CapabilityProbeResult | null;
-  fullResult: ConfigurationProbeResult;
   capability: Capability;
 }) {
   if (!result) {
-    return (
-      <p className="mt-1 text-xs text-ink-muted">
-        The stored test covered other capabilities of this configuration
-        ({fullResult.capabilities.map((r) => CAPABILITY_LABELS[r.capability]).join(", ")}); run the
-        test again to verify this one.
-      </p>
-    );
+    // Only reachable for a row that does not serve this capability — which the
+    // capability filters now prevent. Keep the copy neutral if it ever shows.
+    return <p className="mt-1 text-xs text-ink-muted">Run the test to verify this capability.</p>;
   }
   const status = PROBE_STATUS_WORDS[result.status];
   return (

@@ -1,4 +1,6 @@
-import type { ProviderConfigSummary } from "@/lib/providers/config";
+// Type-only: this module is imported by a client component, so pulling in the
+// config service (Prisma / node:module) would break the browser bundle.
+import type { ProviderConfigSummary, RuntimeMode } from "@/lib/providers/config";
 import type { InterviewSetupInput } from "./validation";
 
 /**
@@ -8,6 +10,22 @@ import type { InterviewSetupInput } from "./validation";
  * the custom path, and the scorer never gates an interview (it gates reports).
  */
 export type InterviewRuntimeMode = "realtime" | "custom" | "none";
+
+/** Pure, server-free filter: a realtime row carries the realtime capability. */
+function rowsForRuntime(
+  rows: ProviderConfigSummary[],
+  mode: RuntimeMode | null,
+): ProviderConfigSummary[] {
+  if (!mode) return rows;
+  return rows.filter((row) => {
+    const isRealtime = Boolean(row.capabilities.realtime);
+    if (mode === "realtime") return isRealtime;
+    // The data model allows one row to serve several capabilities. Dropping
+    // every realtime-capable row in custom mode would hide the LLM route of a
+    // mixed row, so retain it for its non-realtime capabilities.
+    return !isRealtime || Object.keys(row.capabilities).some((key) => key !== "realtime");
+  });
+}
 
 export interface RuntimeSelection {
   mode: InterviewRuntimeMode;
@@ -53,20 +71,34 @@ export function buildRealtimeLaunchInput(
   };
 }
 
-export function selectRuntime(rows: ProviderConfigSummary[]): RuntimeSelection {
-  const realtime = bestServingRow(rows, "realtime");
+export function selectRuntime(
+  rows: ProviderConfigSummary[],
+  activeMode: RuntimeMode | null = null,
+): RuntimeSelection {
+  // Only the selected runtime is considered. Rows saved under the other
+  // runtime stay in the database but are inactive for this interview.
+  const scoped = rowsForRuntime(rows, activeMode);
+  // A mixed row stays available for its custom capabilities, but must not be
+  // selected as a realtime route for an account that saved a non-realtime mode.
+  // Only an explicit realtime choice (or a legacy unset mode) can launch one.
+  const realtime =
+    activeMode === null || activeMode === "realtime"
+      ? bestServingRow(scoped, "realtime")
+      : null;
   if (realtime) {
     return {
       mode: "realtime",
-      ready: realtime.credentialStatus !== "invalid",
+      // Owner decision: a realtime interview only launches on a credential
+      // that has actually passed its capability probe.
+      ready: realtime.credentialStatus === "valid",
       servingProvider: realtime.providerName,
       requiredCapabilities: [],
       row: realtime,
     };
   }
 
-  const llm = bestServingRow(rows, "llm");
-  const hasCustomRows = rows.some(
+  const llm = bestServingRow(scoped, "llm");
+  const hasCustomRows = scoped.some(
     (row) => row.capabilities.llm || row.capabilities.asr || row.capabilities.tts,
   );
   return {

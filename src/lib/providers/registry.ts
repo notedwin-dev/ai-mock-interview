@@ -47,10 +47,9 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     displayName: "OpenAI",
     defaultBaseUrl: "https://api.openai.com/v1",
     // `realtime` = the OpenAI Realtime API on the same documented base URL
-    // (register Option A, "Pre-configured Realtime Agents"). No realtime
-    // agent model IDs exist in the owner-maintained catalogue yet, so the UI
-    // offers live discovery + manual entry only — IDs are never invented
-    // here.
+    // (register Option A, "Pre-configured Realtime Agents"). The exact realtime
+    // model ID is fixed by the administrator in `realtime-models.ts` and is
+    // never user-editable or invented here.
     capabilities: ["asr", "llm", "scorer", "realtime"],
   },
   {
@@ -64,9 +63,9 @@ export const PRESET_ADAPTERS: readonly ProviderPreset[] = [
     displayName: "Google",
     defaultBaseUrl: "https://generativelanguage.googleapis.com",
     // `realtime` = the Gemini Live API on the same documented base URL
-    // (register Option A, "Pre-configured Realtime Agents"). Same catalogue
-    // rule as openai: no realtime agent model IDs are listed yet — discovery
-    // + manual entry only.
+    // (register Option A, "Pre-configured Realtime Agents"). The exact realtime
+    // model ID is fixed by the administrator in `realtime-models.ts`; this
+    // registry never invents or substitutes one.
     capabilities: ["asr", "llm", "scorer", "realtime"],
   },
   {

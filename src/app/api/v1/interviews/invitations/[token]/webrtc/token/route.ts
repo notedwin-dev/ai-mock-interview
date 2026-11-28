@@ -15,11 +15,11 @@ export async function POST(
 ): Promise<Response> {
   try {
     const { token } = await ctx.params;
-    const interview = await createDefaultRoomStore().context(token);
+    const store = createDefaultRoomStore();
+    const interview = await store.context(token);
     if (!interview || (interview.status !== "scheduled" && interview.status !== "active")) {
       return jsonError(404, "invitation_not_found", "This interview link is not available.");
     }
-
     let config;
     try {
       config = getLiveKitConfig();
@@ -36,6 +36,19 @@ export async function POST(
       },
       { apiKey: config.apiKey, apiSecret: config.apiSecret },
     );
+    // Activate only once a join can actually be delivered: a misconfiguration
+    // or minting failure must leave a scheduled interview scheduled. This still
+    // runs before dispatch and the response, so a successful join enables End
+    // immediately (the room_finished webhook remains authoritative for finish).
+    if (interview.status === "scheduled") {
+      const activation = await store.activate(interview.sessionId);
+      // A concurrent finish may have claimed the session while the credential
+      // was minted. Do not dispatch an agent or hand out a token for a room
+      // that is no longer joinable.
+      if (activation === "rejected") {
+        return jsonError(404, "invitation_not_found", "This interview link is not available.");
+      }
+    }
     // The agent dispatch is best-effort: a worker outage must not prevent the
     // candidate from joining their room.
     try {
@@ -45,6 +58,10 @@ export async function POST(
           inviteToken: token,
           jobRole: interview.jobRole,
           jobDescription: interview.jobDescription,
+          evaluationMode: interview.evaluationMode,
+          experienceLevel: interview.experienceLevel,
+          techStack: interview.techStack,
+          questionCount: interview.questionCount,
         },
         config,
       );

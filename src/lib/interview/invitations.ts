@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { createInvitationToken, hashInvitationToken, invitationPath } from "./invitation-token";
+import {
+  createInvitationToken,
+  hashInvitationToken,
+  invitationPath,
+  isInvitationToken,
+} from "./invitation-token";
 
 /**
  * Revocable invitation links (TT-21; FR-SETUP-008). The raw capability travels
@@ -29,8 +34,13 @@ export interface InvitationView {
   sessionId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   categoryNameSnapshot: string;
   evaluationMode: string;
+  /** The one runtime this session runs (ADR-006): exactly one room UI is shown. */
+  runtimeMode: string;
   status: string;
 }
 
@@ -56,11 +66,17 @@ export async function findActiveSessionByToken(
   userId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: unknown;
+  questionCount: number | null;
   categoryNameSnapshot: string;
   evaluationMode: string;
+  runtimeMode: string;
   status: string;
 } | null> {
-  if (!TOKEN_PATTERN.test(token)) return null;
+  // Shared validator from the runtime batch; TOKEN_PATTERN stays exported for
+  // callers that still describe the raw shape. Malformed tokens never hit the DB.
+  if (!isInvitationToken(token)) return null;
   return db.interviewSession.findFirst({
     where: {
       invitationTokenHash: hashInvitationToken(token),
@@ -71,8 +87,12 @@ export async function findActiveSessionByToken(
       userId: true,
       jobRole: true,
       jobDescription: true,
+      experienceLevel: true,
+      techStack: true,
+      questionCount: true,
       categoryNameSnapshot: true,
       evaluationMode: true,
+      runtimeMode: true,
       status: true,
     },
   });
@@ -120,16 +140,22 @@ export async function issueInvitation(
 
 /** Resolves a link to one interview's confirmation details — no auth, no privileges. */
 export async function resolveInvitation(token: string): Promise<InvitationView | null> {
+  // One token→session lookup shared with the room store. The owner's user id
+  // is deliberately omitted: the link grants interview-only access.
   const session = await findActiveSessionByToken(token);
   if (!session) return null;
-  // Confirmation view is the minimum detail set — the owner's user id is
-  // deliberately never exposed through the link.
   return {
     sessionId: session.sessionId,
     jobRole: session.jobRole,
     jobDescription: session.jobDescription,
+    experienceLevel: session.experienceLevel,
+    techStack: Array.isArray(session.techStack)
+      ? session.techStack.filter((value): value is string => typeof value === "string")
+      : [],
+    questionCount: session.questionCount,
     categoryNameSnapshot: session.categoryNameSnapshot,
     evaluationMode: session.evaluationMode,
+    runtimeMode: session.runtimeMode,
     status: session.status,
   };
 }
@@ -141,4 +167,45 @@ export async function revokeInvitation(userId: string, sessionId: string): Promi
     where: { sessionId: session.sessionId },
     data: { invitationTokenHash: null, invitationRevokedAt: new Date() },
   });
+}
+
+export interface EndedInterview {
+  status: string;
+  completedAt: string | null;
+  /** True when the interview was already completed before this request. */
+  alreadyEnded: boolean;
+}
+
+/**
+ * Ends the interview behind an invitation link (FR-INTERVIEW-011). The link is
+ * the only capability: no account session is involved and nothing but this
+ * interview's completion state is returned.
+ *
+ * Repeat requests are idempotent — a completed interview returns its existing
+ * state instead of creating a second completion event. An interview that never
+ * started is rejected, mirroring the DB rule that `completed_at` implies
+ * `started_at`.
+ */
+export async function endInvitationInterview(token: string): Promise<EndedInterview> {
+  const session = await resolveInvitation(token);
+  if (!session) {
+    throw new InvitationError("not_found", "This invitation link is not available.");
+  }
+
+  const ended = await db.interviewSession.updateMany({
+    where: { sessionId: session.sessionId, status: "active" },
+    data: { status: "completed", completedAt: new Date() },
+  });
+  const current = await db.interviewSession.findUniqueOrThrow({
+    where: { sessionId: session.sessionId },
+    select: { sessionId: true, status: true, completedAt: true },
+  });
+  if (ended.count === 0 && current.status !== "completed") {
+    throw new InvitationError("invalid_state", "This interview is not running.");
+  }
+  return {
+    status: current.status,
+    completedAt: current.completedAt?.toISOString() ?? null,
+    alreadyEnded: ended.count === 0,
+  };
 }

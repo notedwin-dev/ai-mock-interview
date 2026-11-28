@@ -31,10 +31,29 @@ interface ApiError {
 }
 
 const MAX_MESSAGES = 12;
+
+/** One place for the feedback-mode contract, shown wherever the mode is chosen. */
+const EVALUATION_MODE_INFO = {
+  supportive: {
+    title: "Supportive",
+    detail: "Gentle, encouraging feedback. Celebrates what went well and frames improvements kindly — best for building confidence.",
+  },
+  balanced: {
+    title: "Balanced",
+    detail: "A fair mix of strengths and areas to improve, with clear, actionable suggestions — best for everyday practice.",
+  },
+  rigorous: {
+    title: "Rigorous",
+    detail: "Direct, demanding feedback against a high bar, with little softening — best for a realistic, critical review.",
+  },
+} as const;
+
+type Strictness = keyof typeof EVALUATION_MODE_INFO;
+
 const WELCOME: ChatMessage = {
   role: "agent",
   content:
-    "Hi! I'm your AI Interview Agent. Tell me what you'd like to practise — the purpose, the target role, the job description context and how strict the feedback should be (Supportive, Balanced or Rigorous).",
+    "Hi! I'm your AI Interview Agent. Tell me what you'd like to practise — the purpose, the target role, the job description context and how strict the feedback should be. Supportive = gentle, confidence-building feedback; Balanced = a fair mix of strengths and improvements; Rigorous = direct, high-bar critique.",
 };
 
 const PRIMARY_PILL =
@@ -74,7 +93,7 @@ interface InterviewAgentProps {
 
 export function InterviewAgent({ runtimeMode, categoryId }: InterviewAgentProps) {
   const router = useRouter();
-  const [strictness, setStrictness] = useState<"supportive" | "balanced" | "rigorous">("balanced");
+  const [strictness, setStrictness] = useState<Strictness>("balanced");
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
   const [draft, setDraft] = useState("");
   const [result, setResult] = useState<AgentResult | null>(null);
@@ -212,19 +231,42 @@ export function InterviewAgent({ runtimeMode, categoryId }: InterviewAgentProps)
             Your native realtime agent gathers the purpose, role and job description
             conversationally in the room. No separate ASR, LLM or TTS setup is needed.
           </p>
-          <label className="mt-4 flex flex-col gap-1.5">
-            <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">Evaluation strictness</span>
-            <select
-              value={strictness}
-              onChange={(event) => setStrictness(event.target.value as typeof strictness)}
-              className={FIELD_CLASS}
-              aria-label="Evaluation strictness"
-            >
-              <option value="supportive">Supportive</option>
-              <option value="balanced">Balanced</option>
-              <option value="rigorous">Rigorous</option>
-            </select>
-          </label>
+          <div className="mt-4 flex flex-col gap-2" role="group" aria-label="Evaluation strictness">
+            <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+              Evaluation strictness
+            </span>
+            {(Object.keys(EVALUATION_MODE_INFO) as Strictness[]).map((mode) => {
+              const info = EVALUATION_MODE_INFO[mode];
+              const selected = strictness === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setStrictness(mode)}
+                  aria-pressed={selected}
+                  className={`w-full cursor-pointer rounded-2xl border p-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-emerald-400 ${
+                    selected
+                      ? "border-emerald-400 bg-emerald-400/10"
+                      : "border-line bg-raised/40 hover:border-emerald-400/60"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span
+                      aria-hidden
+                      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${selected ? "border-emerald-400 bg-emerald-400" : "border-line"}`}
+                    >
+                      {selected ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-950" /> : null}
+                    </span>
+                    <span className="text-sm font-semibold text-ink">{info.title}</span>
+                    {selected ? <span className="text-[10px] text-emerald-300">Selected</span> : null}
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-ink-muted">
+                    {info.detail}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
             onClick={() => void launchRealtime()}

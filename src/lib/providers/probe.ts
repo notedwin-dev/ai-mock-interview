@@ -1,5 +1,8 @@
 import type { UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
+// Reintroduced from the runtime batch: the realtime capability probe uses a
+// short-lived native session token (never interview content) to prove the key.
+import { createRealtimeToken, type LiveSessionConfig } from "@/lib/interview/realtime-token";
 import { capabilitiesJsonSchema, ProviderConfigError, validateProviderTarget } from "./config";
 import { ProviderCryptoError, decryptApiKey } from "./encryption";
 import { getPresetAdapter, PRESET_MODEL_LIST_WIRES, type Capability } from "./registry";
@@ -72,8 +75,21 @@ export interface ProbeDeps {
     configurationId: string,
   ) => Promise<UserProviderConfiguration | null>;
   fetchImpl?: typeof fetch;
+  /** Native realtime session setup (injectable so probes stay hermetic). */
+  realtimeToken?: (
+    route: {
+      providerName: string;
+      providerType: string;
+      baseUrl: string;
+      modelId: string;
+      apiKey: string;
+    },
+    session?: LiveSessionConfig,
+  ) => Promise<{ token: string; url: string }>;
   /**
    * Persists the post-probe credential status (default: the database).
+   * `configurationVersion` is the version read when the probe started: the
+   * write is conditioned on it so a replacement configuration is untouched.
    * `disable` is true exactly when the probe failed — a failed test must
    * prevent the capability being (or remaining) enabled (FR-PROVIDER-006).
    */
@@ -81,6 +97,7 @@ export interface ProbeDeps {
     configurationId: string,
     credentialStatus: "valid" | "invalid",
     disable: boolean,
+    configurationVersion: number,
   ) => Promise<void>;
 }
 
@@ -97,10 +114,13 @@ function saveStoredStatus(
   configurationId: string,
   credentialStatus: "valid" | "invalid",
   disable: boolean,
+  configurationVersion: number,
 ): Promise<void> {
   return db.userProviderConfiguration
     .update({
-      where: { userProviderConfigurationId: configurationId },
+      // Version-conditioned: a row replaced or edited during this probe is
+      // never stamped with a result produced with its old credential/model.
+      where: { userProviderConfigurationId: configurationId, configurationVersion },
       data: { credentialStatus, ...(disable ? { isEnabled: false } : {}) },
     })
     .then(() => undefined);
@@ -158,6 +178,62 @@ async function classifyProbeFailure(
   return { errorCode: "provider_error", detail: "The probe failed.", endpointReachable: false, credentialValid: false };
 }
 
+/**
+ * Native realtime token failures arrive as provider SDK errors whose message
+ * embeds the HTTP response. Surface a sanitized, actionable reason instead of
+ * a generic "rejected setup" so a bad key is distinguishable from a quota or
+ * a missing model. No credential material is ever echoed.
+ */
+function describeRealtimeError(error: unknown): {
+  errorCode: ProbeErrorCode;
+  detail: string;
+  endpointReachable: boolean;
+} {
+  if (error instanceof ProviderCryptoError) {
+    return {
+      errorCode: "authentication_failed",
+      detail: "The stored credential could not be decrypted; re-save the configuration.",
+      endpointReachable: false,
+    };
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  const lower = raw.toLowerCase();
+  const statusMatch = raw.match(/\b([45]\d{2})\b/);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const providerMessage = raw.match(/"message"\s*:\s*"([^"]+)"/)?.[1];
+  const sanitized = (providerMessage ?? "")
+    .replace(/AIza[0-9A-Za-z_-]{10,}/g, "[redacted]")
+    .replace(/sk-[0-9A-Za-z_-]{8,}/g, "[redacted]")
+    .slice(0, 300);
+
+  if (/api[ _]?key not valid|api_key_invalid|invalid api key|unauthorized|permission_denied|authentication/.test(lower)) {
+    return {
+      errorCode: "authentication_failed",
+      detail: "The provider rejected the API key.",
+      endpointReachable: status !== null,
+    };
+  }
+  if (/quota|rate[ _]?limit|resource_exhausted/.test(lower)) {
+    return {
+      errorCode: "rate_limited",
+      detail: "The provider rate-limited the realtime session request.",
+      endpointReachable: status !== null,
+    };
+  }
+  if (status === 404 || /not[ _]?found|model.*(unsupported|not available)/.test(lower)) {
+    return {
+      errorCode: "model_unsupported",
+      detail: "The provider does not expose the configured realtime model.",
+      endpointReachable: status !== null,
+    };
+  }
+  return {
+    errorCode: "provider_error",
+    detail: sanitized || "The provider rejected the realtime session setup.",
+    endpointReachable: status !== null,
+  };
+}
+
 export class ProbeHttpError extends Error {
   readonly status: number;
   readonly stage: "models" | "capability";
@@ -208,6 +284,7 @@ export async function probeProviderConfiguration(
     throw new ProviderConfigError("not_found", "Provider configuration not found.");
   }
 
+  const configurationVersion = row.configurationVersion;
   const capabilities = capabilitiesJsonSchema.parse(row.capabilitiesJson);
   const results: CapabilityProbeResult[] = [];
 
@@ -226,15 +303,72 @@ export async function probeProviderConfiguration(
     // custom pipeline is stable), so realtime reports skipped: status-neutral,
     // exactly like the not-yet-adaptered presets.
     if (capability === "realtime") {
-      results.push({
-        capability,
-        status: "skipped",
-        endpointReachable: false,
-        credentialValid: false,
-        modelsDiscovered: null,
-        selectedModelAccepted: null,
-        detail: "Native realtime sessions are verified with the realtime interview runtime; this test does not contact the provider yet.",
-      });
+      // Combine both sides: keep the injectable Gemini Live session-token
+      // verification and the sanitised realtime error classification from the
+      // runtime batch, while keeping our status-neutral wording for a config
+      // that cannot be verified here. No interview content ever crosses a wire.
+      const presetBase =
+        row.providerType === "preset" ? getPresetAdapter(row.providerName)?.defaultBaseUrl : null;
+      const realtimeBase = presetBase ?? row.baseUrl ?? "";
+      // createRealtimeToken only supports the preset Google route. A custom
+      // target that merely points at a Gemini base URL cannot be verified here
+      // and stays status-neutral (skipped); injected tokens (tests) still run.
+      const isGemini =
+        Boolean(deps.realtimeToken) ||
+        (row.providerType === "preset" && row.providerName === "google");
+      if (!isGemini) {
+        results.push({
+          capability,
+          status: "skipped",
+          endpointReachable: false,
+          credentialValid: false,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          detail: "Native realtime sessions are verified with the realtime interview runtime; this test does not contact the provider yet.",
+        });
+        continue;
+      }
+      try {
+        const apiKey = decryptApiKey(new TextDecoder().decode(row.encryptedApiKey!));
+        // The live token API now requires a session config; supply a neutral
+        // one (no interview content) rather than dropping the probe feature.
+        const probeInstructions = "Connectivity probe only — no interview content is sent.";
+        const session = await (deps.realtimeToken ?? createRealtimeToken)(
+          {
+            providerName: row.providerName,
+            providerType: row.providerType as "custom" | "preset",
+            baseUrl: realtimeBase,
+            modelId: settings.modelId,
+            apiKey,
+          },
+          {
+            instructions: probeInstructions,
+            sessionConfig: { instructions: probeInstructions },
+          },
+        );
+        if (!session.token || !session.url) throw new Error("empty realtime session");
+        results.push({
+          capability,
+          status: "validated",
+          endpointReachable: true,
+          credentialValid: true,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          detail: "Realtime session token accepted; no interview audio was sent.",
+        });
+      } catch (error) {
+        const reason = describeRealtimeError(error);
+        results.push({
+          capability,
+          status: "failed",
+          endpointReachable: reason.endpointReachable,
+          credentialValid: false,
+          modelsDiscovered: null,
+          selectedModelAccepted: null,
+          errorCode: reason.errorCode,
+          detail: reason.detail,
+        });
+      }
       continue;
     }
 
@@ -372,14 +506,29 @@ export async function probeProviderConfiguration(
 
   const allValidated = results.length > 0 && results.every((result) => result.status === "validated");
   const anyFailed = results.some((result) => result.status === "failed");
+  // Row-level validity requires every capability on the row to be validated:
+  // a realtime success alone must not mark an untested LLM route as valid.
   const nextStatus: "unvalidated" | "valid" | "invalid" = allValidated
     ? "valid"
     : anyFailed
       ? "invalid"
       : "unvalidated";
+  const disable = anyFailed;
   // A skipped-only probe verifies nothing: leave the stored status untouched.
-  if (nextStatus !== "unvalidated" || anyFailed) {
-    await save(row.userProviderConfigurationId, nextStatus === "valid" ? "valid" : "invalid", anyFailed);
+  if (nextStatus !== "unvalidated" || disable) {
+    try {
+      await save(
+        row.userProviderConfigurationId,
+        nextStatus === "valid" ? "valid" : "invalid",
+        disable,
+        configurationVersion,
+      );
+    } catch {
+      throw new ProviderConfigError(
+        "probe_failed",
+        "This configuration changed while it was being tested. Test the current configuration again.",
+      );
+    }
   }
   return {
     userProviderConfigurationId: row.userProviderConfigurationId,

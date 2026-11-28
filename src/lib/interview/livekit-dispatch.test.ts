@@ -23,8 +23,9 @@ describe("dispatchInterviewerAgent", () => {
       string, string, { metadata: string },
     ];
     expect(room).toBe("session-1");
-    expect(name).toBe("aimis-interviewer");
+    expect(name).toBe("aimis-agent");
     expect(JSON.parse(options.metadata)).toMatchObject({
+      role: "interviewer",
       sessionId: "session-1", jobRole: "Backend Engineer", inviteToken: "invite",
     });
   });
@@ -41,7 +42,7 @@ describe("dispatchInterviewerAgent", () => {
   });
 
   it("does not duplicate our own named dispatch", async () => {
-    dispatchClient.listDispatch.mockResolvedValueOnce([{ id: "ours", agentName: "aimis-interviewer", metadata: "" }] as never);
+    dispatchClient.listDispatch.mockResolvedValueOnce([{ id: "ours", agentName: "aimis-agent", metadata: "" }] as never);
     const result = await dispatchInterviewerAgent(
       { room: "session-1", inviteToken: "t", jobRole: "R", jobDescription: null },
       { url: "wss://x", apiKey: "k", apiSecret: "s" },

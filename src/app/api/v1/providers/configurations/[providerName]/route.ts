@@ -20,8 +20,14 @@ export async function PATCH(
 
   try {
     const { providerName } = await ctx.params;
+    const configId = new URL(request.url).searchParams.get("configId") ?? undefined;
     const body = await request.json();
-    const configuration = await updateProviderConfiguration(account.account.userId, providerName, body);
+    const configuration = await updateProviderConfiguration(
+      account.account.userId,
+      providerName,
+      body,
+      configId,
+    );
     return Response.json({ configuration });
   } catch (error) {
     return errorResponse(error);
@@ -30,7 +36,7 @@ export async function PATCH(
 
 /** DELETE /api/v1/providers/configurations/[providerName] — remove one row. */
 export async function DELETE(
-  _request: Request,
+  request: Request,
   ctx: RouteContext<"/api/v1/providers/configurations/[providerName]">,
 ): Promise<Response> {
   const account = await requireApiAccount({ role: "candidate" });
@@ -38,7 +44,8 @@ export async function DELETE(
 
   try {
     const { providerName } = await ctx.params;
-    await deleteProviderConfiguration(account.account.userId, providerName);
+    const configId = new URL(request.url).searchParams.get("configId") ?? undefined;
+    await deleteProviderConfiguration(account.account.userId, providerName, configId);
     return new Response(null, { status: 204 });
   } catch (error) {
     return errorResponse(error);

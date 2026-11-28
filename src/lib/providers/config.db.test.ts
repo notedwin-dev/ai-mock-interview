@@ -5,9 +5,11 @@ import { PrismaClient } from "@/generated/prisma/client";
 import {
   createProviderConfiguration,
   deleteProviderConfiguration,
+  getActiveRuntimeMode,
   listProviderConfigurations,
   resolveEnabledModel,
   resolveForOutboundCall,
+  setActiveRuntimeMode,
   updateProviderConfiguration,
 } from "./config";
 
@@ -106,12 +108,64 @@ d("provider configuration service (integration)", () => {
     expect(Object.keys(summary.capabilities).sort()).toEqual(["asr", "llm"]);
   });
 
-  it("rejects a duplicate (user, providerName) pair", async () => {
+  it("rejects the same provider configured twice for the same capability", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);
     await expect(
       createProviderConfiguration(userId, { ...customInput, apiKey: "sk-other" }),
     ).rejects.toMatchObject({ code: "config_exists" });
+  });
+
+  it("allows the same provider for different capabilities (no per-capability exclusivity)", async () => {
+    const userId = await createUser();
+    const asr = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-asr",
+      capabilities: { asr: { modelId: "asr-model" } },
+    });
+    const llm = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-llm",
+      capabilities: { llm: { modelId: "llm-model" } },
+    });
+    expect(asr.userProviderConfigurationId).not.toBe(llm.userProviderConfigurationId);
+    const rows = await listProviderConfigurations(userId);
+    expect(rows.filter((row) => row.providerName === "google")).toHaveLength(2);
+  });
+
+  it("targets the exact row when several configurations share a provider name", async () => {
+    const userId = await createUser();
+    const asr = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-asr",
+      capabilities: { asr: { modelId: "asr-model" } },
+    });
+    const llm = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-llm",
+      capabilities: { llm: { modelId: "llm-model" } },
+    });
+
+    const patched = await updateProviderConfiguration(
+      userId,
+      "google",
+      { isEnabled: false },
+      llm.userProviderConfigurationId,
+    );
+    expect(patched.userProviderConfigurationId).toBe(llm.userProviderConfigurationId);
+    expect(patched.isEnabled).toBe(false);
+    const rowsAfterPatch = await listProviderConfigurations(userId);
+    expect(rowsAfterPatch.find((row) => row.userProviderConfigurationId === asr.userProviderConfigurationId)?.isEnabled).toBe(true);
+
+    await deleteProviderConfiguration(userId, "google", llm.userProviderConfigurationId);
+    const rowsAfterDelete = await listProviderConfigurations(userId);
+    expect(rowsAfterDelete.map((row) => row.userProviderConfigurationId)).toEqual([
+      asr.userProviderConfigurationId,
+    ]);
   });
 
   it("rejects a preset used for a capability it does not declare", async () => {
@@ -265,6 +319,104 @@ d("provider configuration service (integration)", () => {
     expect(resolved.apiKey).toBe("sk-plaintext-secret");
   });
 
+  // Both test sets kept: the runtime-batch cases below and our credential-free
+  // resolveEnabledModel case further down.
+  it("locks realtime model IDs to the admin-fixed value", async () => {
+    const userId = await createUser();
+    const realtime = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-plaintext-secret",
+      capabilities: { realtime: { modelId: "user-invented-model" } },
+    });
+    expect(realtime.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
+  });
+
+  it("does not let a PATCH smuggle in a different realtime model", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-realtime",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    const updated = await updateProviderConfiguration(userId, "google", {
+      capabilities: { realtime: { modelId: "gpt-4o-mini-transcribe" } },
+    });
+    expect(updated.capabilities.realtime?.modelId).toBe("gemini-3.8-live-extended-thinking");
+  });
+
+  it("keeps both runtimes saved and uses only the active mode for outbound calls", async () => {
+    const userId = await createUser();
+    const realtime = await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-realtime",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    const custom = await createProviderConfiguration(userId, customInput);
+
+    expect((await listProviderConfigurations(userId))).toHaveLength(2);
+
+    // Explicitly choosing one mode does not delete or disable the other's row.
+    await setActiveRuntimeMode(userId, "custom");
+    expect(await getActiveRuntimeMode(userId)).toBe("custom");
+    const llm = await resolveForOutboundCall(userId, "llm");
+    expect(llm.providerName).toBe(custom.providerName);
+    expect(llm.modelId).toBe("gpt-4o");
+    await expect(resolveForOutboundCall(userId, "realtime")).rejects.toMatchObject({
+      code: "not_found",
+    });
+
+    // Realtime never launches on an unvalidated credential — simulate the
+    // successful probe before expecting the route to resolve.
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: realtime.userProviderConfigurationId },
+      data: { credentialStatus: "valid" },
+    });
+    await setActiveRuntimeMode(userId, "realtime");
+    const live = await resolveForOutboundCall(userId, "realtime");
+    expect(live.providerName).toBe(realtime.providerName);
+    await expect(resolveForOutboundCall(userId, "llm")).rejects.toMatchObject({
+      code: "not_found",
+    });
+  });
+
+  it("never resolves an unvalidated realtime credential for launch", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      providerType: "preset",
+      providerName: "google",
+      apiKey: "sk-google-realtime",
+      capabilities: { realtime: { modelId: "gemini-3.8-live-extended-thinking" } },
+    });
+    await expect(resolveForOutboundCall(userId, "realtime")).rejects.toMatchObject({
+      code: "not_found",
+    });
+  });
+
+  it("prefers a validated route over an older unvalidated row for outbound calls", async () => {
+    const userId = await createUser();
+    await createProviderConfiguration(userId, {
+      ...customInput,
+      providerName: "old-dummy",
+      capabilities: { llm: { modelId: "dummy-model" } },
+    });
+    const validated = await createProviderConfiguration(userId, {
+      ...customInput,
+      providerName: "valid-provider",
+      capabilities: { llm: { modelId: "free-model" } },
+    });
+    await db.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: validated.userProviderConfigurationId },
+      data: { credentialStatus: "valid" },
+    });
+
+    const resolved = await resolveForOutboundCall(userId, "llm");
+    expect(resolved.providerName).toBe("valid-provider");
+    expect(resolved.modelId).toBe("free-model");
+  });
+
   it("refuses to re-enable a configuration whose probe marked it invalid", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);
@@ -376,7 +528,7 @@ d("provider configuration service (integration)", () => {
     });
   });
 
-  it("resolves the oldest enabled configuration when several serve one capability", async () => {
+  it("resolves the latest enabled configuration when several serve one capability", async () => {
     const userId = await createUser();
     await createProviderConfiguration(userId, customInput);
     await createProviderConfiguration(userId, {
@@ -385,7 +537,7 @@ d("provider configuration service (integration)", () => {
     });
 
     const resolved = await resolveForOutboundCall(userId, "llm");
-    expect(resolved.providerName).toBe("my-endpoint");
+    expect(resolved.providerName).toBe("newer-endpoint");
   });
 
   it("ownership is scoped to the calling user", async () => {

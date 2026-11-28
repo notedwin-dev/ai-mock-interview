@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { requireAccount } from "@/lib/auth/guard";
 import { db } from "@/lib/db";
 import {
+  getActiveRuntimeMode,
   listProviderConfigurations,
   type ProviderConfigSummary,
 } from "@/lib/providers/config";
@@ -33,6 +34,7 @@ interface RecentSessionRow {
   evaluationMode: string;
   status: string;
   createdAt: Date;
+  completedAt: Date | null;
 }
 
 function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
@@ -47,6 +49,7 @@ function loadRecentSessions(userId: string): Promise<RecentSessionRow[]> {
       evaluationMode: true,
       status: true,
       createdAt: true,
+      completedAt: true,
     },
   });
 }
@@ -57,10 +60,14 @@ async function DashboardContent() {
   const { account } = await requireAccount({ role: "candidate" });
 
   let configurations: ProviderConfigSummary[] = [];
+  let activeMode: Awaited<ReturnType<typeof getActiveRuntimeMode>> = null;
   let readinessFailed = false;
   try {
     configurations = await listProviderConfigurations(account.userId);
+    activeMode = await getActiveRuntimeMode(account.userId);
   } catch {
+    // A failed readiness read must not hide the independently loaded session
+    // list below; the banner renders its degraded state instead.
     readinessFailed = true;
   }
 
@@ -74,7 +81,7 @@ async function DashboardContent() {
 
   // A candidate needs ONE runtime: a native realtime agent or the custom LLM
   // pipeline. The scorer is independent and never gates launching (ADR-006).
-  const runtime = selectRuntime(configurations);
+  const runtime = selectRuntime(configurations, activeMode);
 
   return (
     <div className="flex flex-col gap-8 lg:gap-10">

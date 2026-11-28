@@ -21,7 +21,12 @@ export interface RoomContext {
   userId: string;
   jobRole: string;
   jobDescription: string | null;
+  experienceLevel: string | null;
+  techStack: string[];
+  questionCount: number | null;
   evaluationMode: string;
+  /** Runtime chosen when the interview was created, used for mode-conflict errors. */
+  runtimeMode?: string;
   status: string;
 }
 
@@ -31,6 +36,14 @@ export interface TranscriptEntry {
   messageKind: string;
   contentText: string;
   assessmentUnitId: string | null;
+}
+
+/** One finalized native-realtime line, as delivered by the room client. */
+export interface RealtimeTranscriptMessage {
+  speaker: "candidate" | "interviewer";
+  contentText: string;
+  /** Client-generated event id: repeated deliveries are idempotent. */
+  clientId: string;
 }
 
 export interface RoomStore {
@@ -54,8 +67,16 @@ export interface RoomStore {
     messageKind: string,
     assessmentUnitId: string | null,
   ): Promise<TranscriptEntry>;
+  /** Opens the next unit and stores its first message in ONE locked transaction. */
+  appendInterviewerWithNewUnit(
+    sessionId: string,
+    contentText: string,
+  ): Promise<TranscriptEntry>;
   activeUnit(sessionId: string): Promise<string | null>;
-  openUnit(sessionId: string, unitNumber: number): Promise<string>;
+  // Both sides combined: the atomic open+append used by the runtime batch for
+  // primary questions, plus our explicit unit lifecycle/rollback hooks used for
+  // conflict recovery. `unitNumber` is optional so legacy callers still work.
+  openUnit(sessionId: string, unitNumber?: number): Promise<string>;
   closeUnit(unitId: string): Promise<void>;
   /**
    * Deletes a unit opened for a primary question whose reply never persisted,
@@ -71,7 +92,12 @@ export interface RoomStore {
    * unanswered candidate message.
    */
   rollbackCandidate(sessionId: string, idempotencyKey: string): Promise<boolean>;
-  /** Appends one finalized Gemini Live message (idempotent on clientId). */
+  /** Appends one finalized native-realtime line (idempotent on clientId). */
+  appendRealtimeMessage(
+    sessionId: string,
+    message: RealtimeTranscriptMessage,
+  ): Promise<TranscriptEntry>;
+  /** Positional form retained for pre-merge callers and DB tests. */
   appendRealtimeMessage(
     sessionId: string,
     speaker: "candidate" | "interviewer",
@@ -112,12 +138,10 @@ export class RoomError extends Error {
 export const roomLlmOutputSchema = z
   .object({
     interviewerText: z.string().trim().min(1).max(2000),
-    // Kinds are constrained to the conversation_message CHECK domain
-    // (primary_question | follow_up_question | candidate_response |
-    // acknowledgement). The interviewer only ever emits the first two; a
-    // "transition" kind does not exist in the DB and would violate the
-    // constraint after the candidate turn is already persisted.
-    messageKind: z.enum(["primary_question", "follow_up_question"]),
+    // Keep the LLM-facing "transition" vocabulary from the runtime batch, but
+    // map it to the DB domain (`acknowledgement`) before persisting — a closing
+    // remark is never independently evaluated (FR-TRANSCRIPT-004).
+    messageKind: z.enum(["primary_question", "follow_up_question", "transition"]),
     endCall: z.boolean(),
   })
   .strict();
@@ -170,13 +194,18 @@ function releaseTurnClaim(sessionId: string, idempotencyKey: string, token: numb
   if (turnClaims.get(key)?.token === token) turnClaims.delete(key);
 }
 
+/** The candidate's configured count wins; legacy sessions keep the fixed cap. */
+function primaryQuestionLimit(context: RoomContext): number {
+  return context.questionCount ?? MAX_PRIMARY_QUESTIONS;
+}
+
 function roomInstructions(context: RoomContext, primaryCount: number): string {
   return [
     "You are the AIMIS AI interviewer in a live mock interview.",
-    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Target question count: ${context.questionCount ?? "not specified"}. Evaluation mode: ${context.evaluationMode}.`,
     "Ask short, focused questions and never invent facts about the candidate.",
-    "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer. When you move to a new area, emit the next primary_question directly — do not emit a separate transition message.",
-    primaryCount >= MAX_PRIMARY_QUESTIONS
+    "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer. A brief closing remark may be a transition (stored as an acknowledgement, never independently evaluated).",
+    primaryCount >= primaryQuestionLimit(context)
       ? "The interview is complete: reply with a brief follow_up_question that closes the conversation (for example, thanking the candidate) and set endCall=true."
       : "Set endCall=true only after the interview is genuinely complete. Choose at most one follow-up per answer.",
   ].join(" ");
@@ -196,10 +225,10 @@ function roomInstructions(context: RoomContext, primaryCount: number): string {
 export function buildLiveInterviewInstructions(context: RoomContext): string {
   return [
     "You are the AIMIS AI interviewer conducting a live voice mock interview.",
-    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
     "This is a mock interview: interview the candidate about the target role, not a real hiring decision.",
     "Ask short, focused questions one at a time and never invent facts about the candidate.",
-    `Ask at most ${MAX_PRIMARY_QUESTIONS} main questions in total. Close the interview briefly once you have asked them.`,
+    `Ask at most ${primaryQuestionLimit(context)} main questions in total. Close the interview briefly once you have asked them.`,
   ].join(" ");
 }
 
@@ -328,9 +357,17 @@ export async function runRoomTurn(
         // The reply landed. Re-assert the completion write in case it failed
         // after the reply persisted: completion is conditional and idempotent,
         // and a closing turn must not replay as an open one.
+        // Use the original turn's completion decision, not the total question
+        // count: a retry that only asked the final question stays open, while
+        // a retry of a turn that finished the interview (completion write may
+        // have failed after the closing reply) stays completed.
+        const primaryCount = history.filter(
+          (message) => message.messageKind === "primary_question",
+        ).length;
         const closing =
-          history.filter((m) => m.messageKind === "primary_question").length >=
-          MAX_PRIMARY_QUESTIONS;
+          context.status === "completed" ||
+          (primaryCount >= primaryQuestionLimit(context) &&
+            next.messageKind === "follow_up_question");
         if (closing) await store.complete(context.sessionId);
         return {
           messages: await store.messages(context.sessionId),
@@ -398,14 +435,16 @@ async function completeTurn(
   );
 
   let unitId = activeUnitId;
-  let openedUnitId: string | null = null;
-  if (output.messageKind === "primary_question") {
-    // A completed interview must not gain a seventh primary question: the
-    // sixth question is askable and answerable, and the NEXT primary closes
-    // the interview (the completion predicate below mirrors it).
-    if (primaryCount >= MAX_PRIMARY_QUESTIONS && !output.endCall) {
-      // Reject the turn without leaving an unanswered candidate row behind;
-      // the candidate can resubmit and get a proper closing response.
+  // Runtime-batch kind mapping plus our rollback guarantees, combined.
+  let persistedKind: "primary_question" | "follow_up_question" | "acknowledgement" =
+    output.messageKind === "transition" ? "acknowledgement" : output.messageKind;
+  // A follow-up needs an active unit to join; without one the question opens a
+  // unit so no question ends up unassessable.
+  if (persistedKind === "follow_up_question" && !unitId) persistedKind = "primary_question";
+  if (persistedKind === "primary_question") {
+    // A completed interview must not gain a seventh primary question: the sixth
+    // is askable and answerable, and the NEXT primary closes the interview.
+    if (primaryCount >= primaryQuestionLimit(context) && !output.endCall) {
       if (parsed.idempotencyKey) {
         await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
       }
@@ -414,14 +453,22 @@ async function completeTurn(
         "The interviewer produced an unexpected primary question after the final question.",
       );
     }
-    if (unitId) await store.closeUnit(unitId);
+    // One locked write (appendInterviewerWithNewUnit): a concurrent realtime
+    // line cannot close the unit between opening it and attaching the question.
     try {
-      unitId = await store.openUnit(context.sessionId, primaryCount + 1);
-      openedUnitId = unitId;
+      const entry = await store.appendInterviewerWithNewUnit(
+        context.sessionId,
+        output.interviewerText,
+      );
+      unitId = entry.assessmentUnitId;
     } catch (error) {
+      // A completion that won the session-row lock must keep the room's stable
+      // invalid_state contract, just like the candidate append path.
+      if (error instanceof InterviewError && error.code === "invalid_state") {
+        throw new RoomError("invalid_state", error.message);
+      }
       // Only a unit-number collision is a concurrency conflict. Other failures
-      // (connection, timeout, constraint) propagate untouched and must NOT roll
-      // the candidate message back — cleanup is specific to the conflict.
+      // propagate untouched and must NOT roll the candidate row back.
       if (!(error instanceof UnitConflictError) || !parsed.idempotencyKey) throw error;
       const rolledBack = await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
       if (!rolledBack) throw error;
@@ -430,20 +477,14 @@ async function completeTurn(
         "Another response was processed at the same moment. Send your answer again.",
       );
     }
-  }
-  try {
+  } else {
+    if (persistedKind === "acknowledgement") unitId = null;
     await store.appendInterviewer(
       context.sessionId,
       output.interviewerText,
-      output.messageKind,
+      persistedKind,
       unitId,
     );
-  } catch (error) {
-    // The reply never persisted: drop the unit opened for it so the retry can
-    // re-open the same unit number instead of colliding with an empty unit.
-    // Cleanup is best-effort; the original failure is what the caller sees.
-    if (openedUnitId) await store.rollbackUnit(openedUnitId).catch(() => {});
-    throw error;
   }
 
   // Voice is an enhancement on top of the persisted transcript: a failing
@@ -463,7 +504,7 @@ async function completeTurn(
   // The sixth question completes the interview once ANSWERED: when the model
   // asks primary #6 and endCall arrives with that answer's turn, both the
   // reply and the completion land atomically here.
-  const endCall = output.endCall || primaryCount + 1 > MAX_PRIMARY_QUESTIONS;
+  const endCall = output.endCall || primaryCount + 1 > primaryQuestionLimit(context);
   if (endCall) await store.complete(context.sessionId);
   return { messages: await store.messages(context.sessionId), endCall, created, audioBase64 };
 }
