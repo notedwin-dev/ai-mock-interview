@@ -2,7 +2,7 @@ import { jsonError } from "@/lib/api/respond";
 import { RealtimeError, createRealtimeToken } from "@/lib/interview/realtime-token";
 import { buildLiveInterviewInstructions } from "@/lib/interview/room";
 import { createDefaultRoomStore } from "@/lib/interview/room-store";
-import { resolveForOutboundCall } from "@/lib/providers/config";
+import { getActiveRuntimeMode, resolveForOutboundCall } from "@/lib/providers/config";
 
 /**
  * POST .../realtime/token — server-side setup for the token-scoped realtime
@@ -34,6 +34,22 @@ export async function POST(
     try {
       resolved = await resolveForOutboundCall(interview.userId, "realtime");
     } catch {
+      // A realtime session keeps its runtime even if the account later saves
+      // a different mode. Only that explicit switch is a conflict: an account
+      // still in realtime mode merely has a missing or unusable agent.
+      let activeMode: Awaited<ReturnType<typeof getActiveRuntimeMode>> = null;
+      try {
+        activeMode = await getActiveRuntimeMode(interview.userId);
+      } catch {
+        // An unreadable mode is not evidence of a mode conflict.
+      }
+      if (interview.runtimeMode === "preset_realtime" && activeMode === "custom") {
+        return jsonError(
+          409,
+          "runtime_mode_conflict",
+          "This interview uses the realtime runtime. Switch the account back to realtime mode to continue it.",
+        );
+      }
       return jsonError(
         409,
         "realtime_not_configured",

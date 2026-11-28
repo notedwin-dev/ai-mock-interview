@@ -37,7 +37,7 @@ export type InterviewerMessageKind = (typeof INTERVIEWER_MESSAGE_KINDS)[number];
  * is still recognised as a prompt.
  */
 const LEADING_FILLER =
-  /^(?:(?:and|but|so|now|okay|ok|alright|all right|right|well|great|good|perfect|nice|cool|excellent|interesting|sure|thanks|thank you|got it|i see|understood|lovely|wonderful|absolutely|of course)\b[\s,.:;!-]*)+/i;
+  /^(?:(?:and|but|so|now|okay|ok|alright|all right|right|well|great|good|perfect|nice|cool|excellent|interesting|sure|please|thanks|thank you|got it|i see|understood|lovely|wonderful|absolutely|of course)\b[\s,.:;!-]*)+/i;
 
 /** Sentence openings that ask the candidate for evidence. */
 const PROMPT_OPENER =
@@ -49,7 +49,7 @@ const PROMPT_OPENER =
  * area (FR-TRANSCRIPT-004: a new primary question opens a new unit).
  */
 const FOLLOW_UP_CUE =
-  /\b(?:you (?:mentioned|said|noted|described|talked about)|earlier|previously|just now|a moment ago|your (?:answer|response|example)|that (?:answer|response|example|point)|elaborate|expand|in more detail|more detail|in more depth|go deeper|dig deeper|tell me more|say more|clarify|an example|one example)\b/i;
+  /\b(?:you (?:mentioned|said|noted|described|talked about)|earlier|previously|just now|a moment ago|your (?:answer|response|example)|that (?:answer|response|example|point)|elaborate|expand|in more detail|more detail|in more depth|go deeper|dig deeper|tell me more|say more|clarify|(?:an|one|another) example(?!\s+of\b))\b/i;
 
 function normalize(text: string): string {
   return text.replace(/\s+/g, " ").trim();

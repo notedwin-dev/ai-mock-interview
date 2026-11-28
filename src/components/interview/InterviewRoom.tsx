@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Loader2, MessageSquare, Mic, MicOff, Send, X } from "lucide-react";
 import { EndInterviewButton } from "@/components/interview/EndInterviewButton";
 import { useOverlayFocusTrap } from "@/components/interview/use-overlay-focus-trap";
+import { readDevicePreferences } from "@/lib/interview/device-preferences";
+import { acquisitionTrackEnabled } from "@/lib/interview/mute-intent";
 import type { InvitationView } from "@/lib/interview/invitations";
 import { evaluationModeLabel } from "@/lib/interview/labels";
 import type { TranscriptEntry } from "@/lib/interview/room";
@@ -29,8 +31,21 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   const [draft, setDraft] = useState("");
   const [state, setState] = useState<"listening" | "thinking" | "speaking">("listening");
   const [overlayOpen, setOverlayOpen] = useState(false);
+  // Continuous ASR starts with the microphone off; the saved device preference
+  // is applied after mount. The ref stays authoritative across async boundaries.
   const [muted, setMuted] = useState(true);
+  const mutedRef = useRef(muted);
   const [error, setError] = useState<string | null>(null);
+
+  // Apply the waiting-room device choices after mount (sessionStorage is
+  // browser-only, so reading it during render would break SSR hydration).
+  useEffect(() => {
+    const preferences = readDevicePreferences();
+    mutedRef.current = preferences.muted;
+    // Defer the state update out of the effect body: sessionStorage is only
+    // available after mount, and a synchronous setState here cascades renders.
+    queueMicrotask(() => setMuted(preferences.muted));
+  }, []);
   const [ended, setEnded] = useState(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
 
@@ -141,12 +156,15 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
   }): boolean {
     appliedTurnsRef.current += 1;
     setMessages(body.messages ?? []);
+    draftRevisionRef.current += 1;
     pendingKeyRef.current = null;
     let audioPlaying = false;
     if (body.audioBase64) {
       try {
         const audio = new Audio(`data:audio/mp3;base64,${body.audioBase64}`);
-        audio.onended = () => setState("listening");
+        // A new answer may have moved the room to "thinking" while this audio
+        // was playing; only release the speaking state we own.
+        audio.onended = () => setState((current) => (current === "speaking" ? "listening" : current));
         void audio.play().catch(() => undefined);
         audioPlaying = true;
       } catch {
@@ -351,13 +369,23 @@ export function InterviewRoom({ token, interview }: { token: string; interview: 
         ? (await configResponse.json()) as { mode?: string }
         : { mode: "batch" };
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Prefer the microphone chosen in the waiting room. An "ideal" constraint
+      // falls back to the browser default when that device is missing or no
+      // longer available.
+      const { micId } = readDevicePreferences();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: micId ? { deviceId: { ideal: micId } } : true,
+      });
       if (generation !== recordingGenerationRef.current || ended) {
         // The room ended/unmounted or a newer activation started while the
         // permission prompt was open: release every track.
         stream.getTracks().forEach((track) => stopCaptureTrack(track));
         return;
       }
+      // A Mute click while the permission prompt was pending is newer than
+      // this render's `muted`: read the ref so that intent is not lost.
+      const trackEnabled = acquisitionTrackEnabled(() => mutedRef.current);
+      stream.getAudioTracks().forEach((track) => { track.enabled = trackEnabled; });
       streamRef.current = stream;
 
       if (config.mode === "stream" && (await openLiveBridge())) {

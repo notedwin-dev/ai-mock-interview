@@ -29,7 +29,12 @@ export function useOverlayFocusTrap(
     if (!open) return;
     const previouslyFocused =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    panelRef.current?.focus();
+    // Focus a real control, not the panel: Shift+Tab from the panel would land
+    // on the backdrop before the dialog and escape the focus trap.
+    const firstControl = panelRef.current?.querySelector<HTMLElement>(
+      'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    (firstControl ?? panelRef.current)?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();

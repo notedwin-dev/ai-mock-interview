@@ -17,7 +17,14 @@ function rowsForRuntime(
   mode: RuntimeMode | null,
 ): ProviderConfigSummary[] {
   if (!mode) return rows;
-  return rows.filter((row) => Boolean(row.capabilities.realtime) === (mode === "realtime"));
+  return rows.filter((row) => {
+    const isRealtime = Boolean(row.capabilities.realtime);
+    if (mode === "realtime") return isRealtime;
+    // The data model allows one row to serve several capabilities. Dropping
+    // every realtime-capable row in custom mode would hide the LLM route of a
+    // mixed row, so retain it for its non-realtime capabilities.
+    return !isRealtime || Object.keys(row.capabilities).some((key) => key !== "realtime");
+  });
 }
 
 export interface RuntimeSelection {
@@ -71,7 +78,13 @@ export function selectRuntime(
   // Only the selected runtime is considered. Rows saved under the other
   // runtime stay in the database but are inactive for this interview.
   const scoped = rowsForRuntime(rows, activeMode);
-  const realtime = bestServingRow(scoped, "realtime");
+  // A mixed row stays available for its custom capabilities, but must not be
+  // selected as a realtime route for an account that saved a non-realtime mode.
+  // Only an explicit realtime choice (or a legacy unset mode) can launch one.
+  const realtime =
+    activeMode === null || activeMode === "realtime"
+      ? bestServingRow(scoped, "realtime")
+      : null;
   if (realtime) {
     return {
       mode: "realtime",

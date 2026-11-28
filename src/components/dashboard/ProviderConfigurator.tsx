@@ -291,6 +291,13 @@ export function ProviderConfigurator({
   /** Switch the active runtime; saved rows of both modes are kept untouched. */
   async function switchMode(next: RuntimeMode) {
     setSwitching(true);
+    // Clear the previous attempt's error at the start so a stale failure is
+    // never shown while a new switch is in flight or after one succeeds.
+    setActionError((current) => {
+      const cleared = { ...current };
+      delete cleared["mode:switch"];
+      return cleared;
+    });
     const result = await callApi<{ mode: RuntimeMode }>("/api/v1/providers/runtime-mode", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -300,6 +307,7 @@ export function ProviderConfigurator({
     if (result.ok) {
       setMode(next);
     } else {
+      // Only a failed current attempt keeps its error.
       setActionError((current) => ({ ...current, "mode:switch": result.error }));
     }
   }
@@ -410,6 +418,15 @@ export function ProviderConfigurator({
       );
       return null;
     });
+    if (!error && typeof patch.apiKey === "string") {
+      // The cached probe was produced with the old credential. Discard it
+      // only after the key save succeeds; a failed PATCH keeps the old result.
+      setProbeByRow((current) => {
+        const next = { ...current };
+        delete next[row.userProviderConfigurationId];
+        return next;
+      });
+    }
     return error === null;
   }
 
@@ -509,8 +526,13 @@ export function ProviderConfigurator({
     return error === null;
   }
 
+  // Count only rows that cannot serve the selected view. A mixed row still
+  // supplies its custom cards (LLM/ASR/TTS); a scorer-only row can be used for
+  // reports while a realtime session runs, so neither is "inactive".
   const inactiveCount = rows.filter((row) =>
-    mode === "realtime" ? !row.capabilities.realtime : Boolean(row.capabilities.realtime),
+    mode === "realtime"
+      ? !row.capabilities.realtime && !row.capabilities.scorer
+      : !(row.capabilities.llm || row.capabilities.asr || row.capabilities.tts),
   ).length;
 
   if (mode === null) {

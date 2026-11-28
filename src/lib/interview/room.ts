@@ -25,6 +25,8 @@ export interface RoomContext {
   techStack: string[];
   questionCount: number | null;
   evaluationMode: string;
+  /** Runtime chosen when the interview was created, used for mode-conflict errors. */
+  runtimeMode?: string;
   status: string;
 }
 
@@ -192,13 +194,18 @@ function releaseTurnClaim(sessionId: string, idempotencyKey: string, token: numb
   if (turnClaims.get(key)?.token === token) turnClaims.delete(key);
 }
 
+/** The candidate's configured count wins; legacy sessions keep the fixed cap. */
+function primaryQuestionLimit(context: RoomContext): number {
+  return context.questionCount ?? MAX_PRIMARY_QUESTIONS;
+}
+
 function roomInstructions(context: RoomContext, primaryCount: number): string {
   return [
     "You are the AIMIS AI interviewer in a live mock interview.",
-    `Target role: ${context.jobRole}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Target question count: ${context.questionCount ?? "not specified"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Target question count: ${context.questionCount ?? "not specified"}. Evaluation mode: ${context.evaluationMode}.`,
     "Ask short, focused questions and never invent facts about the candidate.",
     "Use primary_question only for a new assessment area; use follow_up_question to probe the candidate's last answer. A brief closing remark may be a transition (stored as an acknowledgement, never independently evaluated).",
-    primaryCount >= MAX_PRIMARY_QUESTIONS
+    primaryCount >= primaryQuestionLimit(context)
       ? "The interview is complete: reply with a brief follow_up_question that closes the conversation (for example, thanking the candidate) and set endCall=true."
       : "Set endCall=true only after the interview is genuinely complete. Choose at most one follow-up per answer.",
   ].join(" ");
@@ -218,10 +225,10 @@ function roomInstructions(context: RoomContext, primaryCount: number): string {
 export function buildLiveInterviewInstructions(context: RoomContext): string {
   return [
     "You are the AIMIS AI interviewer conducting a live voice mock interview.",
-    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
+    `Target role: ${context.jobRole}. Job description: ${context.jobDescription ?? "not supplied"}. Experience level: ${context.experienceLevel ?? "not supplied"}. Topics: ${context.techStack.join(", ") || "not supplied"}. Evaluation mode: ${context.evaluationMode}.`,
     "This is a mock interview: interview the candidate about the target role, not a real hiring decision.",
     "Ask short, focused questions one at a time and never invent facts about the candidate.",
-    `Ask at most ${MAX_PRIMARY_QUESTIONS} main questions in total. Close the interview briefly once you have asked them.`,
+    `Ask at most ${primaryQuestionLimit(context)} main questions in total. Close the interview briefly once you have asked them.`,
   ].join(" ");
 }
 
@@ -350,9 +357,17 @@ export async function runRoomTurn(
         // The reply landed. Re-assert the completion write in case it failed
         // after the reply persisted: completion is conditional and idempotent,
         // and a closing turn must not replay as an open one.
+        // Use the original turn's completion decision, not the total question
+        // count: a retry that only asked the final question stays open, while
+        // a retry of a turn that finished the interview (completion write may
+        // have failed after the closing reply) stays completed.
+        const primaryCount = history.filter(
+          (message) => message.messageKind === "primary_question",
+        ).length;
         const closing =
-          history.filter((m) => m.messageKind === "primary_question").length >=
-          MAX_PRIMARY_QUESTIONS;
+          context.status === "completed" ||
+          (primaryCount >= primaryQuestionLimit(context) &&
+            next.messageKind === "follow_up_question");
         if (closing) await store.complete(context.sessionId);
         return {
           messages: await store.messages(context.sessionId),
@@ -429,7 +444,7 @@ async function completeTurn(
   if (persistedKind === "primary_question") {
     // A completed interview must not gain a seventh primary question: the sixth
     // is askable and answerable, and the NEXT primary closes the interview.
-    if (primaryCount >= MAX_PRIMARY_QUESTIONS && !output.endCall) {
+    if (primaryCount >= primaryQuestionLimit(context) && !output.endCall) {
       if (parsed.idempotencyKey) {
         await store.rollbackCandidate(context.sessionId, parsed.idempotencyKey);
       }
@@ -447,6 +462,11 @@ async function completeTurn(
       );
       unitId = entry.assessmentUnitId;
     } catch (error) {
+      // A completion that won the session-row lock must keep the room's stable
+      // invalid_state contract, just like the candidate append path.
+      if (error instanceof InterviewError && error.code === "invalid_state") {
+        throw new RoomError("invalid_state", error.message);
+      }
       // Only a unit-number collision is a concurrency conflict. Other failures
       // propagate untouched and must NOT roll the candidate row back.
       if (!(error instanceof UnitConflictError) || !parsed.idempotencyKey) throw error;
@@ -484,7 +504,7 @@ async function completeTurn(
   // The sixth question completes the interview once ANSWERED: when the model
   // asks primary #6 and endCall arrives with that answer's turn, both the
   // reply and the completion land atomically here.
-  const endCall = output.endCall || primaryCount + 1 > MAX_PRIMARY_QUESTIONS;
+  const endCall = output.endCall || primaryCount + 1 > primaryQuestionLimit(context);
   if (endCall) await store.complete(context.sessionId);
   return { messages: await store.messages(context.sessionId), endCall, created, audioBase64 };
 }

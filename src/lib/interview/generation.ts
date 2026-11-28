@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { getLiveKitConfig } from "@/lib/livekit/env";
 import { mintParticipantToken } from "./livekit-token";
 import { dispatchGeneratorAgent } from "./livekit-dispatch";
-import { agentConfigSchema, createInterviewFromAgentConfig } from "./agent";
+import { createInterviewFromAgentConfig } from "./agent";
 import {
   mapAnswersToConfig,
   type MappedGenerationConfig,
@@ -63,6 +63,18 @@ async function assertWorker(recordId: string, workerToken: string) {
   return record;
 }
 
+/** Value-based JSON comparison: object key order must not affect a replay. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson(record[key])}`,
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 export async function startGeneration(userId: string) {
   let config;
   try {
@@ -102,7 +114,11 @@ export async function startGeneration(userId: string) {
       config,
     );
   } catch {
-    // A worker outage does not invalidate the room; the UI reports the failure.
+    // Do not report a successful generation when the planner never started:
+    // the candidate would wait in an idle room. Only a sanitized error crosses
+    // this boundary; provider error text may contain URLs or credentials.
+    console.error("generator dispatch failed");
+    throw new GenerationError("not_configured", "The interview planner could not be started. Try again.");
   }
   return { id: record.id, ...session };
 }
@@ -122,9 +138,11 @@ export async function getGeneration(userId: string, id: string) {
 export async function postCaption(id: string, workerToken: string, input: unknown) {
   await assertWorker(id, workerToken);
   const caption = captionSchema.parse(input);
+  // Only the caption changes: a late caption must never reset a generation
+  // that already completed or was confirmed. New records start collecting.
   await db.interviewGeneration.update({
     where: { id },
-    data: { captionJson: caption as unknown as never, status: "collecting" },
+    data: { captionJson: caption as unknown as never },
   });
 }
 
@@ -206,10 +224,27 @@ export async function confirmGeneration(
 ): Promise<{ invitationPath: string; sessionId: string }> {
   const record = await db.interviewGeneration.findFirst({ where: { id, userId } });
   if (!record) throw new GenerationError("not_found", "Generation session not found.");
+  const { agentConfigSchema } = await import("./agent");
+  const parsed = agentConfigSchema.parse(input);
+  // An omitted stack is an explicit empty stack: store it that way so a
+  // replay with the same omissions compares equal and the session is stable.
+  const config = { ...parsed, techStack: parsed.techStack ?? [] };
+  if (record.status === "confirmed" && record.sessionId) {
+    // Replaying the same confirmation returns the original invitation. A
+    // different configuration is a distinct outcome: it cannot rewrite the
+    // session the candidate already reviewed.
+    if (record.configJson != null && stableJson(record.configJson) === stableJson(config)) {
+      return { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
+    }
+    throw new GenerationError(
+      "invalid_state",
+      "This generation was already confirmed with a different configuration.",
+    );
+  }
   if (record.status !== "completed" || !record.sessionId) {
     throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
   }
-  const config = agentConfigSchema.parse(input);
+  const sessionId = record.sessionId;
   const category = await db.interviewCategory.findFirst({
     where: { categoryCode: config.category, isActive: true },
     select: { categoryId: true, categoryName: true },
@@ -217,23 +252,31 @@ export async function confirmGeneration(
   if (!category) {
     throw new GenerationError("invalid_state", "The selected interview category is not available.");
   }
-  await db.interviewSession.update({
-    where: { sessionId: record.sessionId },
-    data: {
-      jobRole: config.jobRole,
-      jobDescription: config.jobDescription || null,
-      experienceLevel: config.experienceLevel ?? null,
-      techStack: config.techStack ? (config.techStack as unknown as never) : undefined,
-      questionCount: config.questionCount ?? null,
-      evaluationMode: config.strictness,
-      categoryId: category.categoryId,
-      categoryCodeSnapshot: config.category,
-      categoryNameSnapshot: category.categoryName,
-    },
-  });
-  await db.interviewGeneration.update({
-    where: { id },
-    data: { configJson: config as unknown as never, status: "confirmed" },
+  await db.$transaction(async (tx) => {
+    // Claim the transition under the same transaction as the session write:
+    // only one request can move completed -> confirmed, so a concurrent retry
+    // can never write the candidate-reviewed session twice.
+    const claimed = await tx.interviewGeneration.updateMany({
+      where: { id, userId, status: "completed" },
+      data: { configJson: config as unknown as never, status: "confirmed" },
+    });
+    if (claimed.count === 0) {
+      throw new GenerationError("invalid_state", "This generation is not ready to confirm.");
+    }
+    await tx.interviewSession.update({
+      where: { sessionId },
+      data: {
+        jobRole: config.jobRole,
+        jobDescription: config.jobDescription || null,
+        experienceLevel: config.experienceLevel ?? null,
+        techStack: config.techStack as unknown as never,
+        questionCount: config.questionCount ?? null,
+        evaluationMode: config.strictness,
+        categoryId: category.categoryId,
+        categoryCodeSnapshot: config.category,
+        categoryNameSnapshot: category.categoryName,
+      },
+    });
   });
   return { invitationPath: record.invitationPath!, sessionId: record.sessionId! };
 }

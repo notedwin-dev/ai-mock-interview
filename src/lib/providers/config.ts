@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { UserProviderConfiguration } from "@/generated/prisma/client";
+import { Prisma, type UserProviderConfiguration } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { decryptApiKey, encryptApiKey } from "./encryption";
 // Admin-fixed realtime model IDs are enforced on create and on PATCH (runtime batch).
@@ -85,6 +85,7 @@ export type ProviderConfigPatch = z.infer<typeof providerConfigPatchSchema>;
 export type ProviderConfigErrorCode =
   | "not_found"
   | "config_exists"
+  | "config_ambiguous"
   | "missing_credential"
   | "invalid_base_url"
   | "capability_not_supported"
@@ -271,16 +272,50 @@ function toSummary(row: SelectedConfig): ProviderConfigSummary {
 }
 
 /**
+ * Only `undefined` means "no id restriction": an empty string is a supplied
+ * value and must be rejected, not silently treated as omitted. Validating here
+ * keeps every filter/PATCH/probe/DELETE path from bypassing the id restriction
+ * or leaking a database error as a 500.
+ */
+function parseOptionalConfigId(configId?: string): string | undefined {
+  if (configId === undefined) return undefined;
+  return z.uuid().parse(configId);
+}
+
+/**
  * Looks up a row by provider name. When several rows share a name (the same
  * provider may serve several capabilities), configId pins the exact row;
  * otherwise the first row is used for backwards-compatible callers.
  */
+/**
+ * Serializes the check-then-write for same-name capability exclusivity. A
+ * serializable snapshot makes a concurrent conflicting write fail with P2034;
+ * bounded retries let the loser re-read and either accept the winner or return
+ * config_exists. No lock is held across an await outside the transaction.
+ */
+async function withSerializableRetry<T>(
+  work: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await db.$transaction(work, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+    } catch (error) {
+      const conflict =
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034";
+      if (!conflict || attempt >= 2) throw error;
+    }
+  }
+}
+
 async function findOwnedConfig(userId: string, providerName: string, configId?: string) {
+  const id = parseOptionalConfigId(configId);
   return db.userProviderConfiguration.findFirst({
     where: {
       userId,
       providerName,
-      ...(configId ? { userProviderConfigurationId: configId } : {}),
+      ...(id !== undefined ? { userProviderConfigurationId: id } : {}),
     },
   });
 }
@@ -374,45 +409,71 @@ export async function createProviderConfiguration(
     );
   }
 
-  // Legacy accounts get their first runtime inferred from the row they add.
-  // An explicit choice is never overwritten — configs of either mode coexist.
-  if ((await getActiveRuntimeMode(parsedUser)) === null) {
-    await setActiveRuntimeMode(parsedUser, capabilities.realtime ? "realtime" : "custom");
-  }
-
-  // Runtime exclusivity is high-level only (realtime vs custom). The same
-  // provider may be configured again for a DIFFERENT capability; only a row
-  // already serving one of the requested capabilities is a duplicate.
-  const existingRows = await db.userProviderConfiguration.findMany({
-    where: { userId: parsedUser, providerName: parsed.providerName },
-    select: { capabilitiesJson: true },
+  // Legacy accounts get their first runtime inferred from the row they add,
+  // but the inference must be committed with that row: a failed insert must
+  // not strand the account in a mode with no usable configuration. Confirm the
+  // account exists before this path so a zero-row update cannot be mistaken
+  // for a successful inference.
+  const account = await db.userAccount.findUnique({
+    where: { userId: parsedUser },
+    select: { userId: true },
   });
-  const duplicate = existingRows.some((row) => {
-    const served = capabilitiesJsonSchema.parse(row.capabilitiesJson);
-    return Object.keys(capabilities).some((capability) => capability in served);
-  });
-  if (duplicate) {
-    throw new ProviderConfigError(
-      "config_exists",
-      `"${parsed.providerName}" is already configured for this capability. Update that configuration instead.`,
-    );
-  }
-
+  if (!account) throw new ProviderConfigError("not_found", "Account not found.");
+  // Scoring gates reports, not an interview runtime: a scorer-only row must
+  // neither infer `custom` nor hide an existing realtime row. Only the first
+  // interview-capable configuration infers a mode.
+  const interviewCapability = (["realtime", "llm", "asr", "tts"] as const).some(
+    (capability) => capability in capabilities,
+  );
+  const inferredMode: RuntimeMode | null = interviewCapability
+    ? capabilities.realtime
+      ? "realtime"
+      : "custom"
+    : null;
   const { envelope, encryptionKeyVersion } = encryptApiKey(parsed.apiKey);
 
-  const created = await db.userProviderConfiguration.create({
-    data: {
-      userId: parsedUser,
-      providerType: parsed.providerType,
-      providerName: parsed.providerName,
-      baseUrl: normalizedBaseUrl,
-      // TextEncoder (not Buffer.from): the generated Bytes type is
-      // Uint8Array, and driver adapters deliver/expect raw byte views.
-      encryptedApiKey: new TextEncoder().encode(envelope),
-      encryptionKeyVersion,
-      capabilitiesJson: capabilities,
-      credentialStatus: "unvalidated",
-    },
+  const created = await withSerializableRetry(async (tx) => {
+    // Atomic conditional write: infer the mode only while the account still
+    // has none. A concurrent explicit choice between the check and here wins.
+    if (inferredMode) {
+      await tx.userAccount.updateMany({
+        where: { userId: parsedUser, activeRuntimeMode: null },
+        data: { activeRuntimeMode: inferredMode },
+      });
+    }
+
+    // Runtime exclusivity is high-level only (realtime vs custom). The same
+    // provider may be configured again for a DIFFERENT capability; only a row
+    // already serving one of the requested capabilities is a duplicate.
+    const existingRows = await tx.userProviderConfiguration.findMany({
+      where: { userId: parsedUser, providerName: parsed.providerName },
+      select: { capabilitiesJson: true },
+    });
+    const duplicate = existingRows.some((row) => {
+      const served = capabilitiesJsonSchema.parse(row.capabilitiesJson);
+      return Object.keys(capabilities).some((capability) => capability in served);
+    });
+    if (duplicate) {
+      throw new ProviderConfigError(
+        "config_exists",
+        `"${parsed.providerName}" is already configured for this capability. Update that configuration instead.`,
+      );
+    }
+
+    return tx.userProviderConfiguration.create({
+      data: {
+        userId: parsedUser,
+        providerType: parsed.providerType,
+        providerName: parsed.providerName,
+        baseUrl: normalizedBaseUrl,
+        // TextEncoder (not Buffer.from): the generated Bytes type is
+        // Uint8Array, and driver adapters deliver/expect raw byte views.
+        encryptedApiKey: new TextEncoder().encode(envelope),
+        encryptionKeyVersion,
+        capabilitiesJson: capabilities,
+        credentialStatus: "unvalidated",
+      },
+    });
   });
   return toSummary(created);
 }
@@ -491,6 +552,7 @@ export async function updateProviderConfiguration(
       data.baseUrl = rules.normalizedBaseUrl;
     }
     if (stableStringify(currentCapabilities) !== stableStringify(capabilities)) {
+      // The sibling check is performed atomically with the write below.
       data.capabilitiesJson = capabilities;
       materialChange = true;
     }
@@ -537,10 +599,35 @@ export async function updateProviderConfiguration(
     data.isEnabled = parsed.isEnabled;
   }
 
-  const updated = await db.userProviderConfiguration.update({
-    where: { userProviderConfigurationId: row.userProviderConfigurationId },
-    data,
-    select: CONFIG_SELECT,
+  const updated = await withSerializableRetry(async (tx) => {
+    if (data.capabilitiesJson !== undefined) {
+      // Same invariant as creation, checked inside the same serializable
+      // transaction as the write: a concurrent conflicting PATCH must lose
+      // with config_exists rather than create a duplicate capability route.
+      const siblings = await tx.userProviderConfiguration.findMany({
+        where: {
+          userId: parsedUser,
+          providerName: row.providerName,
+          NOT: { userProviderConfigurationId: row.userProviderConfigurationId },
+        },
+        select: { capabilitiesJson: true },
+      });
+      const overlap = siblings.some((sibling) => {
+        const served = capabilitiesJsonSchema.parse(sibling.capabilitiesJson);
+        return Object.keys(data.capabilitiesJson!).some((capability) => capability in served);
+      });
+      if (overlap) {
+        throw new ProviderConfigError(
+          "config_exists",
+          `"${row.providerName}" is already configured for one of these capabilities. Update that configuration instead.`,
+        );
+      }
+    }
+    return tx.userProviderConfiguration.update({
+      where: { userProviderConfigurationId: row.userProviderConfigurationId },
+      data,
+      select: CONFIG_SELECT,
+    });
   });
   return toSummary(updated);
 }
@@ -589,8 +676,17 @@ export async function resolveForOutboundCall(
   const serving = rows.filter((candidate) => {
     const caps = capabilitiesJsonSchema.parse(candidate.capabilitiesJson);
     if (!(capability in caps)) return false;
+    // Scoring gates reports, not an interview runtime, so its configured row
+    // stays resolvable in either mode.
+    if (capability === "scorer") return true;
+    // A realtime route is only usable in realtime mode. A mixed row still
+    // serves its custom routes below; it is never a realtime route in custom.
+    if (capability === "realtime") return activeMode !== "custom" && Boolean(caps.realtime);
     if (activeMode === "realtime") return Boolean(caps.realtime);
-    if (activeMode === "custom") return !caps.realtime;
+    if (activeMode === "custom") {
+      // A mixed row still serves its non-realtime routes in custom mode.
+      return !caps.realtime || Object.keys(caps).some((key) => key !== "realtime");
+    }
     return true;
   });
   // Owner decision: realtime never falls back to an unvalidated credential.
@@ -792,14 +888,38 @@ export async function deleteProviderConfiguration(
   configId?: string,
 ): Promise<void> {
   const parsedUser = parseUserId(userId);
-  const result = await db.userProviderConfiguration.deleteMany({
+  const id = parseOptionalConfigId(configId);
+  if (id !== undefined) {
+    const result = await db.userProviderConfiguration.deleteMany({
+      where: { userId: parsedUser, providerName, userProviderConfigurationId: id },
+    });
+    if (result.count === 0) {
+      throw new ProviderConfigError("not_found", "Provider configuration not found.");
+    }
+    return;
+  }
+
+  // Name-only deletion is retained for a single row. Several rows of the same
+  // name are legal (one per capability), so deleting all of them by name would
+  // be destructive; require an explicit id instead.
+  const matches = await db.userProviderConfiguration.findMany({
+    where: { userId: parsedUser, providerName },
+    select: { userProviderConfigurationId: true },
+  });
+  if (matches.length === 0) {
+    throw new ProviderConfigError("not_found", "Provider configuration not found.");
+  }
+  if (matches.length > 1) {
+    throw new ProviderConfigError(
+      "config_ambiguous",
+      `Multiple "${providerName}" configurations exist. Specify a configuration id to delete one.`,
+    );
+  }
+  await db.userProviderConfiguration.deleteMany({
     where: {
       userId: parsedUser,
       providerName,
-      ...(configId ? { userProviderConfigurationId: configId } : {}),
+      userProviderConfigurationId: matches[0]!.userProviderConfigurationId,
     },
   });
-  if (result.count === 0) {
-    throw new ProviderConfigError("not_found", "Provider configuration not found.");
-  }
 }

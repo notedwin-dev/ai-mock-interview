@@ -37,7 +37,9 @@ export function VoiceRoomPanels({
             </span>
           </span>
           <h2 className="mt-4 text-sm font-semibold text-ink">{agentTitle}</h2>
-          <p className="mt-1 text-xs text-ink-muted">{agentState ?? (isAgentSpeaking ? "Speaking" : "Listening")}</p>
+          <p className="mt-1 text-xs text-ink-muted" role="status" aria-live="polite">
+            {agentState ?? (isAgentSpeaking ? "Speaking" : "Listening")}
+          </p>
         </section>
 
         <section aria-label="You" className="flex min-h-[18rem] flex-col items-center justify-center rounded-3xl border border-line bg-surface p-8 text-center">
@@ -48,7 +50,7 @@ export function VoiceRoomPanels({
             </span>
           </span>
           <h2 className="mt-4 text-sm font-semibold text-ink">You</h2>
-          <p className="mt-1 text-xs text-ink-muted">
+          <p className="mt-1 text-xs text-ink-muted" role="status" aria-live="polite">
             {userState ?? (muted ? "Microphone muted" : isUserSpeaking ? "Speaking" : "Microphone ready")}
           </p>
           <button

@@ -23,6 +23,10 @@ describe("classifyInterviewerUtterance", () => {
     expect(classifyInterviewerUtterance("What is your experience with PostgreSQL?")).toBe("primary_question");
     expect(classifyInterviewerUtterance("Okay, so walk me through your last role.")).toBe("primary_question");
     expect(classifyInterviewerUtterance("Describe a time you disagreed with a teammate.")).toBe("primary_question");
+    // A polite prefix is still an assessment prompt, not an acknowledgement.
+    expect(classifyInterviewerUtterance("Please describe your last project.")).toBe("primary_question");
+    // An example of a new subject opens its own unit; it is not a back-reference.
+    expect(classifyInterviewerUtterance("What is an example of a SQL index?")).toBe("primary_question");
   });
 
   it("recognises an explicit back-reference as a follow-up", () => {
@@ -33,6 +37,9 @@ describe("classifyInterviewerUtterance", () => {
       classifyInterviewerUtterance("Great answer. Can you elaborate on the testing strategy?"),
     ).toBe("follow_up_question");
     expect(classifyInterviewerUtterance("Can you give me an example?")).toBe("follow_up_question");
+    expect(
+      classifyInterviewerUtterance("Can you give me an example of the approach you mentioned?"),
+    ).toBe("follow_up_question");
     expect(classifyInterviewerUtterance("What did you mean by your answer earlier?")).toBe("follow_up_question");
   });
 
@@ -43,6 +50,7 @@ describe("classifyInterviewerUtterance", () => {
       "I see, thank you.",
       "Right, let us continue.",
       "Perfect, that covers it.",
+      "Please, continue.",
     ];
     for (const utterance of utterances) {
       expect(isQuestionUtterance(utterance)).toBe(false);

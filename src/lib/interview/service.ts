@@ -213,10 +213,8 @@ export async function loadOwnedSession(
 async function selectRouteSnapshot(
   userId: string,
 ): Promise<{ snapshot: ProviderRouteSnapshot; runtimeMode: RuntimeMode }> {
-  const runtime = selectRuntime(
-    await listProviderConfigurations(userId),
-    await getActiveRuntimeMode(userId),
-  );
+  const activeMode = await getActiveRuntimeMode(userId);
+  const runtime = selectRuntime(await listProviderConfigurations(userId), activeMode);
   if (!runtime.ready || !runtime.row) {
     throw new InterviewError(
       "provider_route_missing",
@@ -245,6 +243,8 @@ async function selectRouteSnapshot(
       baseUrl,
       modelId: row.capabilities[capability]?.modelId ?? "",
     },
+    // Keep the runtime the account actually selected: a mixed row must not
+    // turn a custom-mode interview into a realtime one.
     runtimeMode: runtime.mode === "realtime" ? "preset_realtime" : "custom",
   };
 }
@@ -645,6 +645,7 @@ export function createRoomStore(): RoomStore {
           : [],
         questionCount: session.questionCount,
         evaluationMode: session.evaluationMode,
+        runtimeMode: session.runtimeMode,
         status: session.status,
       };
     },
@@ -754,6 +755,16 @@ export function createRoomStore(): RoomStore {
     async appendInterviewerWithNewUnit(sessionId, contentText) {
       return db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT session_id FROM interview_session WHERE session_id = ${sessionId}::uuid FOR UPDATE`;
+        // Re-check status under the same row lock as appendRealtimeMessage: a
+        // completion that committed while the answer was generated must not
+        // add a primary question or open a unit on a finished interview.
+        const session = await tx.interviewSession.findUnique({
+          where: { sessionId },
+          select: { status: true },
+        });
+        if (session?.status !== "active") {
+          throw new InterviewError("invalid_state", "This interview is not accepting turns.");
+        }
         await tx.interviewAssessmentUnit.updateMany({
           where: { sessionId, status: "open" },
           data: { status: "closed", closedAt: new Date() },

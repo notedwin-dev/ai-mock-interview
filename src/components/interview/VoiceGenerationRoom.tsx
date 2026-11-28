@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, PhoneOff, RotateCcw } from "lucide-react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { GenerationConfirmation, type ConfirmableConfig } from "@/components/interview/GenerationConfirmation";
 import { VoiceRoomPanels } from "@/components/interview/VoiceRoomPanels";
-import { setBrowserMicEnabled } from "@/lib/interview/livekit-mic";
 import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
+import { applyLatestMuteIntent } from "@/lib/interview/mute-intent";
 
 /**
  * Voice-driven interview generation (FR-SETUP-006). The same two-panel shape
@@ -16,9 +16,16 @@ import { CAPTION_TOPIC } from "@/lib/interview/generation-contract.mjs";
  */
 type Status = "starting" | "connecting" | "connected" | "reconnecting" | "completed" | "error";
 
-// One generation per page load, including Strict Mode's double effect. Reset
-// shortly after a real unmount so revisiting the page starts a fresh session.
-let generationStartedThisLoad = false;
+/** MDN: MediaStreamTrack.enabled is the real mute switch for captured audio. */
+type LocalMicPublication = { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } };
+
+function setBrowserMicEnabled(room: Room | null, enabled: boolean) {
+  const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone) as
+    | LocalMicPublication
+    | undefined;
+  const track = publication?.audioTrack?.mediaStreamTrack;
+  if (track) track.enabled = enabled;
+}
 
 interface GenerationConfig {
   jobRole: string;
@@ -42,6 +49,7 @@ export function VoiceGenerationRoom() {
   const router = useRouter();
   const roomRef = useRef<Room | null>(null);
   const audioRef = useRef<HTMLDivElement | null>(null);
+  const startedAtRef = useRef(0);
   const agentPresentRef = useRef(false);
   const [status, setStatus] = useState<Status>("starting");
   const [generationId, setGenerationId] = useState<string | null>(null);
@@ -53,18 +61,31 @@ export function VoiceGenerationRoom() {
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [liveCaption, setLiveCaption] = useState<{ speaker: "agent" | "candidate"; text: string } | null>(null);
+  // The planner's latest spoken line, kept separately from persisted
+  // candidate captions so Repeat works before any answer has been stored.
+  const [lastPlannerCaption, setLastPlannerCaption] = useState<string | null>(null);
   const [agentPresent, setAgentPresent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /** Close the voice call once the agent's closing TTS has finished. */
+  const finishGeneration = useCallback(() => {
+    void roomRef.current?.disconnect();
+    setCallFinished(true);
+  }, []);
+
   useEffect(() => {
-    if (generationStartedThisLoad) return;
-    generationStartedThisLoad = true;
-    const active = true;
+    // Each effect setup owns its startup. Strict Mode's setup-cleanup-setup
+    // replays it, and cleanup invalidates this flag so work started by a dead
+    // setup can never attach a room to the live component. Request
+    // deduplication lives server-side, not in a module-level gate.
+    let active = true;
     roomRef.current = null;
+    startedAtRef.current = Date.now();
 
     async function start() {
       try {
         const response = await fetch("/api/v1/interviews/generation", { method: "POST" });
+        if (!active) return;
         const body = (await response.json().catch(() => null)) as
           | { id?: string; url?: string; token?: string; error?: { message?: string } }
           | null;
@@ -131,8 +152,13 @@ export function VoiceGenerationRoom() {
               finishGeneration();
               return;
             }
-            if (parsed.text && (parsed.speaker === "agent" || parsed.speaker === "candidate")) {
+            if (
+              typeof parsed.text === "string" &&
+              parsed.text.length > 0 &&
+              (parsed.speaker === "agent" || parsed.speaker === "candidate")
+            ) {
               setLiveCaption({ speaker: parsed.speaker, text: parsed.text });
+              if (parsed.speaker === "agent") setLastPlannerCaption(parsed.text);
             }
           } catch {
             // Ignore malformed data messages; they never affect the call.
@@ -148,38 +174,62 @@ export function VoiceGenerationRoom() {
           setStatus("connecting");
         }
         await room.connect(body.url, body.token);
-        try {
-          await room.localParticipant.setMicrophoneEnabled(true);
-        } catch {
-          if (active) {
-            mutedRef.current = true;
-            setMuted(true);
-            setError("Microphone unavailable — the planner cannot hear you.");
-          }
+        // Cleanup may have run while the connection was being negotiated; a
+        // cancelled startup must not leave this room connected or publishing.
+        if (!active) {
+          void room.disconnect();
+          return;
+        }
+        // Participants already in the room never emit ParticipantConnected.
+        const earlyParticipant = [...room.remoteParticipants.values()].some(
+          (participant) => participant.identity !== room.localParticipant.identity,
+        );
+        if (earlyParticipant) {
+          agentPresentRef.current = true;
+          if (active) setAgentPresent(true);
+        }
+        // Browser mute is applied before any publication exists; the helper
+        // then re-reads the intent after each async boundary, so a Mute click
+        // while publication is pending cannot leave audio flowing.
+        setBrowserMicEnabled(room, !mutedRef.current);
+        const published = await applyLatestMuteIntent(
+          room.localParticipant,
+          () => mutedRef.current,
+        );
+        if (!active) {
+          void room.disconnect();
+          return;
+        }
+        if (!published && active) {
+          mutedRef.current = true;
+          setMuted(true);
+          setError("Microphone unavailable — the planner cannot hear you.");
         }
         setBrowserMicEnabled(room, !mutedRef.current);
-        if (active) setStatus("connected");
+        // Polling may already have completed the generation while startup was
+        // awaiting the room; never regress that terminal status.
+        if (active) setStatus((current) => (current === "completed" ? current : "connected"));
       } catch {
         if (active) {
           setError("The voice generation room could not be reached.");
-          setStatus("error");
+          setStatus((current) => (current === "completed" ? current : "error"));
         }
       }
     }
     queueMicrotask(() => void start());
     return () => {
+      active = false;
       void roomRef.current?.disconnect();
       roomRef.current = null;
-      // Strict Mode's immediate remount happens well within 250ms; a genuine
-      // navigation then clears the guard for the next planning session.
-      setTimeout(() => { generationStartedThisLoad = false; }, 250);
     };
-  }, []);
+  }, [finishGeneration]);
 
   useEffect(() => {
     if (!generationId) return;
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     async function poll() {
+      let finished = false;
       try {
         const response = await fetch(
           `/api/v1/interviews/generation/${encodeURIComponent(generationId!)}`,
@@ -195,6 +245,7 @@ export function VoiceGenerationRoom() {
         // candidate can leave manually at any time.
         if (data.status === "completed" && data.invitationPath && !finishedRef.current) {
           finishedRef.current = true;
+          finished = true;
           setStatus("completed");
           // Do NOT disconnect yet: the worker posts this status BEFORE it
           // speaks the closing line. Wait for the agent's done caption (or a
@@ -203,15 +254,18 @@ export function VoiceGenerationRoom() {
         }
       } catch {
         // Transient poll failure: the next tick retries.
+      } finally {
+        // Chain the next poll only after this one settles: no overlapping
+        // requests, and no polling once the generation is completed.
+        if (active && !finished) timer = setTimeout(() => void poll(), 2000);
       }
     }
     void poll();
-    const timer = setInterval(() => void poll(), 2000);
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer !== null) clearTimeout(timer);
     };
-  }, [generationId, router]);
+  }, [generationId, router, finishGeneration]);
 
   async function toggleMute() {
     const participant = roomRef.current?.localParticipant;
@@ -245,14 +299,15 @@ export function VoiceGenerationRoom() {
     if (!response.ok || !body?.invitationPath || !body?.sessionId) {
       throw new Error(body?.error?.message ?? "Could not confirm the interview.");
     }
-    generationStartedThisLoad = false;
     // Confirming only applies the details. The decision happens on its own
     // page, not embedded in the voice room.
     router.push(`/dashboard/interview/${body.sessionId}/ready`);
   }
 
   function repeatLast() {
-    const text = generation?.caption?.text;
+    // Prefer the planner's latest spoken line; persisted captions may only
+    // contain candidate answers or lag behind the live data channel.
+    const text = lastPlannerCaption ?? generation?.caption?.text;
     if (!text || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.cancel();
@@ -262,12 +317,6 @@ export function VoiceGenerationRoom() {
   function leave() {
     void roomRef.current?.disconnect();
     router.push("/dashboard");
-  }
-
-  /** Close the voice call once the agent's closing TTS has finished. */
-  function finishGeneration() {
-    void roomRef.current?.disconnect();
-    setCallFinished(true);
   }
 
   const caption = liveCaption?.text ?? generation?.caption?.text ??

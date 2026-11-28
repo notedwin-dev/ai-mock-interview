@@ -20,14 +20,6 @@ export async function POST(
     if (!interview || (interview.status !== "scheduled" && interview.status !== "active")) {
       return jsonError(404, "invitation_not_found", "This interview link is not available.");
     }
-    // Joining is the moment a scheduled interview really starts. The LiveKit
-    // room_finished webhook remains authoritative for completion; activating
-    // here makes the room's End control usable immediately and keeps the
-    // session human-state truthful even before any webhook is configured.
-    if (interview.status === "scheduled") {
-      await store.activate(interview.sessionId);
-    }
-
     let config;
     try {
       config = getLiveKitConfig();
@@ -44,6 +36,19 @@ export async function POST(
       },
       { apiKey: config.apiKey, apiSecret: config.apiSecret },
     );
+    // Activate only once a join can actually be delivered: a misconfiguration
+    // or minting failure must leave a scheduled interview scheduled. This still
+    // runs before dispatch and the response, so a successful join enables End
+    // immediately (the room_finished webhook remains authoritative for finish).
+    if (interview.status === "scheduled") {
+      const activation = await store.activate(interview.sessionId);
+      // A concurrent finish may have claimed the session while the credential
+      // was minted. Do not dispatch an agent or hand out a token for a room
+      // that is no longer joinable.
+      if (activation === "rejected") {
+        return jsonError(404, "invitation_not_found", "This interview link is not available.");
+      }
+    }
     // The agent dispatch is best-effort: a worker outage must not prevent the
     // candidate from joining their room.
     try {

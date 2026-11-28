@@ -32,6 +32,7 @@ describe("POST .../realtime/token", () => {
     mocks.context.mockResolvedValue({
       sessionId: "s1", userId: "owner-1", status: "scheduled",
       jobRole: "Backend Engineer", jobDescription: "Design APIs", evaluationMode: "balanced",
+      techStack: [], experienceLevel: null, runtimeMode: "custom",
     });
     mocks.resolveForOutboundCall.mockResolvedValue(resolvedRoute);
     mocks.createRealtimeToken.mockResolvedValue({ token: "auth_secret", url: "wss://live.example" });
