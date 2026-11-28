@@ -141,7 +141,10 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
   it("mints a client secret from the documented endpoint with the xi-api-key header", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = mockFetch(
-      jsonResponse(200, { client_secret: "el_short_lived_secret" }),
+      jsonResponse(200, {
+        value: "el_short_lived_secret",
+        expires_at: 1_700_000_000,
+      }),
       calls,
     );
 
@@ -154,7 +157,7 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(calls[0]?.url).toBe(
-      `${ELEVENLABS_REALTIME_API_BASE}/v1/convai/conversation/client-secret`,
+      `${ELEVENLABS_REALTIME_API_BASE}/v1/convai/realtime/client_secrets`,
     );
     const init = calls[0]?.init as {
       method: string;
@@ -164,37 +167,45 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
     expect(init.method).toBe("POST");
     expect(init.headers["xi-api-key"]).toBe("sk_elevenlabs_secret_key");
     expect(JSON.parse(init.body)).toMatchObject({
-      model_id: "eleven_realtime_v1_mini",
+      session: expect.objectContaining({
+        type: "realtime",
+        model: "eleven_realtime_v1_mini",
+        output_modalities: ["audio"],
+      }),
+      expires_after: { seconds: 600 },
     });
     // Browser-facing URL is the fixed Realtime WebSocket, never the REST mint URL.
     expect(result.url).toBe("wss://api.elevenlabs.io/v1/convai/realtime");
   });
 
-  it("derives expiresAt from the injected clock and the 600s secret TTL", async () => {
+  it("uses the provider expires_at when supplied", async () => {
     const now = vi.fn(() => 1_000_000_000_000);
-    const fetchImpl = mockFetch(jsonResponse(200, { client_secret: "s" }), []);
+    const fetchImpl = mockFetch(
+      jsonResponse(200, { value: "s", expires_at: 1_700_000_000 }),
+      [],
+    );
     const result = await createRealtimeToken(elevenRoute, { fetchImpl, now });
-    expect(result.expiresAt).toBe(1_000_000_000_000 + 600_000);
+    expect(result.expiresAt).toBe(1_700_000_000 * 1000);
   });
 
   it("sends the stored model (never a substituted one) and the exact header name", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
-    const fetchImpl = mockFetch(jsonResponse(200, { client_secret: "s" }), calls);
+    const fetchImpl = mockFetch(jsonResponse(200, { value: "s" }), calls);
     await createRealtimeToken(
       { ...elevenRoute, modelId: "eleven_realtime_v1_mini" },
       { fetchImpl },
     );
     const body = JSON.parse(
       (calls[0]?.init as { body: string }).body,
-    ) as { model_id: string };
-    expect(body.model_id).toBe(ELEVENLABS_REALTIME_MODEL_ID);
+    ) as { session: { model: string } };
+    expect(body.session.model).toBe(ELEVENLABS_REALTIME_MODEL_ID);
     const headers = (calls[0]?.init as { headers: Record<string, string> }).headers;
     expect(Object.keys(headers)).toContain("xi-api-key");
     expect(Object.keys(headers)).not.toContain("x-goog-api-key");
   });
 
   it("never leaks the stored key in the result or in any typed error", async () => {
-    const fetchImpl = mockFetch(jsonResponse(200, { client_secret: "el_ok" }), []);
+    const fetchImpl = mockFetch(jsonResponse(200, { value: "el_ok" }), []);
     const result = await createRealtimeToken(elevenRoute, { fetchImpl });
     expect(JSON.stringify(result)).not.toContain("sk_elevenlabs_secret_key");
 
@@ -254,8 +265,8 @@ describe("createRealtimeToken — elevenlabs (OpenAI-compatible Realtime API)", 
     expect(String((error as Error).message)).toContain("[redacted]");
   });
 
-  it("fails closed on an empty or missing client_secret", async () => {
-    for (const body of [{ client_secret: "" }, {}]) {
+  it("fails closed on an empty or missing client secret value", async () => {
+    for (const body of [{ value: "" }, {}]) {
       const fetchImpl = mockFetch(jsonResponse(200, body), []);
       const error = await createRealtimeToken(elevenRoute, { fetchImpl }).catch(
         (e: unknown) => e,

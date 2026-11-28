@@ -189,9 +189,9 @@ describe("probeProviderConfiguration (FR-PROVIDER-006)", () => {
   it("validates ElevenLabs realtime via the native client-secret wire (no injected token)", async () => {
     const fetchImpl = jsonFetch([
       {
-        match: /api\.elevenlabs\.io\/v1\/convai\/conversation\/client-secret/,
+        match: /api\.elevenlabs\.io\/v1\/convai\/realtime\/client_secrets/,
         status: 200,
-        body: { client_secret: "sk_short_lived_secret" },
+        body: { value: "sk_short_lived_secret", expires_at: 1_700_000_000 },
       },
     ]);
     const result = await runProbe(
