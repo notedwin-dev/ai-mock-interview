@@ -173,11 +173,13 @@ export function VoiceGenerationRoom() {
           setError("Microphone unavailable — the planner cannot hear you.");
         }
         setBrowserMicEnabled(room, !mutedRef.current);
-        if (active) setStatus("connected");
+        // Polling may already have completed the generation while startup was
+        // awaiting the room; never regress that terminal status.
+        if (active) setStatus((current) => (current === "completed" ? current : "connected"));
       } catch {
         if (active) {
           setError("The voice generation room could not be reached.");
-          setStatus("error");
+          setStatus((current) => (current === "completed" ? current : "error"));
         }
       }
     }

@@ -51,6 +51,42 @@ describe("applyLatestMuteIntent", () => {
     expect(room.isMicrophoneEnabled).toBe(true);
   });
 
+  it("handles overlapping Unmute and Mute calls with deferred setters", async () => {
+    let muted = false;
+    const pending: Array<{ enabled: boolean; settle: () => void }> = [];
+    const room = {
+      isMicrophoneEnabled: false,
+      setMicrophoneEnabled(enabled: boolean) {
+        return new Promise<unknown>((resolve) => {
+          pending.push({
+            enabled,
+            settle: () => {
+              room.isMicrophoneEnabled = enabled;
+              resolve(undefined);
+            },
+          });
+        });
+      },
+    };
+
+    // Start Unmute; its setter is still pending when Mute is requested.
+    const unmute = applyLatestMuteIntent(room, () => muted);
+    expect(pending.map((call) => call.enabled)).toEqual([true]);
+    muted = true;
+    const mute = applyLatestMuteIntent(room, () => muted);
+    // Mute needs no write: the track is not published yet.
+    expect(await mute).toBe(true);
+
+    // Completing the older Unmute publication must not leave audio flowing.
+    pending.shift()!.settle();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(pending.map((call) => call.enabled)).toEqual([false]);
+    pending.shift()!.settle();
+
+    expect(await unmute).toBe(true);
+    expect(room.isMicrophoneEnabled).toBe(false);
+  });
+
   it("reports an unavailable microphone without throwing", async () => {
     const room = {
       isMicrophoneEnabled: false,
